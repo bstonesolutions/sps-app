@@ -1,10 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  buildMaintenancePaymentLedgerRows,
+  buildMaintenanceCalendarRows,
   maintenancePaymentDisplayStatus,
   moneyToCents,
 } from "./maintenancePaymentLedger.js";
+import {
+  filterMaintenanceCalendarRows,
+  MAINTENANCE_CALENDAR_SERVICE_OPTIONS,
+  MAINTENANCE_CALENDAR_PAYMENT_OPTIONS,
+} from "./maintenanceCalendarView.js";
 
 const MONTHS = [
   ["01", "Jan", "January"], ["02", "Feb", "February"], ["03", "Mar", "March"],
@@ -94,14 +99,6 @@ const visitEvidenceLabel = (cell, compact = false) => {
   return compact
     ? `${completedCount}/${visitCount} SPS visits`
     : `${completedCount} of ${visitCount} SPS visits complete`;
-};
-const statusMatchesView = (status, view) => {
-  if (view === "all") return true;
-  if (view === "covered") return ["paid", "prepaid", "waived"].includes(status);
-  if (view === "missing") return status === "missing";
-  if (view === "review") return ["review", "partial", "refunded"].includes(status);
-  if (view === "open") return status === "due";
-  return ["missing", "review", "partial", "refunded", "due"].includes(status);
 };
 const formatReceiptTimestamp = (value) => {
   const date = new Date(value || "");
@@ -376,10 +373,15 @@ export default function MaintenanceCoverageWorkspace({
   const currentYear = new Date().getFullYear();
   const [year, setYear] = useState(currentYear);
   const [search, setSearch] = useState("");
-  const [view, setView] = useState("all");
+  const [serviceType, setServiceType] = useState("all");
+  const [paymentStatus, setPaymentStatus] = useState("all");
+  const [filterMonth, setFilterMonth] = useState("");
+  const [sortKey, setSortKey] = useState("name");
+  const [sortDirection, setSortDirection] = useState("asc");
   const [fullYear, setFullYear] = useState(false);
   const [selection, setSelection] = useState(null);
   const [receiptExpanded, setReceiptExpanded] = useState(false);
+  const calendarRef = useRef(null);
   const compactControls = !!(vp.isPhone || vp.isTablet);
   const historyRange = useMemo(() => {
     const evidenceYears = [...(invoices || []), ...(schedule || [])].map((entry) => {
@@ -393,28 +395,58 @@ export default function MaintenanceCoverageWorkspace({
       toYear: Math.min(currentYear + 1, Math.max(currentYear, year)),
     };
   }, [currentYear, invoices, schedule, year]);
-  const monthMeta = fullYear ? MONTHS : MONTHS.slice(3);
+  const monthMeta = useMemo(() => fullYear ? MONTHS : MONTHS.slice(3), [fullYear]);
+  const monthKeys = useMemo(() => monthMeta.map(([number]) => `${year}-${number}`), [monthMeta, year]);
   const visibleRangeLabel = fullYear ? "January to December" : "April to December";
-  const rows = useMemo(() => buildMaintenancePaymentLedgerRows({
+  useEffect(() => {
+    const region = calendarRef.current;
+    if (!region || !compactControls) return;
+    const heading = filterMonth && region.querySelector(`[data-calendar-month="${filterMonth}"]`);
+    const clientHeading = region.querySelector("thead th");
+    region.scrollLeft = heading && clientHeading ? Math.max(0, heading.offsetLeft - clientHeading.offsetWidth) : 0;
+  }, [filterMonth, monthMeta, compactControls]);
+  const rows = useMemo(() => buildMaintenanceCalendarRows({
     clients, invoices, payments, ledger, schedule, year,
   }), [clients, invoices, payments, ledger, schedule, year]);
-  const visibleRows = useMemo(() => rows.filter((row) => {
-    const matches = !search.trim() || row.clientName.toLowerCase().includes(search.trim().toLowerCase());
-    if (!matches) return false;
-    const statuses = monthMeta.map(([number]) => displayStatusForMonth(row.byMonth[`${year}-${number}`], `${year}-${number}`));
-    return statuses.some((status) => statusMatchesView(status, view));
-  }), [rows, search, view, monthMeta, year]);
-  const counts = useMemo(() => {
-    const result = { missing: 0, review: 0, open: 0, covered: 0, attention: 0 };
-    for (const row of rows) for (const [number] of monthMeta) {
-      const status = displayStatusForMonth(row.byMonth[`${year}-${number}`], `${year}-${number}`);
-      if (status === "missing") { result.missing += 1; result.attention += 1; }
-      else if (["review", "partial", "refunded"].includes(status)) { result.review += 1; result.attention += 1; }
-      else if (status === "due") { result.open += 1; result.attention += 1; }
-      else if (["paid", "prepaid", "waived"].includes(status)) result.covered += 1;
-    }
-    return result;
-  }, [rows, monthMeta, year]);
+  const assignedClientIds = useMemo(() => new Set(rows.map((row) => String(row.clientId))), [rows]);
+  const effectiveSortKey = !canSeeAmounts && sortKey === "price" ? "name" : sortKey;
+  const visibleRows = useMemo(() => filterMaintenanceCalendarRows(rows, {
+    search, serviceType, paymentStatus, monthKey: filterMonth, monthKeys,
+    sortKey: effectiveSortKey, sortDirection,
+  }), [rows, search, serviceType, paymentStatus, filterMonth, monthKeys, effectiveSortKey, sortDirection]);
+  const filtersActive = !!(search || serviceType !== "all" || paymentStatus !== "all" || filterMonth);
+  const resetFilters = () => {
+    setSearch(""); setServiceType("all"); setPaymentStatus("all"); setFilterMonth("");
+    setSelection(null);
+  };
+  const chooseMonth = (monthKey) => {
+    setFilterMonth(monthKey);
+    setSelection(null);
+    if (/^\d{4}-\d{2}$/.test(sortKey)) setSortKey(monthKey || "name");
+  };
+  const sortColumn = (key) => {
+    if (key === "price" && !canSeeAmounts) return;
+    setSortDirection(effectiveSortKey === key && sortDirection === "asc" ? "desc" : "asc");
+    setSortKey(key);
+    if (/^\d{4}-\d{2}$/.test(key)) setFilterMonth(key);
+  };
+  const sortOptions = [
+    ["name:asc", "Client: A to Z"], ["name:desc", "Client: Z to A"],
+    ...(canSeeAmounts ? [["price:asc", "Price: low to high"], ["price:desc", "Price: high to low"]] : []),
+    ["prepaid:desc", "Prepaid: most months"], ["prepaid:asc", "Prepaid: fewest months"],
+    ...monthMeta.flatMap(([number, , long]) => [[`${year}-${number}:asc`, `${long}: unpaid first`], [`${year}-${number}:desc`, `${long}: covered first`]]),
+  ];
+  const fieldStyle = { width: "100%", height: 40, minWidth: 0, boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 7, background: T.surface, color: T.text, padding: "0 10px", fontFamily: "inherit", fontSize: 12.5 };
+  const activeFieldStyle = (active) => ({ ...fieldStyle, ...(active ? { borderColor: hexA(T.primary, .45), background: hexA(T.primary, .035), color: T.primary, fontWeight: 700 } : {}) });
+  const filterSummary = [serviceType !== "all" ? MAINTENANCE_CALENDAR_SERVICE_OPTIONS.find(({ value }) => value === serviceType)?.label : "", filterMonth ? `${MONTHS.find(([number]) => filterMonth.endsWith(`-${number}`))?.[2]} ${year}` : "", paymentStatus !== "all" ? MAINTENANCE_CALENDAR_PAYMENT_OPTIONS.find(({ value }) => value === paymentStatus)?.label : ""].filter(Boolean).join(" · ");
+  const filterLabelStyle = { display: "grid", gap: 6, minWidth: 0, color: T.textMuted, fontSize: 11.5, fontWeight: 650 };
+  const sortHeader = (key, label, sticky = false) => (
+    <th key={key} scope="col" data-calendar-month={key.includes("-") ? key : undefined} aria-sort={effectiveSortKey === key ? sortDirection === "asc" ? "ascending" : "descending" : "none"} style={{ ...(sticky ? { position: "sticky", left: 0, zIndex: 4, borderRight: `1px solid ${T.border}` } : {}), background: filterMonth === key ? hexA(T.primary, .09) : T.surfaceAlt, padding: 0, textAlign: sticky ? "left" : "center", borderBottom: `2px solid ${filterMonth === key ? T.primary : T.text}` }}>
+      <button type="button" disabled={key === "price" && !canSeeAmounts} onClick={() => sortColumn(key)} aria-label={`Sort by ${label}`} title={key.includes("-") ? `Filter ${label} and sort unpaid or covered first` : `Sort by ${label}`} style={{ width: "100%", minHeight: 44, display: "inline-flex", alignItems: "center", justifyContent: sticky ? "flex-start" : "center", gap: 5, border: "none", background: "transparent", padding: sticky ? "10px 12px" : "10px 5px", color: effectiveSortKey === key ? T.primary : T.text, fontFamily: "inherit", fontSize: 11.5, fontWeight: 750, cursor: key === "price" && !canSeeAmounts ? "default" : "pointer" }}>
+        {label}<span aria-hidden="true" style={{ opacity: effectiveSortKey === key ? 1 : .35 }}>{effectiveSortKey === key ? sortDirection === "asc" ? "↑" : "↓" : "↕"}</span>
+      </button>
+    </th>
+  );
   const receiptEvidence = useMemo(() => {
     if (!reconciliationReceipt?.counts) return null;
     const receiptCounts = reconciliationReceipt.counts;
@@ -445,18 +477,22 @@ export default function MaintenanceCoverageWorkspace({
   const changeYear = (nextYear) => {
     setSelection(null);
     setYear(nextYear);
+    if (filterMonth) setFilterMonth(`${nextYear}-${filterMonth.slice(-2)}`);
+    if (/^\d{4}-\d{2}$/.test(sortKey)) setSortKey(`${nextYear}-${sortKey.slice(-2)}`);
   };
   const toggleYearRange = () => {
     setSelection(null);
+    if (fullYear && filterMonth && Number(filterMonth.slice(-2)) < 4) setFilterMonth("");
+    if (fullYear && /^\d{4}-0[1-3]$/.test(sortKey)) setSortKey("name");
     setFullYear((value) => !value);
   };
   const openReceiptDetail = (detail) => {
     const monthKey = (Array.isArray(detail?.months) ? detail.months[0] : "") || detail?.invoiceMonth || "";
     const monthMatch = String(monthKey).match(/^(\d{4})-(\d{2})$/);
-    if (!detail?.clientId || !monthMatch) return;
+    if (!detail?.clientId || !assignedClientIds.has(String(detail.clientId)) || !monthMatch) return;
     const targetYear = Number(monthMatch[1]);
     if (Number(monthMatch[2]) < 4) setFullYear(true);
-    setYear(targetYear);
+    changeYear(targetYear);
     setSelection({ clientId: detail.clientId, monthKey });
   };
   return (
@@ -465,7 +501,7 @@ export default function MaintenanceCoverageWorkspace({
         <div>
           <div style={{ color: T.primary, fontSize: 11, fontWeight: 900, letterSpacing: ".09em", textTransform: "uppercase" }}>Maintenance accounting</div>
           <h3 style={{ margin: "5px 0 0", fontSize: vp.isPhone ? 28 : 34, lineHeight: 1, letterSpacing: "-.045em" }}>Payment calendar</h3>
-          <div style={{ marginTop: 9, color: T.textMuted, fontSize: 13, lineHeight: 1.4 }}>QuickBooks payments, prepayments, and expected service shown together before another invoice is created.</div>
+          <div style={{ marginTop: 9, color: T.textMuted, fontSize: 13, lineHeight: 1.4 }}>Assigned pool, pond, and leaf maintenance. Payments and prepayments by month.</div>
           <div role="status" data-maintenance-refresh-status style={{ marginTop: 7, fontSize: 11.5, color: T.textMuted }}>{autoRefreshConnected ? loading || saving ? "Updating from QuickBooks…" : `${lastCheckedAt ? `QuickBooks checked ${new Date(lastCheckedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}. ` : ""}Updates automatically while this calendar is open.` : "Connect QuickBooks to keep payment status up to date."}</div>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: compactControls ? "1fr 1fr" : "auto auto auto auto", alignItems: "center", justifyContent: compactControls ? "stretch" : "end", gap: 8, width: compactControls ? "100%" : "auto" }}>
@@ -526,7 +562,7 @@ export default function MaintenanceCoverageWorkspace({
                   {receiptEvidence.details.map((detail, index) => {
                     const invoiceIdentity = detail.invoiceNumber ? `Invoice #${detail.invoiceNumber}` : detail.qbInvoiceId ? `QuickBooks ${detail.qbInvoiceId}` : detail.invoiceId ? `SPS ${detail.invoiceId}` : "Invoice identity unavailable";
                     const targetMonth = (Array.isArray(detail.months) ? detail.months[0] : "") || detail.invoiceMonth || "";
-                    const canOpenMonth = !!(detail.clientId && /^\d{4}-\d{2}$/.test(String(targetMonth)));
+                    const canOpenMonth = !!(assignedClientIds.has(String(detail.clientId)) && /^\d{4}-\d{2}$/.test(String(targetMonth)));
                     const content = (
                       <>
                         <span style={{ minWidth: 0 }}>
@@ -553,45 +589,65 @@ export default function MaintenanceCoverageWorkspace({
         </div>
       ) : null}
 
-      <div style={{ display: "grid", gridTemplateColumns: compactControls ? "1fr" : "1fr auto", gap: 10, alignItems: "center", padding: "13px 0", borderBottom: `1px solid ${T.border}` }}>
-        <div style={{ gridColumn: "1 / -1", color: T.textMuted, fontSize: 11.5 }}>
-          Showing {visibleRangeLabel} {year}. Counts below represent client months.
-        </div>
-        <div style={{ display: "flex", gap: vp.isPhone ? 14 : 24, alignItems: "baseline", flexWrap: "wrap" }}>
-          {[
-            ["all", rows.length, "all clients"],
-            ["attention", counts.attention, "needs attention"],
-            ["missing", counts.missing, "no matching payment"],
-            ["review", counts.review, "unallocated history"],
-            ["open", counts.open, "invoice open"],
-            ["covered", counts.covered, "covered"],
-          ].map(([value, count, label]) => (
-            <button key={value} type="button" onClick={() => setView(value)} aria-pressed={view === value} style={{ border: "none", borderBottom: `2px solid ${view === value ? T.primary : "transparent"}`, background: "transparent", color: T.text, padding: "3px 0 5px", fontFamily: "inherit", cursor: "pointer" }}>
-              <strong style={{ fontSize: 16, color: view === value ? T.primary : T.text }}>{count}</strong>
-              <span style={{ marginLeft: 5, fontSize: 11.5, color: T.textMuted }}>{label}</span>
-            </button>
-          ))}
-        </div>
-        <div style={{ justifySelf: compactControls ? "start" : "end", color: T.textMuted, fontSize: 11.5 }}>Future months stay visible without counting as missing.</div>
+      <div aria-label="Calendar filters" style={{ padding: "17px 0 14px", borderBottom: `1px solid ${T.border}`, display: "grid", gridTemplateColumns: vp.isPhone ? "1fr 1fr" : compactControls ? "1fr 1fr 1fr" : "minmax(200px, 1.5fr) repeat(3, minmax(140px, 1fr))", alignItems: "end", gap: 12 }}>
+        <label style={{ ...filterLabelStyle, gridColumn: vp.isPhone || compactControls ? "1 / -1" : "auto" }}>
+          Client name
+          <span style={{ position: "relative" }}>
+            <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", color: T.textMuted }}><Icon name="search" size={15}/></span>
+            <input type="search" aria-label="Filter maintenance clients" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find a maintenance client" style={{ ...fieldStyle, paddingLeft: 33 }} />
+          </span>
+        </label>
+        <label style={filterLabelStyle}>Service
+          <select aria-label="Maintenance service" value={serviceType} onChange={(event) => { setServiceType(event.target.value); setSelection(null); }} style={activeFieldStyle(serviceType !== "all")}>
+            {MAINTENANCE_CALENDAR_SERVICE_OPTIONS.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
+          </select>
+        </label>
+        <label style={filterLabelStyle}>Month
+          <select aria-label="Payment month" value={filterMonth} onChange={(event) => chooseMonth(event.target.value)} style={activeFieldStyle(!!filterMonth)}>
+            <option value="">All shown months</option>
+            {monthMeta.map(([number, , long]) => <option key={number} value={`${year}-${number}`}>{long}</option>)}
+          </select>
+        </label>
+        <label style={{ ...filterLabelStyle, gridColumn: vp.isPhone ? "1 / -1" : "auto" }}>Payment status
+          <select aria-label="Payment status" value={paymentStatus} onChange={(event) => { setPaymentStatus(event.target.value); setSelection(null); }} style={activeFieldStyle(paymentStatus !== "all")}>
+            {MAINTENANCE_CALENDAR_PAYMENT_OPTIONS.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
+          </select>
+        </label>
       </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "1fr", alignItems: "center", gap: 12, padding: "15px 0" }}>
-        <div style={{ position: "relative", width: compactControls ? "100%" : 360 }}>
-          <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", color: T.textMuted }}><Icon name="search" size={16}/></span>
-          <input type="search" aria-label="Filter maintenance clients" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Filter clients (optional)" style={{ width: "100%", height: 43, boxSizing: "border-box", padding: "0 12px 0 35px", border: `1px solid ${T.border}`, borderRadius: 7, background: T.surface, color: T.text, fontFamily: "inherit", fontSize: 13.5 }} />
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", padding: "12px 0" }}>
+        <div style={{ minWidth: 160 }}>
+          <div role="status" data-maintenance-filter-summary style={{ fontSize: 12, fontWeight: 700 }}>{filtersActive ? `${visibleRows.length} of ${rows.length} assigned clients` : `${rows.length} assigned maintenance clients`}{filterSummary ? <span style={{ color: T.primary, fontWeight: 650 }}> · {filterSummary}</span> : null}</div>
+          <div style={{ marginTop: 4, fontSize: 11, color: T.textMuted }}>Showing {visibleRangeLabel} {year}. {compactControls ? "Swipe across for more months." : "Click a column to sort."}</div>
         </div>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 11.5, color: T.textMuted }}><span>{visibleRows.length} of {rows.length} clients · Tap a month for payment and visit details.</span><span>{compactControls ? "Swipe across for more months" : "Client names stay visible as you scroll"}</span></div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", width: vp.isPhone ? "100%" : "auto" }}>
+          {filtersActive ? <button type="button" onClick={resetFilters} style={{ border: "none", background: "transparent", color: T.primary, fontFamily: "inherit", fontSize: 12, fontWeight: 750, padding: "8px 0", cursor: "pointer" }}>Clear filters</button> : null}
+          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: vp.isPhone ? 1 : "initial", color: T.textMuted, fontSize: 11.5 }}>Sort
+            <select aria-label="Sort maintenance clients" value={`${effectiveSortKey}:${sortDirection}`} onChange={(event) => {
+              const [key, direction] = event.target.value.split(":");
+              setSortKey(key); setSortDirection(direction);
+              if (/^\d{4}-\d{2}$/.test(key)) setFilterMonth(key);
+            }} style={{ ...fieldStyle, width: vp.isPhone ? "100%" : 196, height: 36 }}>
+              {sortOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+            </select>
+          </label>
+        </div>
       </div>
+      {paymentStatus !== "all" ? <div style={{ marginBottom: 12, fontSize: 11.5, color: T.textMuted }}>
+        {paymentStatus === "paid" ? "Paid includes prepaid coverage. Waived months are separate." : paymentStatus === "unpaid" ? "Unpaid includes open invoices, partial payments, refunds, and expected months with no payment. Future months stay visible without counting as missing." : "Only clients with a matching status in the selected month or shown period appear."}
+        {!filterMonth ? " Select one month to check that month's payments." : ""}
+      </div> : null}
 
       {error ? <div role="alert" style={{ padding: "10px 12px", borderLeft: `3px solid ${T.primary}`, background: hexA(T.primary, .06), color: T.primary, fontSize: 12.5, fontWeight: 750, marginBottom: 12 }}>{error}</div> : null}
 
-      <div role="region" aria-label="Maintenance payment calendar" tabIndex={0} style={{ overflow: "auto", maxHeight: "68vh", border: `1px solid ${T.border}`, background: T.surface }}>
+      <div ref={calendarRef} role="region" aria-label="Maintenance payment calendar" tabIndex={0} style={{ overflow: "auto", maxHeight: "68vh", border: `1px solid ${T.border}`, background: T.surface }}>
         <table data-maintenance-calendar-grid style={{ width: "100%", minWidth: 390 + monthMeta.length * 90, borderCollapse: "separate", borderSpacing: 0, tableLayout: "fixed" }}>
           <colgroup><col style={{ width: vp.isPhone ? 154 : 210 }} /><col style={{ width: 88 }} /><col style={{ width: 100 }} />{monthMeta.map(([number]) => <col key={number} style={{ width: 90 }} />)}</colgroup>
           <thead style={{ position: "sticky", top: 0, zIndex: 3 }}>
             <tr>
-              <th scope="col" style={{ position: "sticky", left: 0, zIndex: 4, background: T.surfaceAlt, textAlign: "left", padding: "12px", fontSize: 11, borderBottom: `2px solid ${T.text}`, borderRight: `1px solid ${T.border}` }}>Client</th>
-              {["Price", "Prepaid", ...monthMeta.map(([, short]) => short)].map((label) => <th key={label} scope="col" style={{ background: T.surfaceAlt, padding: "12px 6px", fontSize: 11, fontWeight: 800, textAlign: "center", borderBottom: `2px solid ${T.text}` }}>{label}</th>)}
+              {sortHeader("name", "Client", true)}
+              {sortHeader("price", "Price")}
+              {sortHeader("prepaid", "Prepaid")}
+              {monthMeta.map(([number, short]) => sortHeader(`${year}-${number}`, short))}
             </tr>
           </thead>
           <tbody>
@@ -599,9 +655,9 @@ export default function MaintenanceCoverageWorkspace({
               const prepaidMonths = monthMeta.filter(([number]) => row.byMonth[`${year}-${number}`]?.payment?.status === "prepaid");
               return (
                 <tr key={row.clientId}>
-                  <th scope="row" style={{ position: "sticky", left: 0, zIndex: 2, background: T.surface, textAlign: "left", padding: "10px 12px", fontSize: 13, fontWeight: 750, borderBottom: `1px solid ${T.border}`, borderRight: `1px solid ${T.border}`, overflowWrap: "anywhere" }}>{row.clientName}</th>
-                  <td style={{ padding: "8px", textAlign: "center", fontSize: 12, fontVariantNumeric: "tabular-nums", borderBottom: `1px solid ${T.border}` }}>{formatMoney(row.expectedMonthlyCents, !canSeeAmounts)}</td>
-                  <td style={{ padding: "8px", textAlign: "center", fontSize: 11.5, color: prepaidMonths.length ? T.text : T.textMuted, borderBottom: `1px solid ${T.border}` }} title={prepaidMonths.map(([, short]) => short).join(", ") || "No prepaid months recorded"}>{prepaidMonths.length ? <><strong>{prepaidMonths.length} months</strong><span style={{ display: "block", marginTop: 3, fontSize: 10 }}>{prepaidMonths.length === monthMeta.length ? "Full period" : "See months"}</span></> : "None recorded"}</td>
+                  <th scope="row" style={{ position: "sticky", left: 0, zIndex: 2, background: T.surface, textAlign: "left", padding: "10px 12px", fontSize: 13, fontWeight: 750, borderBottom: `1px solid ${T.border}`, borderRight: `1px solid ${T.border}`, overflowWrap: "anywhere" }}>{row.clientName}<span style={{ display: "block", marginTop: 4, color: T.textMuted, fontSize: 10.5, fontWeight: 500 }}>{(row.maintenanceTypes || []).map((type) => ({ pool: "Pool", pond: "Pond", leaf: "Leaf" }[type])).join(" · ")}</span></th>
+                  <td style={{ padding: "8px", textAlign: "center", fontSize: 12, fontVariantNumeric: "tabular-nums", borderBottom: `1px solid ${T.border}` }}>{!canSeeAmounts ? "Hidden" : row.maintenancePriceCents == null ? <span title="Complete the assigned service rates in this client's profile" style={{ color: T.textMuted }}>Not set</span> : formatMoney(row.maintenancePriceCents)}</td>
+                  <td style={{ padding: "8px", textAlign: "center", fontSize: 11.5, color: prepaidMonths.length ? T.text : T.textMuted, borderBottom: `1px solid ${T.border}` }} title={prepaidMonths.map(([, short]) => short).join(", ") || "No prepaid months recorded"}>{prepaidMonths.length ? <><strong>{prepaidMonths.length} / {monthMeta.length}</strong><span style={{ display: "block", marginTop: 3, fontSize: 10 }}>months prepaid</span></> : <span aria-label="No prepaid months">0</span>}</td>
                   {monthMeta.map(([number, , long]) => {
                     const monthKey = `${year}-${number}`;
                     return <td key={monthKey} style={{ padding: 0, borderBottom: `1px solid ${T.border}`, borderLeft: `1px solid ${T.border}` }}><CoverageCell cell={row.byMonth[monthKey]} monthKey={monthKey} monthLabel={`${long} ${year}`} clientName={row.clientName} selected={selection?.clientId === row.clientId && selection?.monthKey === monthKey} T={T} onClick={() => openCell(row, monthKey)} /></td>;
@@ -613,7 +669,7 @@ export default function MaintenanceCoverageWorkspace({
         </table>
       </div>
 
-      {!loading && visibleRows.length === 0 ? <div style={{ padding: "50px 12px", textAlign: "center", color: T.textMuted }}><div style={{ fontSize: 16, fontWeight: 800, color: T.text }}>No maintenance clients match this view</div><div style={{ marginTop: 6, fontSize: 12.5 }}>Try All clients or clear the search.</div></div> : null}
+      {!loading && visibleRows.length === 0 ? <div style={{ padding: "50px 12px", textAlign: "center", color: T.textMuted }}><div style={{ fontSize: 16, fontWeight: 800, color: T.text }}>No maintenance clients match this view</div><div style={{ marginTop: 6, fontSize: 12.5 }}>Change the service, month, or payment filters, or clear the search.</div></div> : null}
       {selection ? <DetailPanel selection={selection} rows={rows} invoices={invoices} clients={clients} year={year} hiddenAmounts={!canSeeAmounts} T={T} busy={saving} onClose={() => setSelection(null)} onAssign={onAssign} onClear={onClear} /> : null}
     </div>
   );

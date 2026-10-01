@@ -173,7 +173,7 @@ test("update endpoint returns review-required 409 before writing when QuickBooks
         qbId: "1964",
         qbBaseContentFingerprint: fingerprintQuickBooksInvoiceContent(synced),
         number: "1964",
-        lineItems: [{ description: "Maintenance", qty: "1", unitPrice: "100" }],
+        lineItems: [{ description: "Maintenance", serviceMonth: "2026-07", qty: "1", unitPrice: "100" }],
       },
     },
   };
@@ -263,6 +263,7 @@ test("update endpoint proceeds when the current QuickBooks content still matches
         dueDate: "2026-08-11",
         lineItems: [{
           description: "Updated maintenance",
+          serviceMonth: "2026-07",
           kind: "service",
           qty: "1",
           unitPrice: "125",
@@ -275,6 +276,6 @@ test("update endpoint proceeds when the current QuickBooks content still matches
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.success, true);
   assert.equal(updateBody.SyncToken, "7");
-  assert.equal(updateBody.Line[0].Description, "Updated maintenance");
+  assert.equal(updateBody.Line[0].Description, "Updated maintenance - July 2026");
   assert.equal(updateBody.Line[0].Amount, 125);
 });

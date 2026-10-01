@@ -25,6 +25,8 @@ import { completeEstimateWithInvoice, estimateTaxMigrationImpact, estimateToDraf
 import { findScheduledStopForEstimate, scheduleApprovedEstimate } from "./estimateScheduleLink";
 import { findInvoiceDeletionReferences, invoiceDeletionBlockedMessage } from "./invoiceDeletionGuard";
 import { applySafeBulkInvoiceEdits, invoiceSelectionForVisible, pruneInvoiceSelection, summarizeSelectedInvoices } from "./invoiceBulkActions";
+import { invoiceServiceDescriptionIssue, invoiceHasMaintenanceServiceLines, formatInvoiceServiceLineDescription } from "./invoiceServiceDescription";
+import { invoiceDescription, invoiceMatchesSearch, invoiceListDate, sortInvoiceList, INVOICE_LIST_SORT_OPTIONS } from "./invoiceListView";
 import { deliverSelectedInvoices } from "./invoiceBulkDelivery";
 import { assertInvoiceDeliveryCoverage, invoiceDeliveryIdentity, invoiceDeliveryLine } from "./invoiceDeliveryCoverage";
 import { deleteSelectedInvoiceDrafts, invoiceBulkDeleteEligibility, invoiceDeletionReviewMatches, partitionInvoiceBulkDeletion } from "./invoiceBulkDeletion";
@@ -18392,6 +18394,7 @@ function TeamManager({ team, setTeam, currentUserId, email, branding, catalog })
 // ─────────────────────────────────────────────
 function InvoiceRow({ iv, onClick, selected = false, selectionEnabled = false, onToggleSelected }) {
   const { T } = useApp();
+  const description = invoiceDescription(iv);
   const rawEff = effectiveStatus(iv);
   // Normalize — QB returns "Paid", SPS uses "Paid", both should display same
   const eff = rawEff;
@@ -18425,6 +18428,7 @@ function InvoiceRow({ iv, onClick, selected = false, selectionEnabled = false, o
       <div style={{ width: 3, alignSelf: "stretch", borderRadius: 3, background: invStatusColor(eff, T), flexShrink: 0, minHeight: 36 }} />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 14, fontWeight: 700, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", letterSpacing: "-0.01em" }}>{iv._client?.name || iv.clientName || "Client"}</div>
+        <div data-invoice-description title={description} style={{ marginTop: 4, fontSize: 12.5, lineHeight: 1.4, color: description ? T.text : T.textMuted, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", overflowWrap: "anywhere" }}>{description || "No description"}</div>
         <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2, display: "flex", gap: 8 }}>
           <span>#{iv.number}</span>
           <span style={{ opacity: 0.4 }}>·</span>
@@ -18783,6 +18787,37 @@ function InvoiceVisitPicker({ visits, invoices, currentInvoice, clientId, onAdd,
         </div>
       </div>
     </Modal>
+  );
+}
+
+function InvoiceServiceMonth({ invoice, onChange, T }) {
+  const fieldId = useId();
+  if (!invoiceHasMaintenanceServiceLines(invoice)) return null;
+  const issue = invoiceServiceDescriptionIssue(invoice);
+  const needsDefaultMonth = (invoice.lineItems || []).some(line => invoiceServiceDescriptionIssue({ ...invoice, serviceMonth: undefined, autoPeriod: undefined, lineItems: [line] })?.code === "maintenance-service-month-missing");
+  const showPicker = !invoice.autoPeriod && needsDefaultMonth;
+  const previews = [...new Set((invoice.lineItems || []).filter(line => invoiceHasMaintenanceServiceLines({ ...invoice, lineItems: [line] })).map(line => formatInvoiceServiceLineDescription(invoice, line)))];
+  const needsMonth = issue?.code === "maintenance-service-month-missing";
+  return (
+    <section data-invoice-service-month style={{ padding: "14px 0 14px 12px", borderLeft: `3px solid ${T.primary}`, borderTop: `1px solid ${T.border}`, borderBottom: `1px solid ${T.border}` }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 210px), 1fr))", gap: 14, alignItems: "center" }}>
+        {showPicker ? <label htmlFor={fieldId} style={{ display: "grid", gap: 6, fontSize: 12, fontWeight: 750, color: T.text }}>Service month
+          <input id={fieldId} aria-label="Service month" type="month" value={invoice.serviceMonth || ""} onChange={(event) => onChange(event.target.value)} style={{ width: "100%", minHeight: 42, boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 8, background: T.surface, color: T.text, padding: "8px 10px", fontFamily: "inherit", fontSize: 14 }} />
+        </label> : <div style={{ fontSize: 18, fontWeight: 750, color: T.text }}>Service period</div>}
+        <div data-invoice-service-preview>
+          <div style={{ marginBottom: 4, color: T.textMuted, fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".05em" }}>QuickBooks description</div>
+          {needsMonth ? <div role="status" style={{ fontSize: 13, color: T.primary, lineHeight: 1.45 }}>Choose the month this service was performed.</div>
+            : issue ? <div role="status" style={{ fontSize: 12, color: T.primary, lineHeight: 1.45 }}>{issue.message}</div>
+            : previews.map(description => <div key={description} style={{ color: T.text, fontSize: 14, fontWeight: 650, lineHeight: 1.45 }}>{description}</div>)}
+        </div>
+      </div>
+      {issue && !needsMonth && issue.lineIndexes.map(index => {
+        const line = invoice.lineItems[index];
+        const dates = [...new Set([line.serviceMonth, line.serviceDate, ...(Array.isArray(line.sourceVisitDates) ? line.sourceVisitDates : [])].filter(Boolean))];
+        return <div key={index} style={{ marginTop: 8, fontSize: 12, color: T.text }}>{line.desc || line.description || line.name}{dates.length ? ` · Service: ${dates.join(", ")}` : ""}</div>;
+      })}
+      <div style={{ marginTop: 8, fontSize: 11.5, lineHeight: 1.45, color: T.textMuted }}>{showPicker ? "Separate from the invoice date. Completed visits keep their service dates." : "Uses the service dates and dated line descriptions below."}</div>
+    </section>
   );
 }
 
@@ -19246,6 +19281,8 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     if (progressState === "saving" || qbState === "sending") return;
     let baseInv = selectedClientSnapshot();
     if (!baseInv) return;
+    const serviceMonthIssue = invoiceServiceDescriptionIssue(baseInv);
+    if (serviceMonthIssue) { setQbState("error"); setQbMsg(serviceMonthIssue.message); return; }
     const revisionAtSaveStart = editRevisionRef.current;
     // Persist the client link + a name snapshot on the record (Bug 1) — never rely on
     // a transient field. clientId resolves the live client; clientName is the fallback.
@@ -19605,7 +19642,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           </div>
         </div>
 
-        {needsCoverageCheck && (coverageLoading || coverageIssue || coverageError) && (
+        {needsCoverageCheck && !String(coverageIssue?.code || "").startsWith("maintenance-service-month-") && (coverageLoading || coverageIssue || coverageError) && (
           <div data-invoice-maintenance-coverage role="status" style={{ borderLeft: `3px solid ${T.primary}`, background: T.surfaceAlt, borderRadius: 9, padding: "11px 13px" }}>
             <div style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>{coverageLoading ? "Checking maintenance coverage…" : coverageIssue?.covered ? "This maintenance is already covered" : "Check maintenance coverage before billing"}</div>
             {!coverageLoading && <div style={{ fontSize: 12, lineHeight: 1.45, color: T.textMuted, marginTop: 4 }}>{coverageError || coverageIssue?.message}{coverageIssue?.months?.length ? ` Month${coverageIssue.months.length === 1 ? "" : "s"} to review: ${coverageIssue.months.join(", ")}.` : ""} You can save progress while you review the service lines.</div>}
@@ -19632,6 +19669,8 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           <div style={{ flex: 1 }}><label style={label}>Issued</label><input type="date" style={field} value={toISO(inv.date)} onChange={e => { const newDate = fromISO(e.target.value); set("date", newDate); if (inv.termsDays != null) set("dueDate", addDaysMDY(newDate, inv.termsDays)); }} /></div>
           <div style={{ flex: 1 }}><label style={label}>Due</label><input type="date" style={field} value={toISO(inv.dueDate)} onChange={e => set("dueDate", fromISO(e.target.value))} /></div>
         </div>
+
+        <InvoiceServiceMonth invoice={inv} onChange={(month) => set("serviceMonth", month)} T={T} />
 
         <div>
           <label style={label}>Status</label>
@@ -22807,40 +22846,30 @@ function TotalSalesScreen({ invoices, clients, onBack, T }) {
 }
 
 // Dense, sortable, full-width invoices table — desktop "Table" view (Phase 3).
-function InvoicesTable({ items, onRowClick, selectedIds = [], onToggleSelected, onToggleAll, T }) {
-  const [sort, setSort] = useState({ key: "number", dir: "desc" });
+function InvoicesTable({ items, onRowClick, selectedIds = [], onToggleSelected, onToggleAll, sortBy = "number_desc", onSortChange, T }) {
+  const [sortKey, sortDirection] = sortBy.split("_");
   const money = (n) => `$${parseFloat(n || 0).toFixed(2)}`;
   const fmtD = (d) => (d instanceof Date && !isNaN(d)) ? d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "—";
-  const dueVal = (iv) => { const d = iv.dueDate ? new Date(iv.dueDate) : null; return d && !isNaN(d) ? d.getTime() : 0; };
   const sc = (s) => s === "Paid" ? "#16a34a" : s === "Overdue" ? "#E5484D" : s === "Draft" ? T.textMuted : "#d97706";
   const cols = [
-    { key: "number", label: "Number", align: "left" },
+    { key: "number", label: "Invoice #", align: "left" },
     { key: "client", label: "Client", align: "left" },
-    { key: "issued", label: "Issued", align: "left" },
+    { key: "description", label: "Description", align: "left" },
+    { key: "date", label: "Issued", align: "left" },
     { key: "due",    label: "Due",    align: "left" },
     { key: "amount", label: "Amount", align: "right" },
     { key: "status", label: "Status", align: "left" },
   ];
-  const sorted = [...items].sort((a, b) => {
-    const dir = sort.dir === "asc" ? 1 : -1;
-    switch (sort.key) {
-      case "number": return ((a._num || 0) - (b._num || 0)) * dir;
-      case "client": return ((a._client?.name || a.clientName || "").localeCompare(b._client?.name || b.clientName || "")) * dir;
-      case "issued": return (((a._date || 0) - (b._date || 0))) * dir;
-      case "due":    return (dueVal(a) - dueVal(b)) * dir;
-      case "amount": return ((a._total || 0) - (b._total || 0)) * dir;
-      case "status": return ((a._status || "").localeCompare(b._status || "")) * dir;
-      default: return 0;
-    }
-  });
+  const sorted = items;
   const selectedSet = new Set((selectedIds || []).map(String));
   const allVisibleSelected = sorted.length > 0 && sorted.every(iv => selectedSet.has(String(iv.id)));
-  const click = (key) => setSort(s => s.key === key
-    ? { key, dir: s.dir === "asc" ? "desc" : "asc" }
-    : { key, dir: (key === "client" || key === "status") ? "asc" : "desc" });
+  const click = (key) => {
+    const direction = sortKey === key ? (sortDirection === "asc" ? "desc" : "asc") : (["client", "description", "status", "due"].includes(key) ? "asc" : "desc");
+    onSortChange?.(`${key}_${direction}`);
+  };
   return (
-    <div style={{ flex: 1, minHeight: 0, overflowY: "auto", marginTop: 4 }}>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5 }}>
+    <div style={{ flex: 1, minHeight: 0, overflow: "auto", marginTop: 4 }}>
+      <table data-invoice-list-table style={{ width: "100%", minWidth: 980, borderCollapse: "collapse", fontSize: 13.5 }}>
         <thead>
           <tr>
             <th style={{ position: "sticky", top: 0, width: 44, background: T.bg, padding: "10px 8px 10px 12px", borderBottom: `1.5px solid ${T.border}`, zIndex: 1 }}>
@@ -22853,14 +22882,17 @@ function InvoicesTable({ items, onRowClick, selectedIds = [], onToggleSelected, 
               />
             </th>
             {cols.map(c => (
-              <th key={c.key} onClick={() => click(c.key)}
-                style={{ position: "sticky", top: 0, background: T.bg, textAlign: c.align, padding: "10px 14px", borderBottom: `1.5px solid ${T.border}`, color: sort.key === c.key ? T.primary : T.textMuted, fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em", cursor: "pointer", whiteSpace: "nowrap", userSelect: "none", zIndex: 1 }}>
-                {c.label}{sort.key === c.key ? (sort.dir === "asc" ? " ↑" : " ↓") : ""}
+              <th key={c.key} scope="col" aria-sort={sortKey === c.key ? sortDirection === "asc" ? "ascending" : "descending" : "none"}
+                style={{ position: "sticky", top: 0, background: T.bg, textAlign: c.align, padding: 0, borderBottom: `1.5px solid ${T.border}`, zIndex: 1 }}>
+                <button type="button" aria-label={`Sort invoices by ${c.label}`} onClick={() => click(c.key)} style={{ width: "100%", minHeight: 44, padding: "10px 14px", border: "none", background: "transparent", textAlign: c.align, color: sortKey === c.key ? T.primary : T.textMuted, fontFamily: "inherit", fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".05em", cursor: "pointer", whiteSpace: "nowrap" }}>
+                  {c.label}<span aria-hidden="true" style={{ marginLeft: 5, opacity: sortKey === c.key ? 1 : .35 }}>{sortKey === c.key ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
+                </button>
               </th>
             ))}
           </tr>
         </thead>
         <tbody>
+          {!sorted.length && <tr><td colSpan={8} style={{ padding: "40px 14px", textAlign: "center", color: T.textMuted }}>No invoices match this view.<div style={{ marginTop: 6, fontSize: 12 }}>Try a different description, client, or status.</div></td></tr>}
           {sorted.map(iv => (
             <tr key={iv.id} onClick={() => onRowClick(iv)}
               style={{ cursor: "pointer", borderBottom: `1px solid ${T.border}`, background: selectedSet.has(String(iv.id)) ? hexA(T.primary, 0.045) : "transparent" }}
@@ -22877,9 +22909,12 @@ function InvoicesTable({ items, onRowClick, selectedIds = [], onToggleSelected, 
                 />
               </td>
               <td style={{ padding: "11px 14px", fontWeight: 700, color: T.text, whiteSpace: "nowrap" }}>{iv.number}</td>
-              <td style={{ padding: "11px 14px", color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 0 }}>{iv._client?.name || iv.clientName || "—"}</td>
+              <td style={{ padding: "11px 14px", color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 130, maxWidth: 230 }}>{iv._client?.name || iv.clientName || "—"}</td>
+              <td style={{ padding: "11px 14px", color: T.text, minWidth: 210, width: "28%", maxWidth: 360 }}>
+                <div data-invoice-description title={invoiceDescription(iv)} style={{ fontSize: 12.5, lineHeight: 1.4, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", overflowWrap: "anywhere", color: invoiceDescription(iv) ? T.text : T.textMuted }}>{invoiceDescription(iv) || "No description"}</div>
+              </td>
               <td style={{ padding: "11px 14px", color: T.textMuted, whiteSpace: "nowrap" }}>{fmtD(iv._date)}</td>
-              <td style={{ padding: "11px 14px", color: T.textMuted, whiteSpace: "nowrap" }}>{iv.dueDate ? fmtD(new Date(iv.dueDate)) : "—"}</td>
+              <td style={{ padding: "11px 14px", color: T.textMuted, whiteSpace: "nowrap" }}>{iv.dueDate ? fmtD(invoiceListDate(iv.dueDate)) : "—"}</td>
               <td style={{ padding: "11px 14px", textAlign: "right", fontWeight: 700, color: T.text, whiteSpace: "nowrap" }}>{money(iv._total)}</td>
               <td style={{ padding: "11px 14px", whiteSpace: "nowrap" }}><span style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 100, background: hexA(sc(iv._status), 0.12), color: sc(iv._status) }}>{iv._status}</span></td>
             </tr>
@@ -23351,6 +23386,7 @@ function BatchInvoiceModal({ clients, invoices, invoicing, maintenanceLedger = n
   const [overrides, setOverrides] = useState({});     // clientId -> custom lineItems[]
   const [expanded, setExpanded] = useState(null);     // clientId being customized
   const [taxRate, setTaxRate] = useState(String(cfg.taxRate || 0));
+  const [serviceMonth, setServiceMonth] = useState("");
   const [progress, setProgress] = useState([]);
   const [doSms, setDoSms] = useState(true);
   const [doChat, setDoChat] = useState(true);
@@ -23368,10 +23404,11 @@ function BatchInvoiceModal({ clients, invoices, invoicing, maintenanceLedger = n
   const totalFor = (cid) => invoiceTotals({ lineItems: linesFor(cid), taxRate }).total;
   const hasAmount = (li) => (li || []).some(l => (parseFloat(l.unitPrice) || 0) > 0);
   const coverageFor = (client, ledger = coverageLedger) => invoiceMaintenanceCoverageIssue({
-    invoice: { clientId: client.id, date: todayMDY(), lineItems: linesFor(client.id) },
+    invoice: { clientId: client.id, date: todayMDY(), serviceMonth, lineItems: linesFor(client.id) },
     client, clients, ledger, invoices, schedule,
   });
-  const batchNeedsCoverage = chosen.some(client => coverageFor(client, null));
+  const batchNeedsCoverage = chosen.some(client => hasAmount(linesFor(client.id)) && coverageFor(client, null));
+  const batchNeedsServiceMonth = chosen.some(client => hasAmount(linesFor(client.id)) && String(coverageFor(client)?.code || "").startsWith("maintenance-service-month-"));
   const readyCount = chosen.filter(c => hasAmount(linesFor(c.id)) && !coverageFor(c)).length;
   const grand = chosen.filter(c => hasAmount(linesFor(c.id)) && !coverageFor(c)).reduce((s, c) => s + totalFor(c.id), 0);
   const loadBatchCoverage = useCallback(async () => {
@@ -23415,18 +23452,7 @@ function BatchInvoiceModal({ clients, invoices, invoicing, maintenanceLedger = n
     </div>
   );
 
-  const qbPayload = (iv, c) => ({
-    spsInvoiceId: iv.id,
-    clientId: c.id,
-    number: iv.number, date: toISO(iv.date) || toISO(todayMDY()), dueDate: toISO(iv.dueDate),
-    clientName: c.name || "", clientEmail: c.email || "", clientPhone: c.phone || "",
-    clientAddress: c.address || "", clientStreet: c.street || "", clientCity: c.city || "",
-    clientState: c.state || "", clientZip: c.zip || "",
-    qbCustomerId: c.qbId || c.qbCustomerId || null, qbId: null,
-    taxRate: parseFloat(iv.taxRate) || 0, allowCard: cfg.qbManagePayments === false ? (cfg.qbAllowCard !== false) : undefined, allowACH: cfg.qbManagePayments === false ? (cfg.qbAllowACH !== false) : undefined,
-    lineItems: (iv.lineItems || []).map(l => { const qty = parseFloat(l.qty) || 1; const up = parseFloat(l.unitPrice) || 0; return { description: l.desc || "Service", qty: String(qty), unitPrice: up.toFixed(2), kind: l.kind || "custom", taxable: !!l.taxable, isLateFee: false }; }),
-    invoiceDiscountType: "", invoiceDiscount: "",
-  });
+  const qbPayload = (iv, c) => buildQuickBooksInvoicePayload(iv, c, cfg);
 
   const createAll = async () => {
     if (coverageLoading) return;
@@ -23439,6 +23465,11 @@ function BatchInvoiceModal({ clients, invoices, invoicing, maintenanceLedger = n
     const results = [];
     let n = 0;
     for (const c of chosen) {
+      if (!hasAmount(linesFor(c.id))) {
+        results.push({ id: c.id, name: c.name, ok: false, error: "No billable amount. Skipped.", held: true });
+        setProgress([...results]);
+        continue;
+      }
       const issue = coverageFor(c, freshCoverage);
       if (issue) {
         results.push({ id: c.id, name: c.name, ok: false, error: issue.message, held: true });
@@ -23451,7 +23482,7 @@ function BatchInvoiceModal({ clients, invoices, invoicing, maintenanceLedger = n
         id: `iv${Date.now()}-${n}`, number: `${prefix}${base + n}`,
         clientId: c.id, clientName: c.name, clientEmail: c.email || "", clientAddress: c.address || "",
         date: todayMDY(), dueDate: addDaysMDY(todayMDY(), cfg.dueDays), status: "Draft",
-        lineItems: li, taxRate, notes: cfg.terms || "", createdAt: Date.now(),
+        lineItems: li, serviceMonth, taxRate, notes: cfg.terms || "", createdAt: Date.now(),
       };
       n++;
       if (qbIsConnected()) {
@@ -23548,6 +23579,7 @@ function BatchInvoiceModal({ clients, invoices, invoicing, maintenanceLedger = n
           <div>
             <label style={lbl}>Line items applied to every invoice</label>
             {renderLinesEditor({ value: lines, onChange: setLines })}
+            <div style={{ marginTop: 12 }}><InvoiceServiceMonth invoice={{ serviceMonth, lineItems: lines }} onChange={setServiceMonth} T={T} /></div>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10 }}>
               <span style={{ fontSize: 12, color: T.textMuted }}>Tax rate %</span>
               <input value={taxRate} onChange={e => setTaxRate(e.target.value.replace(/[^\d.]/g, ""))} style={{ ...field, width: 70, textAlign: "center" }} />
@@ -23566,8 +23598,8 @@ function BatchInvoiceModal({ clients, invoices, invoicing, maintenanceLedger = n
                       <button onClick={() => { if (expanded === c.id) setExpanded(null); else { setOverrides(o => ({ ...o, [c.id]: o[c.id] || linesFor(c.id).map(l => ({ ...l, id: uid() })) })); setExpanded(c.id); } }} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>{expanded === c.id ? "Done" : "Customize"}</button>
                       <button onClick={() => setSel(s => ({ ...s, [c.id]: false }))} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 16, cursor: "pointer", lineHeight: 1 }}>×</button>
                     </div>
-                    {coverageFor(c) ? <div style={{ marginTop: 8, paddingLeft: 9, borderLeft: `2px solid ${T.primary}`, color: T.primary, fontSize: 12, lineHeight: 1.4 }}>{coverageFor(c).message} This client will be skipped.</div> : null}
-                    {expanded === c.id && <div style={{ marginTop: 10 }}>{renderLinesEditor({ value: overrides[c.id] || lines, onChange: (v) => setOverrides(o => ({ ...o, [c.id]: v })) })}</div>}
+                    {coverageFor(c) && !(coverageFor(c).code === "maintenance-service-month-missing" && !overrides[c.id]) ? <div style={{ marginTop: 8, paddingLeft: 9, borderLeft: `2px solid ${T.primary}`, color: T.primary, fontSize: 12, lineHeight: 1.4 }}>{coverageFor(c).message} This client will be skipped.</div> : null}
+                    {expanded === c.id && <div style={{ marginTop: 10 }}>{renderLinesEditor({ value: overrides[c.id] || lines, onChange: (v) => setOverrides(o => ({ ...o, [c.id]: v })) })}<div style={{ marginTop: 12 }}><InvoiceServiceMonth invoice={{ serviceMonth, lineItems: linesFor(c.id) }} onChange={setServiceMonth} T={T} /></div></div>}
                   </div>
                 ))}
               </div>
@@ -23576,7 +23608,7 @@ function BatchInvoiceModal({ clients, invoices, invoicing, maintenanceLedger = n
 
           {coverageError ? <div role="alert" style={{ fontSize: 12, color: T.primary }}>{coverageError} <button type="button" onClick={loadBatchCoverage} disabled={coverageLoading} style={{ color: T.primary, background: "none", border: "none", textDecoration: "underline", fontFamily: "inherit" }}>Check again</button></div> : null}
           <button onClick={createAll} disabled={readyCount === 0 || coverageLoading} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 8, padding: "14px", fontWeight: 800, fontSize: 15, cursor: readyCount === 0 ? "default" : "pointer", fontFamily: "inherit", opacity: readyCount === 0 || coverageLoading ? 0.5 : 1 }}>
-            {coverageLoading ? "Checking prepayments…" : readyCount === 0 ? chosen.length && batchNeedsCoverage ? "Review covered maintenance above" : "Add clients + line items" : `Create & sync ${readyCount} invoice${readyCount !== 1 ? "s" : ""}`}
+            {coverageLoading ? "Checking prepayments…" : readyCount === 0 ? batchNeedsServiceMonth ? "Choose a service month above" : chosen.length && batchNeedsCoverage ? "Review covered maintenance above" : "Add clients + line items" : `Create & sync ${readyCount} invoice${readyCount !== 1 ? "s" : ""}`}
           </button>
         </div>
       </Modal>
@@ -23939,7 +23971,7 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
   // ── Filter / sort state ──
   const [filter,     setFilter]     = useState(initialFilter);
   const [search,     setSearch]     = useState("");
-  const [sortBy,     setSortBy]     = useState("number_desc"); // number_desc | number_asc | date_desc | date_asc | amount_desc | amount_asc | client_asc
+  const [sortBy,     setSortBy]     = useState("number_desc");
   const [clientFilter, setClientFilter] = useState("all");     // "all" or client id
   const [dateRange,  setDateRange]  = useState("all");         // all | this_month | last_month | this_year | custom
   const [dateFrom,   setDateFrom]   = useState("");
@@ -24269,26 +24301,16 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
   };
 
   // ── Apply all filters ──
-  const q = search.toLowerCase();
   const filtered = all.filter(iv => {
     if (filter !== "All" && iv._status !== filter) return false;
     if (clientFilter !== "all" && String(iv.clientId) !== String(clientFilter) && String(iv._client?.id) !== String(clientFilter)) return false;
     if (!inDateRange(iv)) return false;
-    if (q && !`${iv.number} ${iv._client?.name || iv.clientName || ""}`.toLowerCase().includes(q)) return false;
+    if (!invoiceMatchesSearch(iv, search)) return false;
     return true;
   });
 
   // ── Sort ──
-  const sorted = [...filtered].sort((a, b) => {
-    if (sortBy === "number_desc")  return b._num - a._num;
-    if (sortBy === "number_asc")   return a._num - b._num;
-    if (sortBy === "date_desc")    return (b._date||0) - (a._date||0);
-    if (sortBy === "date_asc")     return (a._date||0) - (b._date||0);
-    if (sortBy === "amount_desc")  return b._total - a._total;
-    if (sortBy === "amount_asc")   return a._total - b._total;
-    if (sortBy === "client_asc")   return (a._client?.name||a.clientName||"").localeCompare(b._client?.name||b.clientName||"");
-    return b._num - a._num;
-  });
+  const sorted = sortInvoiceList(filtered, sortBy);
   const visibleInvoiceSignature = sorted.map(invoice => String(invoice.id || "")).join("|");
   useEffect(() => {
     setSelectedIds((current) => {
@@ -24474,13 +24496,22 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
         )}
       </button>}
 
-      {/* Search */}
-      <div style={{ position: "relative", marginBottom: 12 }}>
-        <span style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", color: T.textMuted, pointerEvents: "none" }}>
-          <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-        </span>
-        <input type="search" placeholder="Search by number or client…" value={search} onChange={e => setSearch(e.target.value)}
-          style={{ width: "100%", padding: "11px 14px 11px 38px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, boxSizing: "border-box", outline: "none", fontFamily: "inherit", color: T.text, background: T.surface }} />
+      {/* Search includes the full invoice contents, even when the row preview is shortened. */}
+      <div style={{ display: "grid", gridTemplateColumns: vp.isPhone ? "1fr" : "minmax(200px, 1fr) 220px", alignItems: "end", gap: 12, marginBottom: 14 }}>
+        <label style={{ display: "grid", gap: 6, color: T.textMuted, fontSize: 11.5, fontWeight: 650 }}>
+          Find an invoice
+          <span style={{ position: "relative" }}>
+            <span style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", color: T.textMuted, pointerEvents: "none" }}><Icon name="search" size={15}/></span>
+            <input type="search" aria-label="Search invoices" placeholder="Number, client, or description" value={search} onChange={e => setSearch(e.target.value)}
+              style={{ width: "100%", height: 42, padding: "0 14px 0 38px", border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 13.5, boxSizing: "border-box", fontFamily: "inherit", color: T.text, background: T.surface }} />
+          </span>
+        </label>
+        <label style={{ display: "grid", gap: 6, color: T.textMuted, fontSize: 11.5, fontWeight: 650 }}>
+          Sort by
+          <select aria-label="Sort invoices" value={sortBy} onChange={(event) => setSortBy(event.target.value)} style={{ width: "100%", height: 42, minWidth: 0, border: `1px solid ${T.border}`, borderRadius: 8, padding: "0 10px", fontFamily: "inherit", color: T.text, background: T.surface, fontSize: 12.5 }}>
+            {INVOICE_LIST_SORT_OPTIONS.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
+          </select>
+        </label>
       </div>
 
       {/* Status filter pills */}
@@ -24493,27 +24524,6 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
       {/* Expanded filter panel */}
       {showFilters && (
         <div style={{ background: T.surfaceAlt, borderRadius: 16, padding: "16px 16px", marginBottom: 16, display: "flex", flexDirection: "column", gap: 14 }}>
-
-          {/* Sort */}
-          <div>
-            <div style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>Sort By</div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-              {[
-                ["number_desc", "Invoice # ↓"],
-                ["number_asc",  "Invoice # ↑"],
-                ["date_desc",   "Newest First"],
-                ["date_asc",    "Oldest First"],
-                ["amount_desc", "Highest Amount"],
-                ["amount_asc",  "Lowest Amount"],
-                ["client_asc",  "Client A–Z"],
-              ].map(([val, lbl]) => (
-                <button key={val} onClick={() => setSortBy(val)}
-                  style={{ padding: "6px 12px", borderRadius: 10, border: `1.5px solid ${sortBy === val ? T.primary : T.border}`, background: sortBy === val ? hexA(T.primary, 0.08) : T.surface, color: sortBy === val ? T.primary : T.textMuted, fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
-                  {lbl}
-                </button>
-              ))}
-            </div>
-          </div>
 
           {/* Client filter */}
           <div>
@@ -24569,7 +24579,7 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
 
           {/* Reset */}
           {activeFilterCount > 0 && (
-            <button onClick={() => { setFilter("All"); setClientFilter("all"); setDateRange("all"); setGroupBy("none"); setSortBy("date_desc"); setDateFrom(""); setDateTo(""); }}
+            <button onClick={() => { setFilter("All"); setClientFilter("all"); setDateRange("all"); setGroupBy("none"); setSortBy("number_desc"); setSearch(""); setDateFrom(""); setDateTo(""); }}
               style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", padding: 0, alignSelf: "flex-start" }}>
               Clear all filters
             </button>
@@ -24609,6 +24619,11 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
         </div>
       )}
 
+      {vp.isDesktop && <div data-invoice-results-summary role="status" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 3, fontSize: 12, color: T.textMuted }}>
+        <span>{sorted.length} {filter === "All" ? "invoice" : filter.toLowerCase() + " invoice"}{sorted.length === 1 ? "" : "s"}{search.trim() ? ` matching “${search.trim()}”` : ""}{vp.isTablet ? <span style={{ display: "block", marginTop: 4, fontSize: 11 }}>Swipe across for dates, amounts, and status.</span> : null}</span>
+        {search.trim() && <button type="button" onClick={() => setSearch("")} style={{ border: "none", background: "transparent", color: T.primary, padding: "8px 0", fontFamily: "inherit", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Clear search</button>}
+      </div>}
+
       {/* Results summary */}
       {(() => {
         const listContent = (
@@ -24626,8 +24641,9 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
             {sorted.length === 0 ? (
               <div style={{ textAlign: "center", padding: "50px 20px", color: T.textMuted }}>
                 <div style={{ width: 56, height: 56, borderRadius: 18, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 14px" }}><Icon name="invoice" size={28} /></div>
-                <div style={{ fontWeight: 700, fontSize: 15, color: T.text, marginBottom: 6 }}>No invoices{filter !== "All" ? ` marked ${filter}` : ""}</div>
-                {perms.invoiceCreate && filter === "All" && <><div style={{ fontSize: 13, marginBottom: 18 }}>Create one, or generate it from a completed visit.</div><Btn onClick={() => setCreating(true)}>+ New Invoice</Btn></>}
+                <div style={{ fontWeight: 700, fontSize: 15, color: T.text, marginBottom: 6 }}>{search ? "No invoices match your search" : `No invoices${filter !== "All" ? ` marked ${filter}` : ""}`}</div>
+                {search && <button type="button" onClick={() => setSearch("")} style={{ border: "none", background: "transparent", color: T.primary, padding: "8px 0", fontFamily: "inherit", fontWeight: 700, cursor: "pointer" }}>Clear search</button>}
+                {perms.invoiceCreate && filter === "All" && !search && <><div style={{ fontSize: 13, marginBottom: 18 }}>Create one, or generate it from a completed visit.</div><Btn onClick={() => setCreating(true)}>+ New Invoice</Btn></>}
               </div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: groupBy !== "none" ? 20 : 8 }}>
@@ -24652,6 +24668,8 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
         return (
           <InvoicesTable
             items={sorted}
+            sortBy={sortBy}
+            onSortChange={setSortBy}
             onRowClick={(invoice) => setPreview(invoice)}
             selectedIds={selectedIds}
             onToggleSelected={toggleSelectedInvoice}
@@ -41978,13 +41996,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
         method: "POST",
         headers: await authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
-          invoice: {
-            ...invoice,
-            qbCustomerId: client?.qbId || null,
-            clientName:   client?.name  || invoice.clientName,
-            clientEmail:  client?.email || invoice.clientEmail,
-            clientPhone:  client?.phone || "",
-          },
+          invoice: buildQuickBooksInvoicePayload(invoice, client, invoicing),
         }),
       });
       if (!res.ok) return null;

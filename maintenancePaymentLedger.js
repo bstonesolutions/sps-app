@@ -4,6 +4,7 @@ import {
   normalizeMaintenanceBillingStore,
   recurringMaintenanceCadence,
 } from "./maintenanceBilling.js";
+import { maintenanceAssignedPriceCents, maintenanceClientAssignments } from "./maintenanceClientAssignment.js";
 
 export const MAINTENANCE_PAYMENT_LEDGER_VERSION = 2;
 export const MAINTENANCE_PAYMENT_STATUSES = Object.freeze([
@@ -1671,6 +1672,7 @@ export function buildMaintenancePaymentLedgerRows({
   ledger: rawLedger = null,
   schedule,
   year = new Date().getFullYear(),
+  assignedOnly = false,
 } = {}) {
   const normalizedYear = Number(year);
   if (!Number.isInteger(normalizedYear) || normalizedYear < 1900 || normalizedYear > 2200) return [];
@@ -1718,6 +1720,7 @@ export function buildMaintenancePaymentLedgerRows({
   }
 
   const included = clientList.filter((client) => {
+    if (assignedOnly) return maintenanceClientAssignments(client).length > 0;
     const clientId = clientIdOf(client);
     return recurringClient(client)
       || !!protectedBillingStore?.policies?.[clientId]
@@ -1728,6 +1731,7 @@ export function buildMaintenancePaymentLedgerRows({
 
   return included.map((client) => {
     const clientId = clientIdOf(client);
+    const maintenanceAssignments = maintenanceClientAssignments(client);
     const baseExpectedCents = expectedMonthlyCents(client);
     const policy = protectedBillingStore ? maintenanceBillingPolicyForClient(protectedBillingStore, clientId) : null;
     const allClientInvoices = invoicesByClient.get(clientId) || [];
@@ -1817,6 +1821,8 @@ export function buildMaintenancePaymentLedgerRows({
     return {
       clientId,
       clientName: clientNameOf(client),
+      maintenanceTypes: [...new Set(maintenanceAssignments.map((assignment) => assignment.type))],
+      maintenancePriceCents: maintenanceAssignedPriceCents(client, maintenanceAssignments),
       expectedMonthlyCents: baseExpectedCents,
       coverageStartMonth: inferredStart,
       months: monthRows,
@@ -1826,3 +1832,10 @@ export function buildMaintenancePaymentLedgerRows({
 }
 
 export const deriveMaintenancePaymentLedgerRows = buildMaintenancePaymentLedgerRows;
+
+// Calendar enrollment is narrower than historical accounting evidence. Retain
+// the full client set for identity resolution so hiding unassigned clients never
+// turns an ambiguous name into a false invoice match.
+export function buildMaintenanceCalendarRows(options = {}) {
+  return buildMaintenancePaymentLedgerRows({ ...options, assignedOnly: true });
+}

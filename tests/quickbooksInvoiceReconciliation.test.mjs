@@ -9,6 +9,54 @@ import {
   reconcileQuickBooksInvoice,
 } from "../quickbooksInvoiceReconciliation.js";
 
+test("formatted service months match the right local line after QuickBooks reorders or adds lines", () => {
+  const local = {
+    id: "iv-periods", number: "INV-900", status: "Draft", serviceMonth: "2026-10",
+    lineItems: [
+      { id: "september", desc: "Monthly service", maintenanceService: true, serviceMonth: "2026-09", serviceDate: "2026-09-15", sourceVisitDates: ["2026-09-15"], sourceStopId: "stop-september", qty: 1, unitPrice: 175, unitCost: 35, taxable: false },
+      { id: "october", desc: "Monthly service", sourceVisitDates: ["2026-10-15"], sourceStopId: "stop-october", qty: 1, unitPrice: 175, unitCost: 45, taxable: false },
+    ],
+  };
+  const remote = {
+    qbId: "QB-periods", number: "INV-900", status: "Draft",
+    lineItems: [
+      { qbLineId: "1", desc: "Monthly service - October 2026", qty: 1, unitPrice: 175, taxable: false },
+      { qbLineId: "2", desc: "Filter replacement", qty: 1, unitPrice: 80, taxable: false },
+      { qbLineId: "3", desc: "Monthly service - September 2026", qty: 1, unitPrice: 175, taxable: false },
+    ],
+  };
+  const result = reconcileQuickBooksInvoice(local, remote);
+  assert.equal(result.lineItems[0].id, "october");
+  assert.equal(result.lineItems[0].unitCost, 45);
+  assert.equal(result.lineItems[0].sourceStopId, "stop-october");
+  assert.deepEqual(result.lineItems[0].sourceVisitDates, ["2026-10-15"]);
+  assert.equal(result.lineItems[1].unitCost, "");
+  assert.equal(result.lineItems[1].sourceStopId, undefined);
+  assert.equal(result.lineItems[2].id, "september");
+  assert.equal(result.lineItems[2].unitCost, 35);
+  assert.equal(result.lineItems[2].serviceMonth, "2026-09");
+  assert.equal(result.lineItems[2].serviceDate, "2026-09-15");
+  assert.equal(result.lineItems[2].maintenanceService, true);
+  assert.equal(result.lineItems[2].sourceStopId, "stop-september");
+});
+
+test("local service metadata leaves legacy create intent unchanged until outgoing wording changes", () => {
+  const base = { number: "INV-901", lineItems: [{ description: "Monthly service - September 2026", qty: 1, unitPrice: 175 }] };
+  const legacy = quickBooksInvoiceIntentSignature(base);
+  assert.equal(quickBooksInvoiceIntentSignature({ ...base, lineItems: [{ ...base.lineItems[0], serviceDate: undefined }] }), legacy);
+  assert.equal(Object.hasOwn(JSON.parse(legacy).lines[0], "serviceDate"), false);
+  const withDate = { ...base, lineItems: [{ ...base.lineItems[0], serviceDate: "2026-09-15" }] };
+  assert.equal(quickBooksInvoiceIntentSignature(withDate), legacy);
+  assert.equal(quickBooksInvoiceIntentSignature({ ...base, lineItems: [{ ...base.lineItems[0], serviceMonth: "2026-09", sourceVisitDates: ["2026-09-15"] }] }), legacy);
+  assert.notEqual(quickBooksInvoiceIntentSignature({ ...base, lineItems: [{ ...base.lineItems[0], description: "Monthly service - October 2026" }] }), legacy);
+});
+
+test("QuickBooks service dates supersede old local dates on an identified line", () => {
+  const local = { id: "iv-dated", qbId: "QB-date", lineItems: [{ id: "local", qbLineId: "1", desc: "Service", serviceDate: "2026-09-15", qty: 1, unitPrice: 175 }] };
+  const remote = { qbId: "QB-date", lineItems: [{ qbLineId: "1", desc: "Service", serviceDate: "2026-09-16", qty: 1, unitPrice: 175 }] };
+  assert.equal(reconcileQuickBooksInvoice(local, remote).lineItems[0].serviceDate, "2026-09-16");
+});
+
 const localInvoice = () => ({
   id: "iv_est_estimate-42",
   qbId: "4949",

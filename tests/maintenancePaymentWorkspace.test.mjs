@@ -81,16 +81,24 @@ test("maintenance history reconciliation waits for fresh QuickBooks state and ex
   assert.doesNotMatch(workspace, /No coverage/);
 });
 
-test("maintenance calendar shows all clients and months on every screen size", async () => {
+test("maintenance calendar uses assigned clients with sortable columns and scoped filters", async () => {
   const workspace = await readWorkspace();
 
-  assert.match(workspace, /const statusMatchesView = \(status, view\)/);
-  assert.match(workspace, /\[view, setView\] = useState\("all"\)/);
+  assert.match(workspace, /buildMaintenanceCalendarRows\(\{/);
+  assert.match(workspace, /filterMaintenanceCalendarRows\(rows, \{/);
+  assert.match(workspace, /monthKey: filterMonth, monthKeys/);
   assert.match(workspace, /data-maintenance-calendar-grid/);
   assert.match(workspace, /scope="row"/);
-  assert.match(workspace, /\["Price", "Prepaid"/);
+  assert.match(workspace, /sortHeader\("price", "Price"\)/);
+  assert.match(workspace, /sortHeader\("prepaid", "Prepaid"\)/);
+  assert.match(workspace, /aria-sort=\{effectiveSortKey === key/);
+  assert.match(workspace, /aria-label="Payment status"/);
+  assert.match(workspace, /aria-label="Maintenance service"/);
+  assert.match(workspace, /assignedClientIds\.has\(String\(detail\.clientId\)\)/);
+  assert.match(workspace, /changeYear\(targetYear\)/);
   assert.match(workspace, /openCell\(row, monthKey\)/);
-  assert.match(workspace, /Showing \{visibleRangeLabel\} \{year\}\. Counts below represent client months\./);
+  assert.match(workspace, /Showing \{visibleRangeLabel\} \{year\}\./);
+  assert.match(workspace, /assigned clients/);
   assert.match(workspace, /const visibleRangeLabel = fullYear \? "January to December" : "April to December"/);
 });
 

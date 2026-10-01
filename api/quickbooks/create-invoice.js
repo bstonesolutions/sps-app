@@ -12,6 +12,7 @@ import { buildUsTxnTaxDetail } from "./qb-tax.js";
 import { getValidAccessToken, QB_API_BASE, setCors } from "./qb-store.js";
 import { requireUser } from "../_auth.js";
 import { quickBooksMaintenanceGuard } from "./maintenance-guard.js";
+import { invoiceServiceDescriptionIssue, formatInvoiceServiceLineDescription } from "../../invoiceServiceDescription.js";
 
 export default async function handler(req, res) {
   setCors(res);
@@ -28,6 +29,9 @@ export default async function handler(req, res) {
   if (!invoice) {
     return res.status(400).json({ error: "Missing invoice" });
   }
+
+  const serviceMonthIssue = invoiceServiceDescriptionIssue(invoice);
+  if (serviceMonthIssue) return res.status(422).json({ error: serviceMonthIssue.message, code: serviceMonthIssue.code, reviewRequired: true });
 
   const coverageIssue = await quickBooksMaintenanceGuard(invoice);
   if (coverageIssue) return res.status(coverageIssue.status).json({ error: coverageIssue.message, code: coverageIssue.code, reviewRequired: true });
@@ -174,7 +178,7 @@ export default async function handler(req, res) {
         LineNum:     i + 1,
         Amount:      amount,
         DetailType:  "SalesItemLineDetail",
-        Description: li.description || li.name || "Service",
+        Description: formatInvoiceServiceLineDescription(invoice, li) || "Service",
         SalesItemLineDetail: detail,
       });
     }

@@ -1,4 +1,5 @@
 import { isQuickBooksManagedInvoice } from "./invoiceBulkActions.js";
+import { formatInvoiceServiceLineDescription, invoiceServiceDescriptionIssue } from "./invoiceServiceDescription.js";
 
 const text = (value) => String(value == null ? "" : value).trim();
 const number = (value, fallback = 0) => {
@@ -36,6 +37,8 @@ export function quickBooksDraftSyncEligibility(invoice, client = null) {
     && number(line?.unitPrice, 0) > 0
   ));
   if (!meaningfulLines.length) return { eligible: false, reason: "No billable line items" };
+  const serviceIssue = invoiceServiceDescriptionIssue(invoice);
+  if (serviceIssue) return { eligible: false, reason: serviceIssue.message, code: serviceIssue.code };
   return { eligible: true, reason: "" };
 }
 
@@ -95,7 +98,13 @@ export function buildQuickBooksInvoicePayload(invoice, client, invoicing, { toda
         sourceStopIds: line?.sourceStopIds,
         sourceCompletionReceiptId: line?.sourceCompletionReceiptId,
         sourceCompletionReceiptIds: line?.sourceCompletionReceiptIds,
-        description: line?.bundleNote ? `${line?.desc || ""} (${line.bundleNote})` : (line?.desc || ""),
+        serviceMonth: line?.serviceMonth,
+        serviceDate: line?.serviceDate,
+        sourceVisitDates: line?.sourceVisitDates,
+        ...(line?.maintenanceService === true ? { maintenanceService: true } : {}),
+        description: line?.bundleNote
+          ? `${formatInvoiceServiceLineDescription(invoice, line)} (${line.bundleNote})`
+          : formatInvoiceServiceLineDescription(invoice, line),
         qty: String(qty),
         unitPrice: String(qty > 0 ? (net / qty).toFixed(2) : net.toFixed(2)),
         kind: line?.isLateFee ? "lateFee" : (line?.kind || "custom"),

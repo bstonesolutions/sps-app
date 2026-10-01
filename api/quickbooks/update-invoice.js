@@ -15,6 +15,7 @@ import {
 import { buildUsTxnTaxDetail } from "./qb-tax.js";
 import { requireUser } from "../_auth.js";
 import { quickBooksMaintenanceGuard } from "./maintenance-guard.js";
+import { invoiceServiceDescriptionIssue, formatInvoiceServiceLineDescription } from "../../invoiceServiceDescription.js";
 
 export default async function handler(req, res) {
   setCors(res);
@@ -30,6 +31,9 @@ export default async function handler(req, res) {
   if (!invoice || !invoice.qbId) {
     return res.status(400).json({ error: "Missing required fields (need invoice.qbId)" });
   }
+
+  const serviceMonthIssue = invoiceServiceDescriptionIssue(invoice);
+  if (serviceMonthIssue) return res.status(422).json({ error: serviceMonthIssue.message, code: serviceMonthIssue.code, reviewRequired: true });
 
   // Tokens are read server-side from the store (never passed by the client).
   let access_token, realm_id;
@@ -182,7 +186,7 @@ export default async function handler(req, res) {
         LineNum:     i + 1,
         Amount:      qty * unitPrice,
         DetailType:  "SalesItemLineDetail",
-        Description: li.description || "Service",
+        Description: formatInvoiceServiceLineDescription(invoice, li) || "Service",
         SalesItemLineDetail: detail,
       });
     }

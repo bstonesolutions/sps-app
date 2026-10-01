@@ -17,7 +17,7 @@ const ledger = () => ({ version: 2, policies: {}, allocations: { [client.id]: { 
 const fixture = () => ({ client, clients: [client], stop, scheduledDate: "10/01/2026", ledger: ledger(), invoices: [sourceInvoice] });
 const service = { name: "Monthly maintenance", price: 175 };
 const extra = { name: "Replacement valve", qty: 1, retailPer: 25, bill: true };
-const draft = () => ({ id: "new-draft", clientId: client.id, date: "10/01/2026", lineItems: [{ id: "line", desc: "Monthly maintenance", qty: 1, unitPrice: 175, kind: "service" }] });
+const draft = () => ({ id: "new-draft", clientId: client.id, date: "10/01/2026", serviceMonth: "2026-10", lineItems: [{ id: "line", desc: "Monthly maintenance", qty: 1, unitPrice: 175, kind: "service" }] });
 
 test("allocated prepaid months use settled canonical invoice evidence without relying on the client mirror", () => {
   const result = maintenanceCoverageForService(fixture());
@@ -184,4 +184,79 @@ test("explicit monthly periods respect protected prepaid policies and exempt the
   numberOnlyPolicy.policies[client.id].sourceInvoiceNumber = sourceInvoice.number;
   assert.equal(invoiceMaintenanceCoverageIssue({ ...fixture(), ledger: numberOnlyPolicy, invoice: { ...invoice, number: sourceInvoice.number } }).covered, true);
   assert.equal(invoiceMaintenanceCoverageIssue({ ...fixture(), ledger: numberOnlyPolicy, invoice: { ...invoice, id: sourceInvoice.id } }), null);
+});
+
+test("candidate service dates and dated descriptions override the invoice issue month", () => {
+  for (const change of [
+    { serviceMonth: "2026-10" },
+    { serviceDate: "2026-10-15" },
+    { desc: "October 2026 maintenance" },
+    { desc: "Monthly service 10/15/2026" },
+  ]) {
+    const invoice = { ...draft(), date: "12/01/2026", serviceMonth: undefined, lineItems: [{ ...draft().lineItems[0], ...change }] };
+    const result = invoiceMaintenanceCoverageIssue({ ...fixture(), invoice });
+    assert.equal(result.code, "maintenance-already-covered", JSON.stringify(change));
+    assert.deepEqual(result.months, ["2026-10"]);
+  }
+});
+
+test("candidate maintenance never borrows its issue date when the service month is missing or conflicting", () => {
+  const invoice = { ...draft(), serviceMonth: undefined };
+  const missing = invoiceMaintenanceCoverageIssue({ ...fixture(), invoice });
+  assert.equal(missing.code, "maintenance-service-month-missing");
+  assert.equal(missing.covered, false);
+  assert.deepEqual(missing.months, []);
+  assert.deepEqual(missing.lineIndexes, [0]);
+  const conflicting = { ...invoice, lineItems: [{ ...invoice.lineItems[0], serviceMonth: "2026-11", desc: "October 2026 maintenance" }] };
+  assert.equal(invoiceMaintenanceCoverageIssue({ ...fixture(), invoice: conflicting }).code, "maintenance-service-month-conflict");
+});
+
+test("each maintenance line checks its own service month on a mixed-month invoice", () => {
+  const invoice = { ...draft(), serviceMonth: "2026-12", lineItems: [
+    { ...draft().lineItems[0], serviceMonth: "2026-10" },
+    { ...draft().lineItems[0], id: "second", desc: "November 2026 maintenance" },
+  ] };
+  assert.deepEqual(invoiceMaintenanceCoverageIssue({ ...fixture(), invoice }).months, ["2026-10", "2026-11"]);
+});
+
+test("completed visit dates override supplied month metadata and a moved schedule", () => {
+  const completed = { ...stop, date: "12/01/2026", maintenanceBillingServiceDate: "2026-10-15" };
+  const linkedClient = { ...client, history: [completed] };
+  const invoice = { ...draft(), date: "12/01/2026", serviceMonth: "2026-12", sourceStopId: stop.sid,
+    lineItems: [{ ...draft().lineItems[0], desc: "Services", serviceMonth: "2026-12", sourceVisitDates: ["2026-12-01"] }] };
+  const options = { ...fixture(), client: linkedClient, clients: [linkedClient], invoice, schedule: [{ date: "12/01/2026", stops: [stop] }] };
+  assert.deepEqual(invoiceMaintenanceCoverageIssue(options).months, ["2026-10"]);
+  const conflicting = { ...invoice, lineItems: [{ ...invoice.lineItems[0], desc: "December 2026 maintenance" }] };
+  assert.equal(invoiceMaintenanceCoverageIssue({ ...options, invoice: conflicting }).code, "maintenance-service-month-conflict");
+});
+
+test("line-specific visit sources do not inherit other invoice months", () => {
+  const otherStop = { ...stop, sid: "november-stop" };
+  const linkedClient = { ...client, history: [{ ...stop, date: "10/15/2026" }, { ...otherStop, date: "11/15/2026" }] };
+  const invoice = { ...draft(), sourceStopIds: [stop.sid, otherStop.sid], lineItems: [
+    { ...draft().lineItems[0], desc: "October 2026 maintenance", sourceStopId: stop.sid },
+    { ...draft().lineItems[0], id: "november-line", desc: "November 2026 maintenance", sourceStopId: otherStop.sid },
+  ] };
+  const result = invoiceMaintenanceCoverageIssue({ ...fixture(), client: linkedClient, clients: [linkedClient], invoice });
+  assert.equal(result.code, "maintenance-already-covered");
+  assert.deepEqual(result.months, ["2026-10", "2026-11"]);
+  assert.equal(result.decisions.some(decision => decision.serviceIssue), false);
+});
+
+test("owned scheduled maintenance supplies a service date only when completed history is absent", () => {
+  const invoice = { ...draft(), serviceMonth: undefined, date: "12/01/2026", sourceStopId: stop.sid,
+    lineItems: [{ ...draft().lineItems[0], desc: "Services" }] };
+  const result = invoiceMaintenanceCoverageIssue({ ...fixture(), invoice, schedule: [{ date: "10/15/2026", stops: [stop] }] });
+  assert.deepEqual(result.months, ["2026-10"]);
+  const explicit = { ...invoice, lineItems: draft().lineItems };
+  const otherOwner = invoiceMaintenanceCoverageIssue({ ...fixture(), invoice: explicit, schedule: [{ date: "10/15/2026", stops: [{ ...stop, clientId: "someone-else" }] }] });
+  assert.equal(otherOwner.code, "maintenance-service-month-missing");
+});
+
+test("seasonal work and repairs do not acquire maintenance coverage or require a service month", () => {
+  for (const desc of ["Pool opening", "Pool closing", "Winterizing service", "Maintenance equipment replacement", "Pump repair"]) {
+    const invoice = { ...draft(), serviceMonth: undefined, source: "monthly-maintenance", sourceStopId: stop.sid,
+      lineItems: [{ ...draft().lineItems[0], desc }] };
+    assert.equal(invoiceMaintenanceCoverageIssue({ ...fixture(), invoice, ledger: null, client: { ...client, history: [{ ...stop, date: "10/15/2026" }] } }), null, desc);
+  }
 });

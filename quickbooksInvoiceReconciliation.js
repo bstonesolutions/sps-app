@@ -5,6 +5,8 @@
 // metadata. Keeping that boundary here prevents a pull from losing estimate/visit
 // provenance while also preventing stale SPS lines from disagreeing with QuickBooks.
 
+import { formatInvoiceServiceLineDescription } from "./invoiceServiceDescription.js";
+
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
 
 const clone = (value) => {
@@ -57,12 +59,18 @@ const qbItemRef = (line) => refValue(
 
 const lineDescription = (line) => normalizedText(line?.desc ?? line?.description ?? line?.name);
 
-const customerLineSignature = (line) => [
-  lineDescription(line),
+const customerLineSignature = (line, description = lineDescription(line)) => [
+  description,
   normalizedNumber(line?.qty ?? 1),
   normalizedNumber(line?.unitPrice ?? line?.price ?? line?.rate ?? 0),
   line?.taxable === true ? "taxable" : "non-taxable",
 ].join("|");
+
+const localLineDescriptions = (line, invoice) => {
+  const serviceDescription = formatInvoiceServiceLineDescription(invoice, line);
+  const outgoingDescription = line?.bundleNote ? `${serviceDescription} (${line.bundleNote})` : serviceDescription;
+  return [...new Set([lineDescription(line), normalizedText(outgoingDescription)])];
+};
 
 const SPS_LINE_METADATA_FIELDS = [
   "unitCost",
@@ -78,6 +86,9 @@ const SPS_LINE_METADATA_FIELDS = [
   "sourceStopIds",
   "sourceCompletionReceiptId",
   "sourceCompletionReceiptIds",
+  "serviceMonth",
+  "sourceVisitDates",
+  "maintenanceService",
 ];
 
 const QUICKBOOKS_AUTHORITY_FIELDS = [
@@ -244,7 +255,7 @@ export function applyQuickBooksInvoiceSyncFailure(localInvoice, options = {}) {
   };
 }
 
-function findLineMatch(remoteLine, remoteIndex, localLines, claimed, remoteCount) {
+function findLineMatch(remoteLine, remoteIndex, localLines, claimed, remoteCount, localInvoice) {
   const available = localLines
     .map((line, index) => ({ line, index }))
     .filter(({ index }) => !claimed.has(index));
@@ -262,19 +273,20 @@ function findLineMatch(remoteLine, remoteIndex, localLines, claimed, remoteCount
     const byItemRef = available.filter(({ line }) => qbItemRef(line) === remoteItemRef);
     if (byItemRef.length === 1) return byItemRef[0];
     const remoteDescription = lineDescription(remoteLine);
-    const byItemAndDescription = byItemRef.filter(({ line }) => lineDescription(line) === remoteDescription);
+    const byItemAndDescription = byItemRef.filter(({ line }) => localLineDescriptions(line, localInvoice).includes(remoteDescription));
     if (byItemAndDescription.length === 1) return byItemAndDescription[0];
   }
 
   const signature = customerLineSignature(remoteLine);
-  const bySignature = available.filter(({ line }) => customerLineSignature(line) === signature);
+  const bySignature = available.filter(({ line }) => localLineDescriptions(line, localInvoice)
+    .some((description) => customerLineSignature(line, description) === signature));
   if (bySignature.length === 1) return bySignature[0];
 
   // Description matching preserves SPS cost data when a price/quantity changes in QB.
   // Require uniqueness so two identical service lines never inherit one another's costs.
   const description = lineDescription(remoteLine);
   if (description) {
-    const byDescription = available.filter(({ line }) => lineDescription(line) === description);
+    const byDescription = available.filter(({ line }) => localLineDescriptions(line, localInvoice).includes(description));
     if (byDescription.length === 1) return byDescription[0];
   }
 
@@ -312,6 +324,9 @@ function lineFromQuickBooks(remoteLine, localLine, fallbackId) {
       for (const field of SPS_LINE_METADATA_FIELDS) {
         if (own(localLine, field)) next[field] = clone(localLine[field]);
       }
+      // SPS preserves performed-date evidence when QB has no corresponding
+      // field. A service date actually returned by QB remains authoritative.
+      if (!own(next, "serviceDate") && own(localLine, "serviceDate")) next.serviceDate = clone(localLine.serviceDate);
     }
   } else {
     // QuickBooks does not carry SPS cost/catalog data. Never make a new QB-only line
@@ -330,7 +345,7 @@ function reconciledLines(localInvoice, quickBooksInvoice) {
   const claimed = new Set();
 
   return remoteLines.map((remoteLine, remoteIndex) => {
-    const match = findLineMatch(remoteLine, remoteIndex, localLines, claimed, remoteLines.length);
+    const match = findLineMatch(remoteLine, remoteIndex, localLines, claimed, remoteLines.length, localInvoice);
     if (match) claimed.add(match.index);
     const fallbackId = [
       "qbl",

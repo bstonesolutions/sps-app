@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
+import { buildQuickBooksInvoicePayload } from "../quickbooksDraftSync.js";
 
 import {
   appendCompletedVisitsToInvoice,
@@ -48,6 +49,58 @@ test("selected completed visits append without erasing existing invoice lines", 
   assert.deepEqual(result.sourceVisitClientIds, ["client-1"]);
   assert.equal(result.invoice.sourceVisitClientId, "client-1");
   assert.equal(existing.lineItems.length, 1, "the helper must not mutate the original invoice");
+});
+
+test("multi-month visit imports retain each performed date without dating supplies or using issue date", () => {
+  const first = visit({
+    date: "01/02/2027", maintenanceBillingServiceDate: "12/31/2026",
+    type: "Monthly Service", services: [{ id: "maintenance", name: "Monthly pond service", price: "175" }],
+  });
+  const second = visit({
+    sid: "stop-102", completionReceiptId: "receipt-102", date: "01/15/2027",
+    type: "Monthly Service", services: [{ id: "maintenance", name: "Monthly pond service", price: "175" }],
+  });
+  const imported = appendCompletedVisitsToInvoice({
+    id: "invoice-later", date: "02/01/2027", lineItems: [],
+  }, [first, second], { clientId: "client-1" });
+  assert.deepEqual(imported.lineItems.filter((line) => line.kind === "service").map((line) => ({
+    desc: line.desc, serviceDate: line.serviceDate, qty: line.qty, unitPrice: line.unitPrice,
+  })), [
+    { desc: "Monthly pond service", serviceDate: "12/31/2026", qty: "1", unitPrice: "175" },
+    { desc: "Monthly pond service", serviceDate: "01/15/2027", qty: "1", unitPrice: "175" },
+  ]);
+  assert.equal(imported.invoice.date, "02/01/2027");
+  for (const line of imported.lineItems.filter((line) => line.kind !== "service")) {
+    assert.equal(Object.hasOwn(line, "serviceDate"), false);
+    assert.equal(Object.hasOwn(line, "serviceMonth"), false);
+    assert.ok(["Valve", "Pump"].includes(line.desc));
+  }
+  const undated = appendCompletedVisitsToInvoice({ date: "02/01/2027", lineItems: [] }, [visit({ date: "" })], { clientId: "client-1" });
+  assert.equal(Object.hasOwn(undated.lineItems[0], "serviceDate"), false, "missing visit dates cannot inherit the invoice date");
+});
+
+test("generic services inherit maintenance classification only from their performed visit type", () => {
+  const monthlyVisit = {
+    sid: "monthly-generic", type: "Monthly Service", date: "04/18/2026",
+    services: [
+      { name: "Services", price: 175 },
+      { name: "Pump repair", price: 90 },
+      { name: "Pool opening", price: 80 },
+      { name: "Separate labor", price: 60, billSeparately: true },
+    ],
+    partsUsed: [{ name: "Filter", qty: 1, retailPer: 20 }],
+  };
+  const imported = appendCompletedVisitsToInvoice({ date: "05/01/2026", lineItems: [] }, [monthlyVisit], { clientId: "client-1" }).invoice;
+  assert.equal(imported.lineItems[0].maintenanceService, true);
+  assert.equal(imported.lineItems.slice(1).some((line) => line.maintenanceService === true), false);
+  const payload = buildQuickBooksInvoicePayload(imported, { id: "client-1", name: "Sample Client" }, {});
+  assert.equal(payload.lineItems[0].description, "Services - April 2026");
+  assert.equal(payload.lineItems[0].maintenanceService, true);
+  assert.deepEqual(payload.lineItems.slice(1).map((line) => line.description), ["Pump repair", "Pool opening", "Separate labor", "Filter"]);
+
+  const unrelated = completedVisitLineItems({ ...monthlyVisit, type: "Service Visit", plan: "Monthly", monthlyRate: 175 });
+  assert.equal(unrelated[0].maintenanceService, undefined, "date and client-like plan fields cannot classify the visit");
+  assert.equal(buildQuickBooksInvoicePayload({ lineItems: unrelated }, {}, {}).lineItems[0].description, "Services");
 });
 
 test("saving cannot move imported visits to another client", () => {

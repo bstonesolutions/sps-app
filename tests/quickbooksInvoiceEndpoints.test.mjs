@@ -110,6 +110,72 @@ function existingInvoice() {
   };
 }
 
+for (const [operation, handler] of [["create", createInvoiceHandler], ["update", updateInvoiceHandler]]) {
+  test(`QuickBooks ${operation} labels performed April maintenance on a May invoice without changing products`, async () => {
+    const before = existingInvoice();
+    let written = null;
+    const writes = [];
+    installAuthAndTokenMocks(async (href, options = {}) => {
+      const url = new URL(href);
+      if (url.pathname.endsWith("/customer/42")) return jsonResponse({ Customer: { Id: "42" } });
+      if (url.pathname.endsWith("/invoice/1964")) {
+        return jsonResponse({ Invoice: written ? { ...before, ...written, Id: "1964", SyncToken: "8" } : before });
+      }
+      if (url.pathname.endsWith("/invoice") && options.method === "POST") {
+        written = JSON.parse(options.body);
+        writes.push(written);
+        return jsonResponse({ Invoice: { ...before, ...written, Id: "1964", SyncToken: "8" } });
+      }
+      throw new Error(`Unexpected fetch: ${href}`);
+    });
+    const res = mockResponse();
+    await handler(authenticatedRequest({ invoice: {
+      spsInvoiceId: "performed-april", clientId: "client-42", qbCustomerId: "42", clientName: "Generic Client",
+      ...(operation === "update" ? { qbId: "1964", qbBaseContentFingerprint: fingerprintQuickBooksInvoiceContent(before) } : {}),
+      number: "INV-APRIL", date: "2026-05-05", dueDate: "2026-05-20", taxRate: "0",
+      lineItems: [
+        { id: "maintenance", qbLineId: "22", qbItemRef: { value: "8", name: "Services" }, description: "Monthly pond service", serviceMonth: "2026-04", qty: "1", unitPrice: "175", kind: "service", taxable: false },
+        { id: "supplies", qbLineId: "23", qbItemRef: { value: "9", name: "Products" }, description: "Monthly maintenance supply kit", qty: "2", unitPrice: "25", kind: "product", taxable: false },
+      ],
+    } }), res);
+
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.equal(res.body.success, true);
+    assert.equal(writes.length, 1);
+    assert.equal(written.TxnDate, "2026-05-05", "issue date remains separate from performed month");
+    assert.equal(written.Line[0].Description, "Monthly pond service - April 2026");
+    assert.equal(written.Line[0].Amount, 175);
+    assert.equal(written.Line[1].Description, "Monthly maintenance supply kit");
+    assert.equal(written.Line[1].Amount, 50);
+    assert.equal(written.Line[1].SalesItemLineDetail.Qty, 2);
+    assert.equal(res.body.invoice.lineItems[0].desc, "Monthly pond service - April 2026");
+  });
+
+  for (const [state, line, expectedCode] of [
+    ["missing", { description: "Monthly pond service" }, "maintenance-service-month-missing"],
+    ["conflicting", { description: "Monthly pond service, May 2026", serviceMonth: "2026-04" }, "maintenance-service-month-conflict"],
+  ]) {
+    test(`QuickBooks ${operation} rejects ${state} performed month before any external writes`, async () => {
+      const externalCalls = [];
+      installAuthAndTokenMocks(async (href, options = {}) => {
+        externalCalls.push({ href, method: options.method || "GET" });
+        throw new Error(`Unexpected external request: ${href}`);
+      });
+      const res = mockResponse();
+      await handler(authenticatedRequest({ invoice: {
+        clientId: "client-42", clientName: "Generic Client", qbCustomerId: "42",
+        ...(operation === "update" ? { qbId: "1964", qbBaseContentFingerprint: fingerprintQuickBooksInvoiceContent(existingInvoice()) } : {}),
+        number: "INV-MONTH-REVIEW", date: "2026-05-05", dueDate: "2026-06-05",
+        lineItems: [{ ...line, kind: "service", qty: "1", unitPrice: "175" }],
+      } }), res);
+      assert.equal(res.statusCode, 422);
+      assert.equal(res.body.code, expectedCode);
+      assert.equal(res.body.reviewRequired, true);
+      assert.deepEqual(externalCalls, [], "no QuickBooks customer, item, or invoice request can run before month validation");
+    });
+  }
+}
+
 test("QuickBooks sync emits stable line identity, item identity, tax code, and content fingerprint", async () => {
   const invoice = {
     ...existingInvoice(),

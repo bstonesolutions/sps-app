@@ -4,6 +4,7 @@ import {
   recurringMaintenanceCadence,
 } from "./maintenanceBilling.js";
 import { isMaintenanceServiceExtra, savedMaintenanceCoverage } from "./maintenanceInvoiceCoverage.js";
+import { isMaintenanceServiceFromSource } from "./maintenanceServiceLine.js";
 
 export const COMPLETION_INVOICE_VERSION = 1;
 
@@ -157,6 +158,9 @@ function lineAmount(line) {
 
 function serviceLines(entry, stop, sourceStopId, sourceReceiptId) {
   const services = list(entry?.services);
+  const serviceDate = text(entry?.maintenanceBillingServiceDate || entry?.date);
+  const serviceDateFields = serviceDate ? { serviceDate } : {};
+  const serviceSource = { type: text(entry?.type || stop?.type) };
   const priced = services.filter((service) => (
     typeof service === "object" && service != null && number(service.price ?? service.unitPrice) > 0
   ));
@@ -172,6 +176,8 @@ function serviceLines(entry, stop, sourceStopId, sourceReceiptId) {
       costKnown: hasOwn(service, "cost") || hasOwn(service, "unitCost"),
       taxable: false,
       kind: "service",
+      ...(isMaintenanceServiceFromSource(serviceSource, service) ? { maintenanceService: true } : {}),
+      ...serviceDateFields,
       ...(service.refId != null || service.id != null ? { refId: service.refId ?? service.id } : {}),
       sourceStopId,
       ...(sourceReceiptId ? { sourceCompletionReceiptId: sourceReceiptId } : {}),
@@ -190,6 +196,8 @@ function serviceLines(entry, stop, sourceStopId, sourceReceiptId) {
           costKnown: true,
           taxable: false,
           kind: "service",
+          ...(isMaintenanceServiceFromSource(serviceSource, { desc: "Service price adjustment", kind: "service" }) ? { maintenanceService: true } : {}),
+          ...serviceDateFields,
           sourceStopId,
           ...(sourceReceiptId ? { sourceCompletionReceiptId: sourceReceiptId } : {}),
         });
@@ -209,6 +217,8 @@ function serviceLines(entry, stop, sourceStopId, sourceReceiptId) {
     costKnown: false,
     taxable: false,
     kind: "service",
+    ...(isMaintenanceServiceFromSource(serviceSource, { desc: text(stop?.type || entry?.type), kind: "service" }) ? { maintenanceService: true } : {}),
+    ...serviceDateFields,
     sourceStopId,
     ...(sourceReceiptId ? { sourceCompletionReceiptId: sourceReceiptId } : {}),
   }];
@@ -307,6 +317,9 @@ function canonicalLine(line) {
     sourceCompletionReceiptId: text(line?.sourceCompletionReceiptId),
     sourceStopIds: list(line?.sourceStopIds).map(text),
     sourceCompletionReceiptIds: list(line?.sourceCompletionReceiptIds).map(text),
+    ...(text(line?.serviceDate) ? { serviceDate: text(line.serviceDate) } : {}),
+    ...(text(line?.serviceMonth) ? { serviceMonth: text(line.serviceMonth) } : {}),
+    ...(line?.maintenanceService === true ? { maintenanceService: true } : {}),
   };
 }
 
@@ -789,7 +802,9 @@ export function planCompletionInvoice({
     const sourceCompletionReceiptIds = visitEntries.map((visit) => visit.receiptId).filter(Boolean);
     const lineItems = [{
       id: `il_maint_${safeIdPart(client.id)}_${safeIdPart(period)}_service`,
-      desc: `Monthly service — ${monthLabel(period)}`,
+      desc: `Monthly service, ${monthLabel(period)}`,
+      serviceMonth: period,
+      ...(isMaintenanceServiceFromSource(authoritativeStop, { desc: "Monthly service", kind: "service" }) ? { maintenanceService: true } : {}),
       qty: "1",
       unitPrice: decimal(monthlyRate),
       unitCost: "",

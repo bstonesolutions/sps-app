@@ -13,7 +13,7 @@ const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
 
 const client = { id: "client-a", qbId: "customer-a", name: "Maple Court", monthlyRate: "175", planFreq: "Monthly", history: [] };
-const serviceLine = { id: "line-a", desc: "Monthly maintenance", kind: "service", qty: "1", unitPrice: "175", taxable: false, qbItemRef: { value: "item-1" } };
+const serviceLine = { id: "line-a", desc: "Monthly maintenance - October 2026", kind: "service", qty: "1", unitPrice: "175", taxable: false, qbItemRef: { value: "item-1" } };
 const sourceInvoice = { id: "paid-source", number: "INV-PAID", clientId: client.id, date: "10/01/2026", dueDate: "10/01/2026", status: "Paid", balance: 0, total: 175, lineItems: [serviceLine] };
 const draft = () => ({ id: "draft-a", number: "INV-NEW", clientId: client.id, date: "10/01/2026", dueDate: "10/15/2026", status: "Draft", lineItems: [serviceLine] });
 const ledger = () => ({ version: 2, policies: {}, allocations: { [client.id]: { "2026-10": { status: "paid", expectedCents: 17500, allocatedCents: 17500, sources: [{ kind: "invoice", invoiceId: sourceInvoice.id, amountCents: 17500 }] } } } });
@@ -195,7 +195,7 @@ test("shared payload preserves client and completed-service identity for authori
 
 test("a saved unsynced manual draft can deliberately select another client before its first QB create", async () => {
   const selected = { ...client, id: "client-b", qbId: "customer-b", name: "Birch Court" };
-  const saved = { ...draft(), qbCustomerId: client.qbId };
+  const saved = { ...draft(), qbCustomerId: client.qbId, serviceMonth: "2026-10" };
   const calls = install({ clients: [client, selected], invoices: [saved], billing: { version: 2, policies: {}, allocations: {} } });
   const result = res();
   await createInvoice(request(buildQuickBooksInvoicePayload({ ...saved, clientId: selected.id }, selected, {})), result);
@@ -234,3 +234,109 @@ test("client reassignment cannot move imported work, estimate links, payment evi
     assert.equal(qbWrites(calls).length, 0);
   }
 });
+
+test("outgoing maintenance missing a service month is held even when its issue date is valid", async () => {
+  const calls = install({ invoices: [], billing: { version: 2, policies: {}, allocations: {} } });
+  const invoice = { ...draft(), date: "12/01/2026", lineItems: [{ ...serviceLine, desc: "Monthly maintenance" }] };
+  const result = res();
+  await createInvoice(request(buildQuickBooksInvoicePayload(invoice, client, {})), result);
+  assert.equal(result.statusCode, 422);
+  assert.equal(result.body.code, "maintenance-service-month-missing");
+  assert.equal(qbWrites(calls).length, 0);
+});
+
+test("outgoing maintenance checks its described month instead of a later issue date", async () => {
+  const calls = install();
+  const result = res();
+  await createInvoice(request(buildQuickBooksInvoicePayload({ ...draft(), date: "12/01/2026" }, client, {})), result);
+  assert.equal(result.statusCode, 409);
+  assert.equal(result.body.code, "maintenance-already-covered");
+  assert.equal(qbWrites(calls).length, 0);
+});
+
+test("saved visit provenance detects a conflicting outgoing month before any QuickBooks writes", async () => {
+  const linkedClient = { ...client, history: [{ sid: "october-stop", type: "Monthly Service", date: "10/15/2026" }] };
+  const saved = { ...draft(), sourceStopId: "october-stop", date: "12/01/2026" };
+  const calls = install({ clients: [linkedClient], invoices: [sourceInvoice, saved] });
+  const edited = { ...saved, lineItems: [{ ...serviceLine, desc: "Monthly maintenance - December 2026" }] };
+  const result = res();
+  await createInvoice(request(buildQuickBooksInvoicePayload(edited, linkedClient, {})), result);
+  assert.equal(result.statusCode, 409);
+  assert.equal(result.body.code, "maintenance-service-month-conflict");
+  assert.equal(qbWrites(calls).length, 0);
+});
+
+test("a manual draft can correct its selected service month without changing its client", async () => {
+  const saved = { ...draft(), serviceMonth: "2026-10", lineItems: [{ ...serviceLine, desc: "Monthly maintenance" }] };
+  const calls = install({ invoices: [saved], billing: { version: 2, policies: {}, allocations: {} } });
+  const result = res();
+  await createInvoice(request(buildQuickBooksInvoicePayload({ ...saved, serviceMonth: "2026-11" }, client, {})), result);
+  assert.equal(result.statusCode, 200);
+  const write = qbWrites(calls).find(call => call.href.includes("/invoice?"));
+  assert.match(JSON.parse(write.body).Line[0].Description, /November 2026/);
+});
+
+for (const [operation, handler] of [["create", createInvoice], ["update", updateInvoice]]) {
+  test(`${operation} preserves the unchanged prepaid-source exemption for an unformatted valid payload`, async () => {
+    const saved = { ...sourceInvoice, serviceMonth: "2026-10", ...(operation === "update" ? { qbId: "qb-draft" } : {}),
+      lineItems: [{ ...serviceLine, desc: "Monthly maintenance" }],
+    };
+    const existing = qbInvoice();
+    const calls = install({ invoices: [saved], existing });
+    const payload = buildQuickBooksInvoicePayload(saved, client, {});
+    payload.lineItems[0].description = "Monthly maintenance";
+    if (operation === "update") payload.qbBaseContentFingerprint = fingerprintQuickBooksInvoiceContent(existing);
+    const result = res();
+    await handler(request(payload), result);
+    assert.equal(result.statusCode, 200, JSON.stringify(result.body));
+    const writes = qbWrites(calls);
+    assert.equal(writes.length, 1);
+    assert.equal(JSON.parse(writes[0].body).Line[0].Description, "Monthly maintenance - October 2026");
+  });
+
+  for (const evidence of ["line date", "completed visit", "legacy monthly period"]) {
+    test(`${operation} checks the transmitted month against canonical ${evidence} for an unformatted payload`, async () => {
+      const linkedClient = { ...client, history: [{ sid: "october-stop", type: "Monthly Service", date: "10/15/2026" }] };
+      const saved = { ...draft(), ...(operation === "update" ? { qbId: "qb-draft" } : {}),
+        ...(evidence === "completed visit" ? { sourceStopId: "october-stop" } : {}),
+        ...(evidence === "legacy monthly period" ? { source: "monthly-maintenance", autoPeriod: "2026-10" } : {}),
+        lineItems: [{ ...serviceLine, desc: "Monthly maintenance", ...(evidence === "line date" ? { serviceDate: "2026-10-15" } : {}) }],
+      };
+      const existing = qbInvoice();
+      const calls = install({ clients: [linkedClient], invoices: [saved], billing: { version: 2, policies: {}, allocations: {} }, existing });
+      const payload = buildQuickBooksInvoicePayload(saved, linkedClient, {});
+      delete payload.autoPeriod;
+      payload.serviceMonth = "2026-11";
+      payload.lineItems[0].description = "Monthly maintenance";
+      delete payload.lineItems[0].serviceDate;
+      if (operation === "update") payload.qbBaseContentFingerprint = fingerprintQuickBooksInvoiceContent(existing);
+      const result = res();
+      await handler(request(payload), result);
+      assert.equal(result.statusCode, 409, JSON.stringify(result.body));
+      assert.equal(result.body.code, "maintenance-service-month-conflict");
+      assert.equal(qbWrites(calls).length, 0, "coverage must inspect the same month that QuickBooks would receive");
+    });
+  }
+
+  for (const evidence of ["saved marker", "completed visit"]) {
+    test(`${operation} holds undated generic Services identified as maintenance by ${evidence}`, async () => {
+      const linkedClient = { ...client, history: [{ sid: "october-stop", type: "Monthly Service", date: "10/15/2026" }] };
+      const saved = { ...draft(), ...(operation === "update" ? { qbId: "qb-draft" } : {}),
+        ...(evidence === "completed visit" ? { sourceStopId: "october-stop" } : {}),
+        lineItems: [{ ...serviceLine, desc: "Services", ...(evidence === "saved marker" ? { maintenanceService: true, serviceDate: "2026-10-15" } : {}) }],
+      };
+      const existing = qbInvoice();
+      const calls = install({ clients: [linkedClient], invoices: [saved], billing: { version: 2, policies: {}, allocations: {} }, existing });
+      const payload = buildQuickBooksInvoicePayload(saved, linkedClient, {});
+      payload.lineItems[0].description = "Services";
+      delete payload.lineItems[0].maintenanceService;
+      delete payload.lineItems[0].serviceDate;
+      if (operation === "update") payload.qbBaseContentFingerprint = fingerprintQuickBooksInvoiceContent(existing);
+      const result = res();
+      await handler(request(payload), result);
+      assert.equal(result.statusCode, 409, JSON.stringify(result.body));
+      assert.equal(result.body.code, "maintenance-service-month-missing");
+      assert.equal(qbWrites(calls).length, 0, "known maintenance cannot reach QuickBooks without its performed month");
+    });
+  }
+}

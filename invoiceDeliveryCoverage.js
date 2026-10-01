@@ -11,7 +11,7 @@ export function invoiceDeliveryIdentity(invoice, clientId) {
 }
 
 export function invoiceDeliveryLine(line) {
-  const keys = ["id", "qbLineId", "kind", "desc", "description", "qty", "unitPrice", "bundleNote", "taxable", "sourceStopId", "sourceStopIds", "sourceCompletionReceiptId", "sourceCompletionReceiptIds"];
+  const keys = ["id", "qbLineId", "kind", "desc", "description", "qty", "unitPrice", "bundleNote", "taxable", "serviceMonth", "serviceDate", "sourceVisitDates", "maintenanceService", "sourceStopId", "sourceStopIds", "sourceCompletionReceiptId", "sourceCompletionReceiptIds"];
   return Object.fromEntries(keys.filter(key => line?.[key] != null).map(key => [key, line[key]]));
 }
 

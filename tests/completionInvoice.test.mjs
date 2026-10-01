@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { buildQuickBooksInvoicePayload } from "../quickbooksDraftSync.js";
 
 import {
   completionInvoiceFingerprint,
@@ -121,6 +122,68 @@ test("one-off completion is idempotent by deterministic source stop id", () => {
     invoiceNumber: "INV-2000",
     sourceStopId: "one-off-idempotent",
   });
+});
+
+test("ordinary monthly completion keeps its performed date separate from issue date and supplies", () => {
+  const stop = { sid: "monthly-april", clientId: "client-1", type: "Monthly Service" };
+  const entry = {
+    sid: stop.sid, completionReceiptId: "receipt-april", date: "05/01/2026",
+    maintenanceBillingServiceDate: "04/30/2026", invoice: "$175.00",
+    services: [{ id: "monthly-service", name: "Monthly pond service", price: "175" }],
+    partsUsed: [{ id: "filter", name: "Filter", qty: 1, retailPer: 25, bill: true }],
+  };
+  const input = {
+    invoices: [], invoicing, schedule: [{ date: "04/30/2026", stops: [stop] }],
+    completed: { [stop.sid]: marker(entry.completionReceiptId) }, stop, entry,
+    client: baseClient({ planFreq: "Monthly" }), completedAt: "2026-05-01T14:00:00.000Z",
+  };
+  const result = planCompletionInvoice(input);
+  const invoice = result.invoices[0];
+  assert.equal(result.outcome.kind, "one-off");
+  assert.equal(invoice.date, "05/01/2026");
+  assert.equal(invoice.lineItems[0].serviceDate, "04/30/2026");
+  assert.equal(invoice.lineItems[0].desc, "Monthly pond service");
+  assert.equal(invoice.lineItems[0].unitPrice, "175");
+  assert.equal(invoice.lineItems[1].desc, "Filter");
+  assert.equal(Object.hasOwn(invoice.lineItems[1], "serviceDate"), false);
+  assert.notEqual(completionInvoiceFingerprint(invoice), completionInvoiceFingerprint({
+    ...invoice, lineItems: invoice.lineItems.map((line, index) => index ? line : { ...line, serviceDate: "05/01/2026" }),
+  }), "changing the performed date counts as an edit to an automatic draft");
+
+  const legacy = planCompletionInvoice({ ...input, entry: { ...entry, maintenanceBillingServiceDate: undefined, date: "04/29/2026" } });
+  assert.equal(legacy.invoices[0].lineItems[0].serviceDate, "04/29/2026");
+  const undated = planCompletionInvoice({ ...input, entry: { ...entry, maintenanceBillingServiceDate: undefined, date: "" } });
+  assert.equal(Object.hasOwn(undated.invoices[0].lineItems[0], "serviceDate"), false, "do not substitute scheduled or invoice dates for absent performed history");
+  const fallback = planCompletionInvoice({ ...input, entry: { ...entry, services: [] } });
+  assert.equal(fallback.invoices[0].lineItems[0].serviceDate, "04/30/2026");
+  assert.equal(fallback.invoices[0].lineItems[0].unitPrice, "175");
+});
+
+test("ordinary completed monthly work keeps generic service wording tied to its performed month", () => {
+  const stop = { sid: "generic-monthly", clientId: "client-1", type: "Monthly Service" };
+  const entry = {
+    sid: stop.sid, date: "04/18/2026", completionReceiptId: "generic-receipt", invoice: "$265.00",
+    services: [{ name: "Services", price: 175 }, { name: "Repair labor", price: 90 }],
+  };
+  const input = {
+    invoices: [], invoicing, schedule: [{ date: "04/18/2026", stops: [stop] }],
+    stop, entry, completed: { [stop.sid]: marker(entry.completionReceiptId) },
+    client: baseClient({ planFreq: "Monthly" }), completedAt: "2026-05-01T14:00:00.000Z",
+  };
+  const result = planCompletionInvoice(input);
+  const generated = result.invoices[0];
+  assert.equal(generated.lineItems[0].maintenanceService, true);
+  assert.equal(generated.lineItems[1].maintenanceService, undefined);
+  const payload = buildQuickBooksInvoicePayload(generated, input.client, invoicing);
+  assert.equal(payload.date, "2026-05-01");
+  assert.equal(payload.lineItems[0].description, "Services - April 2026");
+  assert.equal(payload.lineItems[1].description, "Repair labor");
+  assert.notEqual(completionInvoiceFingerprint(generated), completionInvoiceFingerprint({ ...generated, lineItems: generated.lineItems.map((line) => ({ ...line, maintenanceService: undefined })) }));
+
+  const otherStop = { ...stop, type: "Service Visit" };
+  const other = planCompletionInvoice({ ...input, stop: otherStop, schedule: [{ date: "04/18/2026", stops: [otherStop] }] });
+  assert.equal(other.invoices[0].lineItems[0].maintenanceService, undefined);
+  assert.equal(buildQuickBooksInvoicePayload(other.invoices[0], input.client, invoicing).lineItems[0].description, "Services");
 });
 
 test("one-off draft reconciles saved Amount Charged without discarding meaningful service lines", () => {
@@ -255,11 +318,13 @@ for (const frequency of ["Weekly", "Bi-Weekly"]) {
     assert.deepEqual(
       invoice.lineItems.map(({ desc, qty, unitPrice, kind }) => ({ desc, qty, unitPrice, kind })),
       [
-        { desc: "Monthly service — August 2026", qty: "1", unitPrice: "600", kind: "service" },
+        { desc: "Monthly service, August 2026", qty: "1", unitPrice: "600", kind: "service" },
         { desc: "Valve", qty: "3", unitPrice: "20", kind: "part" },
         { desc: "Bacteria", qty: "3", unitPrice: "15", kind: "product" },
       ],
     );
+    assert.equal(invoice.lineItems[0].serviceMonth, "2026-08");
+    assert.equal(invoice.lineItems.slice(1).every((line) => !Object.hasOwn(line, "serviceMonth")), true);
 
     const replay = planCompletionInvoice({
       invoices: afterFinal.invoices,
@@ -345,7 +410,7 @@ test("a later same-month completion rebuilds only an untouched monthly auto-draf
   assert.deepEqual(
     rebuilt.lineItems.map(({ desc, qty, unitPrice, kind }) => ({ desc, qty, unitPrice, kind })),
     [
-      { desc: "Monthly service — August 2026", qty: "1", unitPrice: "400", kind: "service" },
+      { desc: "Monthly service, August 2026", qty: "1", unitPrice: "400", kind: "service" },
       { desc: "Bacteria", qty: "3", unitPrice: "15", kind: "product" },
       { desc: "Valve", qty: "1", unitPrice: "20", kind: "part" },
     ],

@@ -85,7 +85,7 @@ test("linked invoice updates its existing twin and retains customer-send evidenc
 });
 
 test("production QuickBooks response normalization preserves line names through direct sync", async () => {
-  const original = { ...draft(), taxRate: 6, lineItems: [
+  const original = { ...draft(), serviceMonth: "2026-09", taxRate: 6, lineItems: [
     { id: "line-1", desc: "Pond maintenance visit", qty: 1, unitPrice: 185, unitCost: 50, taxable: false },
     { id: "line-2", desc: "Filter supplies", qty: 2, unitPrice: 24, unitCost: 10, taxable: true },
   ] };
@@ -103,7 +103,7 @@ test("production QuickBooks response normalization preserves line names through 
   });
   const h = harness(original, { reply: { response: { ok: true, status: 200 }, data: { success: true, qbId: "QB-100", qbContentFingerprint: canonical.qbContentFingerprint, invoice: canonical } } });
   assert.equal((await h.run()).status, "synced");
-  assert.deepEqual(h.current.lineItems.map((line) => line.desc), ["Pond maintenance visit", "Filter supplies"]);
+  assert.deepEqual(h.current.lineItems.map((line) => line.desc), ["Pond maintenance visit - September 2026", "Filter supplies"]);
   assert.deepEqual(h.current.lineItems.map((line) => line.unitCost), [50, 10]);
   assert.equal(h.current.total, 235.88);
   assert.equal(h.current.status, "Draft");

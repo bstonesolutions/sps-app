@@ -1,4 +1,5 @@
 import { isMaintenanceServiceExtra, savedMaintenanceCoverage } from "./maintenanceInvoiceCoverage.js";
+import { isMaintenanceServiceFromSource } from "./maintenanceServiceLine.js";
 
 const text = (value) => String(value == null ? "" : value).trim();
 const list = (value) => (Array.isArray(value) ? value : []);
@@ -491,6 +492,7 @@ export function completedVisitLineItems(visit, { clientId = "" } = {}) {
   const source = completedVisitSource(visit, { clientId });
   const idRoot = `il_visit_${safeIdPart(source.sourceStopId)}`;
   const lines = [];
+  const serviceDate = text(visit?.maintenanceBillingServiceDate || visit?.date);
   const coverage = savedMaintenanceCoverage(visit, { clientId });
   // Missing/corrupt accounting evidence must not turn a covered visit back into
   // a charge. Review it first, while keeping unrelated billable extras intact.
@@ -511,6 +513,8 @@ export function completedVisitLineItems(visit, { clientId = "" } = {}) {
       costKnown,
       taxable: false,
       kind: "service",
+      ...(isMaintenanceServiceFromSource(visit, service) ? { maintenanceService: true } : {}),
+      ...(serviceDate ? { serviceDate } : {}),
       ...(service.id != null || service.refId != null ? { refId: service.refId ?? service.id } : {}),
       ...lineBase(source),
     });

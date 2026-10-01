@@ -33,6 +33,7 @@ test("an SPS progress checkpoint remains ready for a later deliberate QuickBooks
     status: "Draft",
     clientId: client.id,
     clientName: client.name,
+    serviceMonth: "2026-09",
     lineItems: [{ desc: "Monthly service", qty: 1, unitPrice: 175 }],
   };
 
@@ -40,6 +41,38 @@ test("an SPS progress checkpoint remains ready for a later deliberate QuickBooks
   const partitioned = partitionQuickBooksDraftSelection([checkpoint], () => client);
   assert.deepEqual(partitioned.ready.map((row) => row.invoice.id), ["checkpoint-1"]);
   assert.equal(partitioned.skipped.length, 0);
+});
+
+test("maintenance drafts need a service month before direct or bulk QuickBooks sync", () => {
+  const draft = {
+    id: "month-missing", number: "INV-1006", status: "Draft", date: "10/01/2026",
+    lineItems: [{ desc: "Monthly service", qty: 1, unitPrice: 175 }],
+  };
+  assert.equal(quickBooksDraftSyncEligibility(draft, client).code, "maintenance-service-month-missing");
+  assert.equal(partitionQuickBooksDraftSelection([draft], () => client).ready.length, 0);
+  assert.equal(quickBooksDraftSyncEligibility({ ...draft, serviceMonth: "2026-09" }, client).eligible, true);
+});
+
+test("QuickBooks payload describes performed months and keeps canonical line service metadata", () => {
+  const invoice = {
+    id: "iv-month", number: "INV-1007", date: "10/01/2026", serviceMonth: "2026-10",
+    lineItems: [
+      { desc: "Monthly pond maintenance", serviceMonth: "2026-09", serviceDate: "2026-09-17", sourceVisitDates: ["2026-09-03", "2026-09-17"], qty: 1, unitPrice: 175, kind: "service" },
+      { description: "Pump repair", qty: 1, unitPrice: 90, kind: "service" },
+    ],
+  };
+  const payload = buildQuickBooksInvoicePayload(invoice, client, {});
+  assert.equal(payload.date, "2026-10-01");
+  assert.equal(payload.lineItems[0].description, "Monthly pond maintenance - September 2026");
+  assert.equal(payload.lineItems[0].serviceMonth, "2026-09");
+  assert.equal(payload.lineItems[0].serviceDate, "2026-09-17");
+  assert.deepEqual(payload.lineItems[0].sourceVisitDates, ["2026-09-03", "2026-09-17"]);
+  assert.equal(payload.lineItems[1].description, "Pump repair");
+});
+
+test("payload formatting remains nonthrowing for legacy records with missing service months", () => {
+  const payload = buildQuickBooksInvoicePayload({ lineItems: [{ desc: "Monthly Service", qty: 1, unitPrice: 175 }] }, client, {});
+  assert.equal(payload.lineItems[0].description, "Monthly Service");
 });
 
 test("missing numbers and zero-value lines never enter the QuickBooks draft queue", () => {

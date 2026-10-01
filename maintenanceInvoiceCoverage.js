@@ -11,6 +11,9 @@ import {
   normalizeMonthKey,
   reconcileMaintenancePaymentHistory,
 } from "./maintenancePaymentLedger.js";
+import { invoiceServiceDescriptionIssue, invoiceServiceLineMonths } from "./invoiceServiceDescription.js";
+import { isMaintenanceServiceExtra, isMaintenanceServiceLine } from "./maintenanceServiceLine.js";
+export { isMaintenanceServiceExtra } from "./maintenanceServiceLine.js";
 
 export const COVERED_MAINTENANCE_DISPOSITION = "covered-maintenance";
 export const REVIEW_MAINTENANCE_DISPOSITION = "maintenance-review";
@@ -19,14 +22,6 @@ const list = value => Array.isArray(value) ? value : [];
 const copy = value => structuredClone(value);
 const hold = reason => ({ covered: false, blocked: true, reason, invoiceEvidenceRequired: true });
 const maintenanceWording = value => /\bmaintenance\b|\b(?:weekly|biweekly|monthly|recurring)\s+(?:(?:pool|pond)\s+)?service\b/i.test(text(value));
-
-export function isMaintenanceServiceExtra(service) {
-  if (!service || service.bill === false) return false;
-  if (service.billSeparately === true || service.includedInMaintenance === false
-    || ["one-off", "oneoff", "single"].includes(text(service.billingMode).toLowerCase())) return true;
-  const description = typeof service === "string" ? service : service.desc || service.description || service.name || service.type;
-  return /\b(?:repair|repairs|project|install|installation|startup|start-up|cleanout|clean-out|inspection|consultation|emergency|renovation|construction|replacement|replace)\b|service\s*call/i.test(text(description));
-}
 
 // These snapshots are written by the completion endpoint, never accepted from a
 // completion request. Replays/imports use the recorded decision, not today's policy.
@@ -213,8 +208,8 @@ export function prepareCoveredMaintenanceEntry(options = {}) {
 function sourceIds(value, single, plural) { return [text(value?.[single]), ...list(value?.[plural]).map(text)].filter(Boolean); }
 
 // Advisory in the browser; pass the protected ledger and canonical invoices to
-// enforce the same decision server-side. An invoice's issue date is only a
-// fallback for explicitly described maintenance, never for arbitrary charges.
+// enforce the same decision server-side. Candidate charges use actual service
+// months; the invoice issue date never establishes when the work was performed.
 export function invoiceMaintenanceCoverageIssue({ invoice, client, clients = [], ledger, invoices = [], schedule = [] } = {}) {
   if (!invoice || !client) return null;
   const ledgerValue = normalizeMaintenancePaymentLedger(ledger);
@@ -230,46 +225,73 @@ export function invoiceMaintenanceCoverageIssue({ invoice, client, clients = [],
   );
   if (ownSource) return null;
   const decisions = [];
-  for (const line of list(invoice.lineItems)) {
-    if (["part", "product", "treatment", "bundle"].includes(text(line.kind).toLowerCase())) continue;
+  for (const [lineIndex, line] of list(invoice.lineItems).entries()) {
     if (!(Number(line.qty ?? 1) * Number(line.unitPrice ?? 0) > 0)) continue;
-    if (isMaintenanceServiceExtra(line)) continue;
-    const stopIds = [...sourceIds(line, "sourceStopId", "sourceStopIds"), ...sourceIds(invoice, "sourceStopId", "sourceStopIds")];
-    const receiptIds = [...sourceIds(line, "sourceCompletionReceiptId", "sourceCompletionReceiptIds"), ...sourceIds(invoice, "sourceCompletionReceiptId", "sourceCompletionReceiptIds")];
+    // A linked visit can identify generic "Services", but cannot turn a repair,
+    // opening, product, or other explicit extra into recurring maintenance.
+    if (!isMaintenanceServiceLine({ source: "monthly-maintenance" }, line)) continue;
+    const lineStopIds = sourceIds(line, "sourceStopId", "sourceStopIds");
+    const lineReceiptIds = sourceIds(line, "sourceCompletionReceiptId", "sourceCompletionReceiptIds");
+    const hasLineSources = lineStopIds.length > 0 || lineReceiptIds.length > 0;
+    const stopIds = hasLineSources ? lineStopIds : sourceIds(invoice, "sourceStopId", "sourceStopIds");
+    const receiptIds = hasLineSources ? lineReceiptIds : sourceIds(invoice, "sourceCompletionReceiptId", "sourceCompletionReceiptIds");
     const visits = list(client.history).filter(entry => stopIds.includes(text(entry.sid || entry.stopId))
       || receiptIds.includes(text(entry.completionReceiptId || entry.receiptId)));
     for (const entry of visits) {
       const saved = savedMaintenanceCoverage(entry, { clientId: client.id });
-      if (saved?.covered || saved?.blocked) decisions.push({ ...saved, month: normalizeMonthKey(entry.maintenanceBillingServiceDate || entry.date) });
+      if (saved?.covered || saved?.blocked) decisions.push({ ...saved, month: normalizeMonthKey(entry.maintenanceBillingServiceDate || entry.date) || saved.snapshot?.month });
     }
-    const recognized = text(invoice.source) === "monthly-maintenance" || maintenanceWording(line.desc || line.description);
-    const maintenanceVisits = visits.filter(entry => isRecurringMaintenanceStop(entry, client, entry));
-    if (!recognized && !maintenanceVisits.length) continue;
+    const recognized = isMaintenanceServiceLine(invoice, line);
+    const maintenanceVisits = visits.filter(entry => isRecurringMaintenanceStop(entry, client, entry)
+      || savedMaintenanceCoverage(entry, { clientId: client.id }));
     const dates = maintenanceVisits.map(entry => entry.maintenanceBillingServiceDate || entry.date).filter(Boolean);
+    let linkedMaintenanceStop = false;
     for (const day of list(schedule)) for (const stop of list(day?.stops)) {
-      if (stopIds.includes(text(stop.sid)) && text(stop.clientId ?? stop.id) === text(client.id)
-        && isRecurringMaintenanceStop(stop, client)) dates.push(day.date);
+      if (!stopIds.includes(text(stop.sid)) || text(stop.clientId ?? stop.id) !== text(client.id)
+        || !isRecurringMaintenanceStop(stop, client)) continue;
+      linkedMaintenanceStop = true;
+      // Completed history retains the service date if the schedule was moved.
+      if (!maintenanceVisits.some(entry => text(entry.sid || entry.stopId) === text(stop.sid)
+        && text(entry.maintenanceBillingServiceDate || entry.date))) dates.push(day.date);
     }
-    if (!dates.length && recognized) dates.push(invoice.autoPeriod || invoice.serviceMonth || invoice.date);
-    for (const date of [...new Set(dates)]) {
-      const decision = maintenanceCoverageForService({ client, clients, stop: { type: "Monthly Service", clientId: client.id }, scheduledDate: date, ledger, invoices, schedule });
+    if (!recognized && !maintenanceVisits.length && !linkedMaintenanceStop) continue;
+    const serviceLine = { ...line };
+    if (dates.length) {
+      // Canonical owned visits take priority over manually supplied metadata.
+      // A contradictory written description is still held for correction.
+      delete serviceLine.serviceMonth;
+      delete serviceLine.serviceDate;
+      delete serviceLine.sourceVisitDate;
+      serviceLine.sourceVisitDates = [...new Set(dates)];
+    }
+    const serviceInvoice = { ...invoice, source: "monthly-maintenance", lineItems: [serviceLine] };
+    const serviceIssue = invoiceServiceDescriptionIssue(serviceInvoice);
+    if (serviceIssue) {
+      decisions.push({ ...hold(serviceIssue.code), serviceIssue: { ...serviceIssue, lineIndexes: [lineIndex] } });
+      continue;
+    }
+    for (const month of invoiceServiceLineMonths(serviceInvoice, serviceLine)) {
+      const decision = maintenanceCoverageForService({ client, clients, stop: { type: "Monthly Service", clientId: client.id }, scheduledDate: month, ledger, invoices, schedule });
       // The original settled source invoice remains editable/syncable; it is
       // coverage evidence, not a duplicate invoice for the same service month.
       if (decision.covered && canonicalCurrent && list(decision.snapshot?.sources).some(source =>
         sourceInvoice(source, invoices, client, clients) === canonicalCurrent)) continue;
-      if (decision.covered || decision.blocked) decisions.push({ ...decision, month: normalizeMonthKey(date) });
+      if (decision.covered || decision.blocked) decisions.push({ ...decision, month });
     }
   }
   if (!decisions.length) return null;
   const covered = decisions.some(decision => decision.covered);
+  const serviceIssue = decisions.find(decision => decision.serviceIssue?.code === "maintenance-service-month-conflict")?.serviceIssue
+    || decisions.find(decision => decision.serviceIssue)?.serviceIssue;
   return {
-    code: covered ? "maintenance-already-covered" : "maintenance-coverage-review",
+    code: covered ? "maintenance-already-covered" : serviceIssue?.code || "maintenance-coverage-review",
     message: covered
       ? "Maintenance on this invoice is already covered. Remove the covered service charge; billable extras can stay."
-      : "Maintenance coverage needs review before this invoice can be billed. Check the covered month and payment evidence.",
+      : serviceIssue?.message || "Maintenance coverage needs review before this invoice can be billed. Check the covered month and payment evidence.",
     covered,
     reviewRequired: true,
     months: [...new Set(decisions.map(decision => decision.month).filter(Boolean))],
+    ...(serviceIssue ? { lineIndexes: [...new Set(decisions.flatMap(decision => decision.serviceIssue?.lineIndexes || []))] } : {}),
     decisions,
   };
 }
