@@ -21712,7 +21712,8 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
   const activeCount = pipeline.active.count;
   const pipelineCards = [
     { label: "In progress", bucket: pipeline.active, sub: "Draft + sent", filterId: "active", tone: T.primary },
-    { label: "Approved", bucket: pipeline.approved, sub: "Client accepted", filterId: "approved", tone: T.accent },
+    { label: "Approved", bucket: pipeline.approved, sub: "Client accepted", filterId: "approved", tone: T.text },
+    { label: "Completed", bucket: pipeline.byStatus.complete, sub: "Completed quote value", filterId: "complete", tone: T.text },
     { label: "All estimates", bucket: pipeline.total, sub: "Every status", filterId: "all", tone: T.text },
   ];
 
@@ -21742,8 +21743,8 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
 
       {est.length > 0 && (
         <>
-          <div data-estimate-pipeline-summary style={{ display: "grid", gridTemplateColumns: vp.isPhone ? "repeat(2, minmax(0, 1fr))" : "repeat(3, minmax(0, 1fr))", gap: 8 }}>
-            {pipelineCards.map(({ label, bucket, sub, filterId, tone }, index) => {
+          <div data-estimate-pipeline-summary style={{ display: "grid", gridTemplateColumns: vp.width < 1080 ? "repeat(2, minmax(0, 1fr))" : "repeat(4, minmax(0, 1fr))", gap: 8 }}>
+            {pipelineCards.map(({ label, bucket, sub, filterId, tone }) => {
               const selected = filter === filterId;
               return (
                 <button
@@ -21753,23 +21754,22 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
                   aria-pressed={selected}
                   aria-label={`${label}: ${formatEstimateMoney(bucket.amount)} across ${bucket.count} estimate${bucket.count === 1 ? "" : "s"}`}
                   style={{
-                    gridColumn: vp.isPhone && index === pipelineCards.length - 1 ? "1 / -1" : undefined,
+                    display: "flex",
+                    flexDirection: "column",
                     minWidth: 0,
-                    background: selected ? hexA(tone, 0.065) : T.surface,
-                    border: `1.5px solid ${selected ? hexA(tone, 0.55) : T.border}`,
+                    background: selected ? hexA(T.primary, 0.065) : T.surface,
+                    border: `1.5px solid ${selected ? hexA(T.primary, 0.55) : T.border}`,
                     borderRadius: 15,
                     padding: vp.isPhone ? "12px 13px" : "14px 16px",
                     textAlign: "left",
                     cursor: "pointer",
                     fontFamily: "inherit",
-                    boxShadow: selected ? `0 5px 18px ${hexA(tone, 0.09)}` : "0 1px 3px rgba(0,0,0,0.025)",
                   }}
                 >
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                    <span style={{ minWidth: 0, fontSize: 10.5, color: selected ? tone : T.textMuted, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.055em", whiteSpace: "nowrap" }}>{label}</span>
-                    <span style={{ flexShrink: 0, borderRadius: 100, padding: "3px 7px", background: selected ? hexA(tone, 0.12) : T.surfaceAlt, color: selected ? tone : T.textMuted, fontSize: 10.5, fontWeight: 800, fontVariantNumeric: "tabular-nums" }}>{bucket.count}</span>
+                    <span style={{ minWidth: 0, fontSize: 10.5, color: selected ? T.primary : T.textMuted, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.055em", whiteSpace: "nowrap" }}>{label}</span>
                   </div>
-                  <div style={{ marginTop: 8, color: tone, fontSize: vp.isPhone ? "clamp(19px, 5.5vw, 24px)" : 24, lineHeight: 1.08, fontWeight: 900, letterSpacing: "-0.035em", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>{formatEstimateMoney(bucket.amount)}</div>
+                  <div style={{ marginTop: 8, color: selected ? T.primary : tone, fontSize: vp.isPhone ? "clamp(19px, 5.5vw, 24px)" : 24, lineHeight: 1.08, fontWeight: 900, letterSpacing: "-0.035em", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>{formatEstimateMoney(bucket.amount)}</div>
                   <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 5 }}>{bucket.count} estimate{bucket.count === 1 ? "" : "s"} · {sub}</div>
                 </button>
               );
