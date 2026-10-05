@@ -111,6 +111,68 @@ test("client ownership mismatches and ambiguous QuickBooks customers cannot sele
   }
 });
 
+const payerClient = () => ({ ...client, address: "21 Orchard Road", email: "billing@example.test", phone: "(555) 222-1000" });
+const payerAlias = () => ({ ...payerClient(), id: "company-alias", name: "Maple Property Company", history: [] });
+const noCoverage = () => ({ version: 2, policies: {}, allocations: {} });
+
+for (const [operation, handler] of [["create", createInvoice], ["update", updateInvoice]]) {
+  test(`${operation} keeps a canonical SPS owner when its company alias shares the same QB payer and contacts`, async () => {
+    const owner = payerClient();
+    const saved = { ...draft(), source: "monthly-maintenance", autoPeriod: "2026-10",
+      ...(operation === "update" ? { qbId: "qb-draft" } : {}) };
+    const existing = qbInvoice();
+    const calls = install({ clients: [payerAlias(), owner], invoices: [saved], billing: noCoverage(), existing });
+    const payload = buildQuickBooksInvoicePayload(saved, owner, {});
+    if (operation === "update") payload.qbBaseContentFingerprint = fingerprintQuickBooksInvoiceContent(existing);
+    const result = res();
+    await handler(request(payload), result);
+    assert.equal(result.statusCode, 200, JSON.stringify(result.body));
+    const writes = qbWrites(calls);
+    assert.equal(writes.length, 1);
+    assert.equal(JSON.parse(writes[0].body).CustomerRef.value, owner.qbId);
+  });
+}
+
+test("a payer alias still checks the canonical owner's prepaid coverage", async () => {
+  const owner = payerClient();
+  const saved = { ...draft(), source: "monthly-maintenance" };
+  const calls = install({ clients: [payerAlias(), owner], invoices: [saved, sourceInvoice] });
+  const result = res();
+  await createInvoice(request(buildQuickBooksInvoicePayload(saved, owner, {})), result);
+  assert.equal(result.statusCode, 409);
+  assert.equal(result.body.code, "maintenance-already-covered");
+  assert.equal(qbWrites(calls).length, 0);
+});
+
+test("shared QB payer contacts never replace missing, duplicate, reassigned, or contradictory ownership", async () => {
+  const owner = payerClient();
+  const alias = payerAlias();
+  const saved = { ...draft(), source: "monthly-maintenance", autoPeriod: "2026-10" };
+  const payload = buildQuickBooksInvoicePayload(saved, owner, {});
+  const cases = [
+    { invoices: [], label: "no canonical invoice" },
+    { invoices: [saved, { ...saved }], label: "duplicate canonical invoice" },
+    { clients: [owner, { ...owner }, alias], label: "duplicate canonical client" },
+    { payload: { clientId: alias.id }, label: "different requested client" },
+    { payload: { qbCustomerId: "wrong-qb-customer" }, label: "different requested payer" },
+    { invoices: [{ ...saved, qbCustomerId: "wrong-qb-customer" }], label: "different saved payer" },
+    { clients: [{ ...owner, qbId: "wrong-qb-customer" }, alias], label: "payer belongs only to alias" },
+    { invoices: [{ ...saved, source: "manual", clientId: alias.id }], label: "manual draft reassignment" },
+    { clients: [owner, { ...alias, address: "99 Other Road" }], label: "different address" },
+    { clients: [owner, { ...alias, email: "other@example.test" }], label: "different email" },
+    { clients: [owner, { ...alias, phone: "5552229999" }], label: "different phone" },
+    { clients: [owner, { ...alias, phone: "" }], label: "missing contact evidence" },
+  ];
+  for (const item of cases) {
+    const calls = install({ clients: [owner, alias], invoices: [saved], billing: noCoverage(), ...item });
+    const result = res();
+    await createInvoice(request({ ...payload, ...item.payload }), result);
+    assert.equal(result.statusCode, 409, `${item.label}: ${JSON.stringify(result.body)}`);
+    assert.equal(result.body.code, "maintenance-client-unverified", item.label);
+    assert.equal(qbWrites(calls).length, 0, item.label);
+  }
+});
+
 test("unchanged canonical prepayment evidence can sync, but borrowing its identity or adding charges cannot", async () => {
   let calls = install();
   let result = res();

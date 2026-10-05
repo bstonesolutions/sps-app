@@ -19186,6 +19186,13 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   // there's a client + line items); otherwise just close.
   const finishSave = (finalInv) => {
     onSave(finalInv);
+    // A successful QuickBooks response may normalize the invoice's lines. Keep
+    // the editor on that result so an older coverage check cannot leave it busy.
+    setInv(finalInv);
+    setIsPersisted(true);
+    setQbState("done");
+    setQbMsg("");
+    setCoverageError("");
     if (client && (finalInv.lineItems || []).length) setSendStep(finalInv);
     else onClose();
   };
@@ -19591,7 +19598,9 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
 
   // B9-2: after a successful save, swap to the client-notification step (same flow).
   const sendClient = sendStep ? resolveInvoiceClient(clients, sendStep.clientId) : null;
-  if (sendStep && sendClient && !coverageIssue) return <InvoiceSendStep invoice={sendStep} client={sendClient} onSent={onSave} onClose={onClose} />;
+  // Coverage is checked before saving. The successful result opens optional
+  // delivery controls; showing this step never sends a customer message.
+  if (sendStep && sendClient) return <InvoiceSendStep invoice={sendStep} client={sendClient} onSent={onSave} onClose={onClose} />;
 
   return (
     <Modal title={isPersisted || invoice ? `Edit ${inv.number}` : "New Invoice"} onClose={onClose}>

@@ -14,6 +14,14 @@ const review = (message, code = "maintenance-coverage-review", status = 409) => 
 const hasEvidence = value => value != null && value !== false && value !== ""
   && (Array.isArray(value) ? value.length > 0 : typeof value === "object" ? Object.keys(value).length > 0 : true);
 
+function samePayerContact(left, right) {
+  const normalized = value => text(value).replace(/\s+/g, " ").toLowerCase();
+  const contacts = value => [normalized(value?.address), normalized(value?.email), text(value?.phone).replace(/\D/g, "")];
+  const a = contacts(left);
+  const b = contacts(right);
+  return a.every((value, index) => !!value && value === b[index]);
+}
+
 function hasWorkProvenance(invoice) {
   // A manually selected serviceMonth describes the charge; it is not a link
   // to completed work and must not lock a never-synced draft to its old client.
@@ -141,6 +149,14 @@ export async function quickBooksMaintenanceGuard(invoice, { mode = "create", exi
   }
   for (const id of requestedQbIds) {
     const matches = clients.filter(entry => text(entry.qbId || entry.qbCustomerId) === id);
+    // A person and their company can share a QB payer. Keep the saved SPS
+    // invoice's unique owner when every alias has the same verified contact
+    // details; the QB id alone must never choose a client or bypass a mismatch.
+    const canonicalPayerAlias = matches.length > 1 && !ownershipInvalid && !reassigningManualDraft
+      && client && text(canonical?.clientId ?? canonical?.customerId) === text(client.id)
+      && text(client.qbId || client.qbCustomerId) === id
+      && matches.every(entry => samePayerContact(client, entry));
+    if (canonicalPayerAlias) continue;
     if (matches.length !== 1 || (client && text(client.id) !== text(matches[0].id))) ownershipInvalid = true;
     else client = matches[0];
   }
