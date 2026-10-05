@@ -20,6 +20,14 @@ test("client editor exposes accounting-only prepaid maintenance coverage", async
   assert.match(editor, /maintenanceBilling\?\.coveredThrough/);
   assert.match(editor, /sourceInvoiceId/);
   assert.match(editor, /sourceInvoiceNumber/);
+  assert.match(editor, /type="month" aria-label="First covered month"/);
+  assert.match(editor, /type="month" aria-label="Last covered month"/);
+  assert.match(editor, /prepaymentInvoiceLabel\(invoice\)/);
+  assert.match(editor, /data-selected-prepayment-record aria-live="polite"/);
+  assert.match(editor, /prepaymentInvoiceSummary\(selectedPrepaymentInvoice\)/);
+  assert.match(editor, /<fieldset disabled=\{formSaving\}/);
+  assert.match(editor, /ref=\{saveFeedbackRef\} role="alert"/);
+  assert.match(editor, /Save to apply the service plan and billing changes/);
   assert.match(editor, /Routine maintenance is covered/);
   assert.match(editor, /Repairs, upgrades, and purchased parts or products remain billable/);
 });
@@ -32,14 +40,14 @@ test("client save validates the shared prepaid policy and removes standard-mode 
 
   assert.match(app, /import \{ normalizeMaintenanceBillingPolicy \} from "\.\/maintenanceBilling"/);
   assert.match(editor, /const policy = normalizeMaintenanceBillingPolicy\(form\.maintenanceBilling\)/);
-  assert.match(editor, /Choose a valid prepaid coverage start and end date before saving/);
+  assert.match(editor, /Choose the first and last covered months/);
   assert.match(editor, /next\.maintenanceBilling = policy/);
   assert.match(editor, /delete next\.maintenanceBilling/);
   assert.match(editor, /fetch\(`\$\{PROD_URL\}\/api\/client-maintenance-billing`/);
   assert.match(editor, /clientId: client\.id/);
   assert.match(editor, /maintenanceBilling: next\.maintenanceBilling \|\| null/);
   assert.match(editor, /if \(!response\.ok \|\| !payload\.ok\)/);
-  assert.match(editor, /onSave\(next\)/);
+  assert.match(editor, /await onSave\(next, \{ clientEdit: true, baselineClient: initialFormRef\.current, billingConfirmed: payload\.maintenanceBilling \?\? null \}\)/);
 });
 
 test("client detail passes invoice choices into the editor and identifies active coverage", async () => {

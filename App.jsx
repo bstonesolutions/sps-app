@@ -40,6 +40,8 @@ import { buildQuickBooksInvoicePayload, partitionQuickBooksDraftSelection } from
 import { quickBooksInvoiceSyncEligibility, quickBooksInvoiceUrl, syncInvoiceToQuickBooks } from "./quickbooksDirectSync";
 import { appendCompletedVisitsToInvoice, completedVisitBillableTotal, completedVisitInvoiceLink, completedVisitLineItems, completedVisitSource, invoiceCompletedVisitSources, removeInvoiceLineAndPruneCompletedVisitSources, reserveCompletedVisitInvoice } from "./invoiceVisitImport";
 import { normalizeMaintenanceBillingPolicy } from "./maintenanceBilling";
+import { saveClientEditorChanges } from "./clientEditSave";
+import { maintenanceCoverageMonthDate, prepaymentInvoiceLabel, prepaymentInvoiceSummary } from "./clientMaintenanceBillingForm";
 import MaintenanceCoverageWorkspace from "./MaintenanceCoverageWorkspace";
 import { maintenanceDraftInvoice } from "./maintenanceDraftInvoice";
 import useMaintenanceCalendarRefresh from "./useMaintenanceCalendarRefresh";
@@ -7569,6 +7571,11 @@ function ClientEditForm({ client, invoices = [], onSave, onCancel, onDelete, tit
   const compact = clientFormVp.width <= 420;
   const [formError, setFormError] = useState("");
   const [formSaving, setFormSaving] = useState(false);
+  const formSavingRef = useRef(false);
+  const saveFeedbackRef = useRef(null);
+  useEffect(() => {
+    if (formError) saveFeedbackRef.current?.scrollIntoView?.({ block: "center", behavior: "smooth" });
+  }, [formError]);
   const [form, setForm] = useState(() => {
     const base = { ...client };
     // Make Edit match the card. Many records store the STREET LINE in `address`, leave the `street`
@@ -7595,6 +7602,7 @@ function ClientEditForm({ client, invoices = [], onSave, onCancel, onDelete, tit
     }
     return base;
   });
+  const initialFormRef = useRef(form);
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   // update an address part and keep the combined address in sync
   const setAddr = (k, v) => setForm(f => {
@@ -7608,6 +7616,7 @@ function ClientEditForm({ client, invoices = [], onSave, onCancel, onDelete, tit
   const clientInvoiceChoices = (invoices || [])
     .filter((invoice) => invoiceMatchesClient(invoice, form))
     .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+  const selectedPrepaymentInvoice = clientInvoiceChoices.find(invoice => String(invoice.id) === String(form.maintenanceBilling?.sourceInvoiceId || ""));
   const setMaintenanceBilling = (patch) => setForm((current) => ({
     ...current,
     maintenanceBilling: {
@@ -7638,7 +7647,7 @@ function ClientEditForm({ client, invoices = [], onSave, onCancel, onDelete, tit
     });
   };
   const saveClient = async () => {
-    if (formSaving) return;
+    if (formSavingRef.current) return;
     setFormError("");
     const next = { ...form };
     if (!manageClientAutoInvoice) {
@@ -7648,19 +7657,20 @@ function ClientEditForm({ client, invoices = [], onSave, onCancel, onDelete, tit
     } else if (prepaidMaintenance) {
       const policy = normalizeMaintenanceBillingPolicy(form.maintenanceBilling);
       if (!policy) {
-        setFormError("Choose a valid prepaid coverage start and end date before saving.");
+        setFormError("Choose the first and last covered months. The last month must be the same as or after the first month.");
         return;
       }
       next.maintenanceBilling = policy;
     } else {
       delete next.maintenanceBilling;
     }
-    if (!manageClientAutoInvoice || !hasPersistedClient) {
-      onSave(next);
-      return;
-    }
+    formSavingRef.current = true;
     setFormSaving(true);
     try {
+      if (!manageClientAutoInvoice || !hasPersistedClient) {
+        await onSave(next, { clientEdit: hasPersistedClient, baselineClient: initialFormRef.current });
+        return;
+      }
       const response = await fetch(`${PROD_URL}/api/client-maintenance-billing`, {
         method: "POST",
         headers: await authHeaders({ "Content-Type": "application/json" }),
@@ -7675,10 +7685,11 @@ function ClientEditForm({ client, invoices = [], onSave, onCancel, onDelete, tit
       }
       if (payload.maintenanceBilling) next.maintenanceBilling = payload.maintenanceBilling;
       else delete next.maintenanceBilling;
-      onSave(next);
+      await onSave(next, { clientEdit: true, baselineClient: initialFormRef.current, billingConfirmed: payload.maintenanceBilling ?? null });
     } catch (error) {
-      setFormError(error?.message || "Maintenance billing could not be saved. Nothing was changed; please try again.");
+      setFormError(error?.message || "Your changes could not be confirmed. Keep this form open and try saving again.");
     } finally {
+      formSavingRef.current = false;
       setFormSaving(false);
     }
   };
@@ -7746,17 +7757,17 @@ function ClientEditForm({ client, invoices = [], onSave, onCancel, onDelete, tit
 
   return (
     <div>
-      <button onClick={onCancel} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", padding: "0 0 16px", display: "flex", alignItems: "center", gap: 4 }}>← Cancel</button>
+      <button onClick={onCancel} disabled={formSaving} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", padding: "0 0 16px", display: "flex", alignItems: "center", gap: 4 }}>← Cancel</button>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
         <h2 style={{ margin: 0, fontSize: 20, fontWeight: 800, color: T.text }}>{title}</h2>
         <Btn onClick={() => { void saveClient(); }} disabled={formSaving}>{formSaving ? "Saving…" : title === "Add Client" ? "Create Client" : "Save Changes"}</Btn>
       </div>
-      {formError && (
-        <div role="alert" style={{ marginBottom: 14, padding: "10px 13px", borderLeft: `3px solid ${T.primary}`, background: hexA(T.primary, 0.055), color: T.primary, fontSize: 12.5, fontWeight: 750, lineHeight: 1.45 }}>
+      {formError && !(manageClientAutoInvoice && hasPersistedClient) && (
+        <div ref={saveFeedbackRef} role="alert" style={{ marginBottom: 14, padding: "10px 13px", borderLeft: `3px solid ${T.primary}`, background: hexA(T.primary, 0.055), color: T.primary, fontSize: 12.5, fontWeight: 750, lineHeight: 1.45 }}>
           {formError}
         </div>
       )}
-      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <fieldset disabled={formSaving} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, display: "flex", flexDirection: "column", gap: 14 }}>
         {["Contact Info", "Service Details", "Service Plan"].map((sectionTitle, si) => (
           <Card key={si}>
             <CardHeader title={sectionTitle} />
@@ -7984,17 +7995,18 @@ function ClientEditForm({ client, invoices = [], onSave, onCancel, onDelete, tit
                         </div>
                         <div style={{ display: "grid", gridTemplateColumns: compact ? "1fr" : "1fr 1fr", gap: 9 }}>
                           <div>
-                            <label style={{ fontSize: 10.5, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", display: "block", marginBottom: 5 }}>Coverage starts</label>
-                            <input type="date" value={form.maintenanceBilling?.coveredFrom || ""} onChange={(event) => setMaintenanceBilling({ coveredFrom: event.target.value })} style={halfInput} />
+                            <label style={{ fontSize: 10.5, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", display: "block", marginBottom: 5 }}>First covered month</label>
+                            <input type="month" aria-label="First covered month" value={(form.maintenanceBilling?.coveredFrom || "").slice(0, 7)} onChange={(event) => setMaintenanceBilling({ coveredFrom: maintenanceCoverageMonthDate(event.target.value) })} style={halfInput} />
                           </div>
                           <div>
-                            <label style={{ fontSize: 10.5, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", display: "block", marginBottom: 5 }}>Coverage ends</label>
-                            <input type="date" value={form.maintenanceBilling?.coveredThrough || ""} onChange={(event) => setMaintenanceBilling({ coveredThrough: event.target.value })} style={halfInput} />
+                            <label style={{ fontSize: 10.5, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", display: "block", marginBottom: 5 }}>Last covered month</label>
+                            <input type="month" aria-label="Last covered month" min={(form.maintenanceBilling?.coveredFrom || "").slice(0, 7)} value={(form.maintenanceBilling?.coveredThrough || "").slice(0, 7)} onChange={(event) => setMaintenanceBilling({ coveredThrough: maintenanceCoverageMonthDate(event.target.value, true) })} style={halfInput} />
                           </div>
                         </div>
                         <div>
                           <label style={{ fontSize: 10.5, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", display: "block", marginBottom: 5 }}>Prepayment record</label>
                           <select
+                            aria-label="Prepayment record"
                             value={form.maintenanceBilling?.sourceInvoiceId || ""}
                             onChange={(event) => {
                               const invoice = clientInvoiceChoices.find((candidate) => String(candidate.id) === String(event.target.value));
@@ -8006,13 +8018,27 @@ function ClientEditForm({ client, invoices = [], onSave, onCancel, onDelete, tit
                           >
                             <option value="">Not linked to an SPS invoice</option>
                             {clientInvoiceChoices.map((invoice) => (
-                              <option key={invoice.id} value={invoice.id}>Invoice {invoice.number || "Unnumbered"} · {invoice.date || "No date"} · ${invoiceTotals(invoice).total.toFixed(2)}</option>
+                              <option key={invoice.id} value={invoice.id}>{prepaymentInvoiceLabel(invoice)}</option>
                             ))}
                           </select>
+                          {selectedPrepaymentInvoice && (
+                            <div data-selected-prepayment-record aria-live="polite" style={{ marginTop: 7, color: T.text, fontSize: 12, fontWeight: 750, lineHeight: 1.5, overflowWrap: "anywhere" }}>
+                              {prepaymentInvoiceSummary(selectedPrepaymentInvoice)}
+                            </div>
+                          )}
                           <div style={{ fontSize: 11, lineHeight: 1.45, color: T.textMuted, marginTop: 5 }}>Optional. Link the invoice or payment record that covered this maintenance period.</div>
                         </div>
                       </div>
                     )}
+                    {formError && (
+                      <div ref={saveFeedbackRef} role="alert" style={{ marginTop: 14, padding: "10px 13px", borderLeft: `3px solid ${T.primary}`, background: hexA(T.primary, 0.055), color: T.primary, fontSize: 12.5, fontWeight: 750, lineHeight: 1.45 }}>
+                        {formError}
+                      </div>
+                    )}
+                    <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 11.5, lineHeight: 1.45, color: T.textMuted }}>{formSaving ? "Confirming your changes…" : "Save to apply the service plan and billing changes."}</span>
+                      <Btn onClick={() => { void saveClient(); }} disabled={formSaving}>{formSaving ? "Saving…" : "Save Changes"}</Btn>
+                    </div>
                   </div>
                 )}
               </>}
@@ -8031,7 +8057,7 @@ function ClientEditForm({ client, invoices = [], onSave, onCancel, onDelete, tit
             </button>
           </div>
         )}
-      </div>
+      </fieldset>
     </div>
   );
 }
@@ -8352,7 +8378,16 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
     if (onUpdate) onUpdate(next);
   };
 
-  if (editing) return <ClientEditForm client={client} invoices={invoices} onSave={u => { update(u); setEditing(false); }} onCancel={() => setEditing(false)} onDelete={onDelete} />;
+  const saveEditedClient = async (updated, options) => {
+    if (!onUpdate) throw new Error("Client saving is unavailable. Your changes are still here.");
+    const saved = await onUpdate(updated, options);
+    if (saved?.ok === false) throw new Error(saved.error?.message || saved.error || "The client save was not confirmed.");
+    const confirmed = saved?.client || saved || updated;
+    setClient(confirmed);
+    setEditing(false);
+    return confirmed;
+  };
+  if (editing) return <ClientEditForm client={client} invoices={invoices} onSave={saveEditedClient} onCancel={() => setEditing(false)} onDelete={onDelete} />;
 
   return (
     <div ref={rootRef}>
@@ -42184,9 +42219,24 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
   };
 
   // update a single client (edits, equipment) and keep the open detail in sync
-  const handleUpdateClient = (updated) => {
+  const handleUpdateClient = async (updated, options = {}) => {
+    if (options.clientEdit) {
+      const saved = await saveClientEditorChanges({
+        clients, updated, baselineClient: options.baselineClient,
+        billingConfirmed: options.billingConfirmed,
+        hasBillingReceipt: Object.prototype.hasOwnProperty.call(options, "billingConfirmed"),
+        refreshClients: async () => {
+          const receipt = await store.refresh("sps_clients");
+          return { ...receipt, clients: receipt?.ok && typeof receipt.value === "string" ? JSON.parse(receipt.value) : [] };
+        },
+        persistClients: persistClientsExact,
+      });
+      setSelectedClient(sc => sc && String(sc.id) === String(saved.id) ? saved : sc);
+      return saved;
+    }
     setClients(cs => cs.map(c => c.id === updated.id ? updated : c));
     setSelectedClient(sc => sc && sc.id === updated.id ? updated : sc);
+    return updated;
   };
 
   // batch client operations

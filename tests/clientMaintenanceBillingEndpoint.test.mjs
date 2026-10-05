@@ -2,216 +2,295 @@ import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 
 process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-key";
+process.env.CLIENT_MAINTENANCE_BILLING_TIMEOUT_MS = "250";
 
-const { default: handler } = await import("../api/client-maintenance-billing.js");
+const { default: handler, config } = await import("../api/client-maintenance-billing.js");
 const { memberHasCapability } = await import("../api/_staff-auth.js");
-
 const originalFetch = globalThis.fetch;
-afterEach(() => { globalThis.fetch = originalFetch; });
+const originalError = console.error;
+afterEach(() => { globalThis.fetch = originalFetch; console.error = originalError; });
 
 const response = (body, ok = true, status = 200) => ({
-  ok,
-  status,
+  ok, status,
   async json() { return body; },
   async text() { return typeof body === "string" ? body : JSON.stringify(body); },
 });
-
-function mockResponse() {
-  return {
-    statusCode: 200,
-    body: null,
-    headers: {},
-    setHeader(name, value) { this.headers[name] = value; },
-    status(code) { this.statusCode = code; return this; },
-    json(body) { this.body = body; return this; },
-    end() { return this; },
-  };
-}
-
+const mockResponse = () => ({
+  statusCode: 200, body: null, headers: {},
+  setHeader(name, value) { this.headers[name] = value; },
+  status(code) { this.statusCode = code; return this; },
+  json(body) { this.body = body; return this; },
+  end() { return this; },
+});
 const prepaid = {
-  version: 1,
-  mode: "prepaid",
-  coveredFrom: "2026-08-01",
-  coveredThrough: "2026-12-31",
-  sourceInvoiceId: "invoice-prepaid",
+  version: 1, mode: "prepaid", coveredFrom: "2026-08-01", coveredThrough: "2026-12-31",
+  sourceInvoiceId: "historical-invoice-2025", sourceInvoiceNumber: "INV-2025-718",
 };
-
 const request = (maintenanceBilling = prepaid) => ({
-  method: "POST",
-  headers: { authorization: "Bearer staff-token" },
+  method: "POST", headers: { authorization: "Bearer staff-token" },
   body: { clientId: "c1", maintenanceBilling },
 });
+const clone = (value) => structuredClone(value);
+const projection = (client) => client ? {
+  id: client.id, name: client.name,
+  ...(Object.hasOwn(client, "maintenanceBilling") ? { maintenanceBilling: clone(client.maintenanceBilling) } : {}),
+} : null;
+function initialState() {
+  return {
+    clientsVersion: 4, billingVersion: 2, billingExists: true,
+    clients: [
+      { id: "c1", name: "Example Client", phone: "555-0100", history: [{ id: "visit-1", notes: "Unchanged history" }] },
+      { id: "c2", name: "Another Client", maintenanceBilling: { ...prepaid, sourceInvoiceId: "other" } },
+    ],
+    ledger: {
+      version: 2, policies: { c2: { ...prepaid, sourceInvoiceId: "other" } },
+      allocations: { c2: { "2026-08": {
+        status: "paid", sources: [{ kind: "invoice", invoiceId: "keep-invoice", amountCents: 17500 }], allocatedCents: 17500,
+      } } },
+    },
+  };
+}
+function mockBackend({ state = initialState(), team, onRead, onWrite } = {}) {
+  const calls = { reads: [], writes: [], businessUrls: [] };
+  const snapshot = () => {
+    const matches = state.clients.filter((client) => String(client.id) === "c1");
+    return {
+      client: matches.length === 1 ? projection(matches[0]) : null,
+      match_count: matches.length, clients_version: state.clientsVersion,
+      billing_exists: state.billingExists, billing_version: state.billingVersion, ledger: clone(state.ledger),
+    };
+  };
+  const apply = (body) => {
+    assert.equal(body.p_expected_clients_version, state.clientsVersion);
+    assert.equal(body.p_expected_billing_version, state.billingVersion);
+    const client = state.clients.find((candidate) => String(candidate.id) === body.p_client_id);
+    if (body.p_maintenance_billing) client.maintenanceBilling = clone(body.p_maintenance_billing);
+    else delete client.maintenanceBilling;
+    state.ledger = clone(body.p_ledger);
+    state.billingExists = true;
+    state.clientsVersion += 1;
+    state.billingVersion += 1;
+    return {
+      applied: true, outcome: "applied", client: projection(client),
+      current_versions: { sps_clients: state.clientsVersion, sps_maintenance_billing: state.billingVersion },
+    };
+  };
+  globalThis.fetch = async (url, options = {}) => {
+    const href = String(url);
+    if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "staff@example.com" });
+    if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team || [{ email: "staff@example.com", role: "owner" }]) }]);
+    calls.businessUrls.push(href);
+    const body = JSON.parse(options.body || "{}");
+    if (href.endsWith("/rpc/sps_client_maintenance_billing_snapshot")) {
+      calls.reads.push(body);
+      assert.deepEqual(body, { p_client_id: "c1" });
+      const intercepted = await onRead?.({ state, calls, options, snapshot });
+      return intercepted ?? response(snapshot());
+    }
+    if (href.endsWith("/rpc/sps_client_maintenance_billing_cas")) {
+      calls.writes.push(body);
+      assert.equal(body.p_client_id, "c1");
+      assert.equal(Object.hasOwn(body, "clients"), false);
+      assert.equal(Object.hasOwn(body, "p_clients"), false);
+      const intercepted = await onWrite?.({ state, calls, body, options, apply });
+      return intercepted ?? response([apply(body)]);
+    }
+    throw new Error(`Unexpected business request: ${href}`);
+  };
+  return { state, calls };
+}
+const stallUntilAbort = (options, onAbort = () => {}) => new Promise((_, reject) => {
+  options.signal.addEventListener("abort", () => {
+    onAbort();
+    reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+  }, { once: true });
+});
+async function invoke(policy = prepaid) {
+  // Real request deadlines are unref'd; keep this isolated test request alive.
+  const keepAlive = setInterval(() => {}, 1000);
+  try {
+    const res = mockResponse();
+    await handler(request(policy), res);
+    return res;
+  } finally { clearInterval(keepAlive); }
+}
 
 test("maintenance billing requires invoice-create accounting access", () => {
   assert.equal(memberHasCapability({ role: "field", tabAccess: { invoices: "view" } }, "invoiceCreate"), false);
   assert.equal(memberHasCapability({ role: "custom", tabAccess: { invoices: "edit" }, fine: { invoiceCreate: false } }, "invoiceCreate"), false);
   assert.equal(memberHasCapability({ role: "custom", tabAccess: { invoices: "edit" }, fine: { invoiceCreate: true } }, "invoiceCreate"), true);
   assert.equal(memberHasCapability({ role: "owner", tabAccess: { invoices: "hidden" } }, "invoiceCreate"), true);
+  assert.equal(config.maxDuration, 60);
 });
 
-test("unauthorized staff are rejected before client or billing state is read", async () => {
-  let businessReads = 0;
-  globalThis.fetch = async (url) => {
-    const href = String(url);
-    if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "staff@example.com" });
-    if (href.includes("key=eq.sps_team")) {
-      return response([{ value: JSON.stringify([{ email: "staff@example.com", role: "field", tabAccess: { invoices: "view", clients: "edit" } }]) }]);
-    }
-    businessReads += 1;
-    throw new Error(`Unexpected fetch: ${href}`);
-  };
-
-  const res = mockResponse();
-  await handler(request(), res);
-
+test("unauthorized staff are rejected before billing RPCs are read or written", async () => {
+  const { calls } = mockBackend({ team: [{ email: "staff@example.com", role: "field", tabAccess: { invoices: "view", clients: "edit" } }] });
+  const res = await invoke();
   assert.equal(res.statusCode, 403);
-  assert.equal(businessReads, 0);
+  assert.equal(calls.businessUrls.length, 0);
 });
 
-test("authorized accounting staff update the client mirror and protected ledger atomically", async () => {
-  const team = [{
-    email: "staff@example.com",
-    role: "custom",
-    tabAccess: { invoices: "edit", clients: "edit" },
-    fine: { invoiceCreate: true },
-  }];
-  const state = {
-    sps_clients: {
-      value: [
-        { id: "c1", name: "Generic Client", phone: "555-0100", history: [{ id: "visit-1" }] },
-        { id: "c2", name: "Another Client", maintenanceBilling: { ...prepaid, sourceInvoiceId: "other" } },
-      ],
-      version: 4,
-    },
-    sps_maintenance_billing: {
-      value: {
-        version: 2,
-        policies: { c2: { ...prepaid, sourceInvoiceId: "other" } },
-        allocations: {
-          c2: {
-            "2026-08": {
-              status: "paid",
-              sources: [{ kind: "invoice", invoiceId: "keep-invoice", amountCents: 17500 }],
-              allocatedCents: 17500,
-            },
-          },
-        },
-      },
-      version: 2,
-    },
-  };
-  let batch = null;
-  globalThis.fetch = async (url, options = {}) => {
-    const href = String(url);
-    if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "staff@example.com" });
-    if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
-    if (href.includes("/rest/v1/app_state?")) {
-      const key = decodeURIComponent((href.match(/key=eq\.([^&]+)/) || [])[1] || "");
-      const row = state[key];
-      return response(row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : []);
-    }
-    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
-      batch = JSON.parse(options.body).p_operations;
-      return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
-    }
-    throw new Error(`Unexpected fetch: ${href}`);
-  };
-
-  const res = mockResponse();
-  await handler(request(), res);
-
+test("an old invoice link round-trips while client history and other paid allocations stay intact", async () => {
+  const { state, calls } = mockBackend({ team: [{ email: "staff@example.com", role: "custom", tabAccess: { invoices: "edit", clients: "edit" }, fine: { invoiceCreate: true } }] });
+  const before = clone(state);
+  const res = await invoke();
   assert.equal(res.statusCode, 200, JSON.stringify(res.body));
   assert.equal(res.headers["Cache-Control"], "no-store");
-  assert.deepEqual(batch.map((operation) => operation.key), ["sps_clients", "sps_maintenance_billing"]);
-  const clients = JSON.parse(batch.find((operation) => operation.key === "sps_clients").value);
-  const store = JSON.parse(batch.find((operation) => operation.key === "sps_maintenance_billing").value);
-  assert.equal(clients[0].phone, "555-0100");
-  assert.deepEqual(clients[0].history, [{ id: "visit-1" }]);
-  assert.deepEqual(clients[0].maintenanceBilling, prepaid);
-  assert.deepEqual(clients[1], state.sps_clients.value[1], "another client is untouched");
-  assert.equal(store.version, 2);
-  assert.deepEqual(store.policies.c1, prepaid);
-  assert.deepEqual(store.policies.c2, state.sps_maintenance_billing.value.policies.c2);
-  assert.deepEqual(store.allocations, state.sps_maintenance_billing.value.allocations);
+  assert.deepEqual(state.clients[0].maintenanceBilling, prepaid);
+  assert.deepEqual(state.clients[0].history, before.clients[0].history);
+  assert.equal(state.clients[0].phone, before.clients[0].phone);
+  assert.deepEqual(state.clients[1], before.clients[1]);
+  assert.deepEqual(state.ledger.policies.c1, prepaid);
+  assert.deepEqual(state.ledger.policies.c2, before.ledger.policies.c2);
+  assert.deepEqual(state.ledger.allocations, before.ledger.allocations);
+  assert.equal(res.body.clientProjection, true);
+  assert.equal(Object.hasOwn(res.body.client, "history"), false, "the receipt is not a replacement profile");
+  assert.deepEqual(res.body.versions, { sps_clients: 5, sps_maintenance_billing: 3 });
+  const retry = await invoke();
+  assert.equal(retry.body.alreadySaved, true);
+  assert.deepEqual(retry.body.maintenanceBilling, prepaid);
+  assert.equal(calls.writes.length, 1, "retry does not rewrite the large client row");
+  assert.equal(calls.businessUrls.every((url) => url.includes("/rpc/sps_client_maintenance_billing_")), true);
 });
 
-test("a CAS retry re-reads the winning client row and policy removal preserves concurrent edits", async () => {
-  const team = [{ email: "owner@example.com", role: "owner" }];
-  const state = {
-    sps_clients: { value: [{ id: "c1", name: "Before", maintenanceBilling: prepaid }], version: 2 },
-    sps_maintenance_billing: {
-      value: {
-        version: 2,
-        policies: { c1: prepaid },
-        allocations: {
-          c1: {
-            "2026-08": {
-              status: "paid",
-              sources: [{ kind: "invoice", invoiceId: "keep-invoice", amountCents: 17500 }],
-              allocatedCents: 17500,
-            },
-          },
-        },
-      },
-      version: 3,
-    },
-  };
-  let batches = 0;
-  let finalBatch = null;
-  globalThis.fetch = async (url, options = {}) => {
-    const href = String(url);
-    if (href.includes("/auth/v1/user")) return response({ id: "auth-owner", email: "owner@example.com" });
-    if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
-    if (href.includes("/rest/v1/app_state?")) {
-      const key = decodeURIComponent((href.match(/key=eq\.([^&]+)/) || [])[1] || "");
-      const row = state[key];
-      return response([{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }]);
-    }
-    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
-      batches += 1;
-      if (batches === 1) {
-        state.sps_clients = { value: [{ id: "c1", name: "Concurrent winner", maintenanceBilling: prepaid }], version: 3 };
-        return response([{ applied: false, outcome: "conflict", conflict_key: "sps_clients", current_versions: {} }]);
-      }
-      finalBatch = JSON.parse(options.body).p_operations;
-      return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
-    }
-    throw new Error(`Unexpected fetch: ${href}`);
-  };
-
-  const res = mockResponse();
-  await handler(request(null), res);
-
+test("a CAS retry re-reads the winning client version and policy removal preserves concurrent edits", async () => {
+  const state = initialState();
+  state.clients[0].maintenanceBilling = clone(prepaid);
+  state.ledger.policies.c1 = clone(prepaid);
+  const { calls } = mockBackend({ state, onWrite({ state, calls }) {
+    if (calls.writes.length !== 1) return;
+    state.clients[0].name = "Concurrent winner";
+    state.clients[0].history.push({ id: "concurrent-visit" });
+    state.clientsVersion += 1;
+    return response([{ applied: false, outcome: "conflict", conflict_key: "sps_clients", current_versions: { sps_clients: state.clientsVersion } }]);
+  } });
+  const res = await invoke(null);
   assert.equal(res.statusCode, 200, JSON.stringify(res.body));
-  assert.equal(batches, 2);
-  const clients = JSON.parse(finalBatch.find((operation) => operation.key === "sps_clients").value);
-  const store = JSON.parse(finalBatch.find((operation) => operation.key === "sps_maintenance_billing").value);
-  assert.equal(clients[0].name, "Concurrent winner");
-  assert.equal(Object.prototype.hasOwnProperty.call(clients[0], "maintenanceBilling"), false);
-  assert.equal(Object.prototype.hasOwnProperty.call(store.policies, "c1"), false);
-  assert.deepEqual(store.allocations, state.sps_maintenance_billing.value.allocations);
-  assert.equal(finalBatch.find((operation) => operation.key === "sps_clients").expected_version, 3);
+  assert.equal(calls.writes.length, 2);
+  assert.equal(calls.writes[1].p_expected_clients_version, 5);
+  assert.equal(state.clients[0].name, "Concurrent winner");
+  assert.equal(state.clients[0].history.length, 2);
+  assert.equal(Object.hasOwn(state.clients[0], "maintenanceBilling"), false);
+  assert.equal(Object.hasOwn(state.ledger.policies, "c1"), false);
+  assert.equal(res.body.client.name, "Concurrent winner");
 });
 
-test("invalid partial-month coverage is rejected before any shared state mutation", async () => {
-  const team = [{ email: "owner@example.com", role: "owner" }];
-  let businessRequests = 0;
-  globalThis.fetch = async (url) => {
-    const href = String(url);
-    if (href.includes("/auth/v1/user")) return response({ id: "auth-owner", email: "owner@example.com" });
-    if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
-    businessRequests += 1;
-    throw new Error(`Unexpected fetch: ${href}`);
-  };
-  const res = mockResponse();
-  await handler(request({
-    version: 1,
-    mode: "prepaid",
-    coveredFrom: "2026-08-15",
-    coveredThrough: "2026-09-14",
-  }), res);
-
+test("partial-month coverage is rejected before billing RPCs run", async () => {
+  const { calls } = mockBackend();
+  const res = await invoke({ version: 1, mode: "prepaid", coveredFrom: "2026-08-15", coveredThrough: "2026-09-14" });
   assert.equal(res.statusCode, 400);
   assert.match(res.body.error, /first day of a month/i);
-  assert.equal(businessRequests, 0);
+  assert.equal(calls.businessUrls.length, 0);
+});
+
+test("one stalled snapshot is aborted and retried before the single billing write", async () => {
+  console.error = () => {};
+  let aborted = false;
+  const { calls } = mockBackend({ onRead({ calls, options }) {
+    if (calls.reads.length === 1) return stallUntilAbort(options, () => { aborted = true; });
+  } });
+  const res = await invoke();
+  assert.equal(res.statusCode, 200);
+  assert.equal(aborted, true);
+  assert.equal(calls.reads.length, 2);
+  assert.equal(calls.writes.length, 1);
+});
+
+test("persistent read timeouts stop after one retry with phase telemetry and no mutation", async () => {
+  const logs = [];
+  console.error = (...args) => logs.push(args);
+  const { calls } = mockBackend({ onRead({ options }) { return stallUntilAbort(options); } });
+  const res = await invoke();
+  assert.equal(res.statusCode, 504);
+  assert.equal(res.body.code, "maintenance-billing-data-timeout");
+  assert.equal(res.body.retryable, true);
+  assert.equal(res.body.commitState, "not-started");
+  assert.equal(calls.reads.length, 2);
+  assert.equal(calls.writes.length, 0);
+  const event = JSON.parse(logs.at(-1)[1]);
+  assert.equal(event.phase, "read-baseline");
+  assert.equal(event.operation, "sps_client_maintenance_billing_snapshot");
+  assert.equal(event.timeoutMs, 250);
+});
+
+test("a committed write with a timed-out response is verified from both canonical copies", async () => {
+  console.error = () => {};
+  const { calls } = mockBackend({ onWrite({ body, apply, options }) {
+    apply(body);
+    return stallUntilAbort(options);
+  } });
+  const res = await invoke();
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.confirmedAfterUncertainWrite, true);
+  assert.deepEqual(res.body.maintenanceBilling, prepaid);
+  assert.equal(calls.writes.length, 1, "an uncertain write is verified, never automatically replayed");
+  assert.equal(calls.reads.length, 2);
+  assert.deepEqual(res.body.versions, { sps_clients: 5, sps_maintenance_billing: 3 });
+});
+
+test("an unconfirmed write preserves retry guidance without falsely claiming nothing changed", async () => {
+  console.error = () => {};
+  const { calls, state } = mockBackend({ onWrite() { throw new TypeError("fetch failed"); } });
+  const res = await invoke();
+  assert.equal(res.statusCode, 503);
+  assert.equal(res.body.code, "maintenance-billing-save-unconfirmed");
+  assert.equal(res.body.commitState, "unconfirmed");
+  assert.equal(res.body.retryable, true);
+  assert.doesNotMatch(res.body.error, /nothing (was )?changed/i);
+  assert.equal(calls.writes.length, 1);
+  assert.equal(calls.reads.length, 2);
+  assert.equal(state.clients[0].maintenanceBilling, undefined);
+});
+
+test("a client mirror alone is not enough to confirm a lost write receipt", async () => {
+  console.error = () => {};
+  const { calls } = mockBackend({ onWrite({ state }) {
+    state.clients[0].maintenanceBilling = clone(prepaid);
+    throw new TypeError("lost write response");
+  } });
+  const res = await invoke();
+  assert.equal(res.statusCode, 503);
+  assert.equal(res.body.commitState, "unconfirmed");
+  assert.equal(calls.writes.length, 1);
+});
+
+test("standard billing removal is confirmed after a lost write response", async () => {
+  console.error = () => {};
+  const state = initialState();
+  state.clients[0].maintenanceBilling = clone(prepaid);
+  state.ledger.policies.c1 = clone(prepaid);
+  const { calls } = mockBackend({ state, onWrite({ body, apply }) { apply(body); throw new TypeError("lost response"); } });
+  const res = await invoke(null);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.confirmedAfterUncertainWrite, true);
+  assert.equal(res.body.maintenanceBilling, null);
+  assert.equal(Object.hasOwn(res.body.client, "maintenanceBilling"), false);
+  assert.equal(calls.writes.length, 1);
+});
+
+test("duplicate client IDs and malformed ledgers fail closed without mutation", async () => {
+  console.error = () => {};
+  let state = initialState();
+  state.clients.push({ id: "c1", name: "Duplicate" });
+  let backend = mockBackend({ state });
+  let res = await invoke();
+  assert.equal(res.statusCode, 409);
+  assert.equal(backend.calls.writes.length, 0);
+  state = initialState();
+  state.ledger.allocations = [];
+  backend = mockBackend({ state });
+  res = await invoke();
+  assert.equal(res.statusCode, 502);
+  assert.equal(backend.calls.writes.length, 0);
+  assert.equal(backend.calls.reads.length, 1);
+});
+
+test("a missing narrow RPC surfaces an unavailable service without a full-roster fallback", async () => {
+  console.error = () => {};
+  const { calls } = mockBackend({ onRead() { return response({ code: "PGRST202" }, false, 404); } });
+  const res = await invoke();
+  assert.equal(res.statusCode, 503);
+  assert.equal(res.body.code, "maintenance-billing-unavailable");
+  assert.equal(calls.reads.length, 1);
+  assert.equal(calls.writes.length, 0);
 });
