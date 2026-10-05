@@ -1,5 +1,6 @@
-import { invoiceMaintenanceCoverageIssue } from "./maintenanceInvoiceCoverage.js";
+import { invoiceMaintenanceCoverageIssue, withMatchedMaintenanceServiceMonths } from "./maintenanceInvoiceCoverage.js";
 import { normalizeMaintenancePaymentLedger } from "./maintenancePaymentLedger.js";
+import { isMaintenanceServiceLine } from "./maintenanceServiceLine.js";
 
 export function invoiceDeliveryIdentity(invoice, clientId) {
   const keys = ["id", "qbId", "qbCustomerId", "source", "autoPeriod", "serviceMonth", "sourceStopId", "sourceStopIds", "sourceCompletionReceiptId", "sourceCompletionReceiptIds", "invoiceDiscountType", "invoiceDiscount"];
@@ -19,7 +20,9 @@ export function invoiceDeliveryLine(line) {
 // not send a text/portal notice while the email is held for billing review.
 export async function assertInvoiceDeliveryCoverage({ invoice, client, clients = [], invoices = [], schedule = [], loadLedger }) {
   const options = { invoice, client: client || { id: "unresolved", history: [] }, clients, invoices, schedule };
-  if (!invoiceMaintenanceCoverageIssue({ ...options, ledger: null })) return;
+  const couldBeMatchedService = (invoice?.lineItems || []).some(line => isMaintenanceServiceLine({ source: "monthly-maintenance" }, line)
+    && Number(line.qty ?? 1) * Number(line.unitPrice ?? 0) > 0);
+  if (!couldBeMatchedService && !invoiceMaintenanceCoverageIssue({ ...options, ledger: null })) return invoice;
   let ledger;
   try { ledger = normalizeMaintenancePaymentLedger(await loadLedger()); } catch (_) {}
   if (!ledger) {
@@ -28,10 +31,12 @@ export async function assertInvoiceDeliveryCoverage({ invoice, client, clients =
     throw error;
   }
   if (!client?.id) throw new Error("Select a verified client before sending this maintenance invoice.");
-  const issue = invoiceMaintenanceCoverageIssue({ ...options, ledger });
+  const prepared = withMatchedMaintenanceServiceMonths({ ...options, ledger });
+  const issue = invoiceMaintenanceCoverageIssue({ ...options, invoice: prepared, ledger });
   if (issue) {
     const error = new Error(`${issue.message} No invoice messages were sent.`);
     error.code = issue.code;
     throw error;
   }
+  return prepared;
 }

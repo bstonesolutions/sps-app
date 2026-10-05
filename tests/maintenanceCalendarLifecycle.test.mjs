@@ -112,6 +112,7 @@ for (const lateFailure of [false, true]) {
     const dependencies = {
       canReviewAccounting: true,
       maintenanceLedgerRequestRef: { current: 0 },
+      maintenanceLedgerWritingRef: { current: false },
       PROD_URL: "https://local.test",
       authHeaders: async () => ({}),
       fetch: async (_url, options = {}) => options.method === "POST"

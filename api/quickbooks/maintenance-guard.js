@@ -1,5 +1,5 @@
 import { readAppStatesVersioned } from "../_app-state.js";
-import { invoiceMaintenanceCoverageIssue, isMaintenanceServiceExtra } from "../../maintenanceInvoiceCoverage.js";
+import { invoiceMaintenanceCoverageIssue, isMaintenanceServiceExtra, withMatchedMaintenanceServiceMonths } from "../../maintenanceInvoiceCoverage.js";
 import { emptyMaintenancePaymentLedger, normalizeMaintenancePaymentLedger } from "../../maintenancePaymentLedger.js";
 import { buildQuickBooksInvoicePayload } from "../../quickbooksDraftSync.js";
 import { findInvoiceDeletionReferences } from "../../invoiceDeletionGuard.js";
@@ -92,7 +92,7 @@ function possibleMaintenance(invoice) {
   return !!invoiceMaintenanceCoverageIssue({ invoice, client: { id: "inspection", history: [] }, ledger: null });
 }
 
-export async function quickBooksMaintenanceGuard(invoice, { mode = "create", existingQuickBooksInvoice = null } = {}) {
+export async function quickBooksMaintenanceGuard(invoice, { mode = "create", existingQuickBooksInvoice = null, onPreparedInvoice } = {}) {
   const incomingLines = list(invoice?.lineItems || invoice?.items);
   // Parts and other extras are not maintenance service charges. This also keeps
   // an unrelated purchase from depending on maintenance-ledger availability.
@@ -115,7 +115,7 @@ export async function quickBooksMaintenanceGuard(invoice, { mode = "create", exi
   const byId = spsId ? invoices.filter(saved => text(saved.id) === spsId) : [];
   const byQb = qbId ? invoices.filter(saved => text(saved.qbId || saved.Id) === qbId) : [];
   const canonical = byId.length === 1 ? byId[0] : byQb.length === 1 ? byQb[0] : null;
-  const candidate = guardCandidate(invoice, canonical);
+  let candidate = guardCandidate(invoice, canonical);
   const ledger = snapshot.sps_maintenance_billing?.exists
     ? normalizeMaintenancePaymentLedger(snapshot.sps_maintenance_billing.value)
     : emptyMaintenancePaymentLedger();
@@ -144,6 +144,10 @@ export async function quickBooksMaintenanceGuard(invoice, { mode = "create", exi
     if (matches.length !== 1 || (client && text(client.id) !== text(matches[0].id))) ownershipInvalid = true;
     else client = matches[0];
   }
+  if (client && ledger) {
+    invoice = withMatchedMaintenanceServiceMonths({ invoice: { ...invoice, id: canonical?.id || "" }, client, clients, ledger, invoices });
+    candidate = guardCandidate(invoice, canonical);
+  }
   // Resolving a saved client's history detects generic descriptions attached to
   // covered visits as well as explicit monthly-maintenance invoice text.
   const inspectClient = client || { id: requestedClientIds[0] || "unresolved", history: [] };
@@ -159,6 +163,8 @@ export async function quickBooksMaintenanceGuard(invoice, { mode = "create", exi
   if (!ledger || (snapshot.sps_schedule?.exists && !Array.isArray(snapshot.sps_schedule.value))) {
     return review("Maintenance payment coverage could not be verified. Refresh SPS and review the covered months before billing.", "maintenance-coverage-unavailable", 503);
   }
+  const descriptionIssue = invoiceServiceDescriptionIssue(invoice);
+  if (descriptionIssue) return { ...descriptionIssue, status: 422, reviewRequired: true };
   // An older payload may omit the marker that tells the endpoint a generic
   // "Services" line is maintenance. Canonical history can still identify it,
   // but the outgoing description itself must contain the performed month.
@@ -170,9 +176,12 @@ export async function quickBooksMaintenanceGuard(invoice, { mode = "create", exi
   }
   // Only an unchanged canonical source invoice gets the source exemption. A
   // new request cannot borrow its ID/number to add a second covered charge.
-  const unchangedSource = canonical && !reassigningManualDraft && billingContent(buildQuickBooksInvoicePayload(canonical, client, {})) === billingContent(invoice);
+  const preparedCanonical = canonical && withMatchedMaintenanceServiceMonths({ invoice: canonical, client, clients, ledger, invoices });
+  const unchangedSource = canonical && !reassigningManualDraft && billingContent(buildQuickBooksInvoicePayload(preparedCanonical, client, {})) === billingContent(invoice);
   if (!unchangedSource) candidate.id = "";
   candidate.clientId = client.id;
   const issue = invoiceMaintenanceCoverageIssue({ invoice: candidate, client, clients, ledger, invoices, schedule: list(snapshot.sps_schedule?.value) });
-  return issue ? { ...issue, status: 409 } : null;
+  if (issue) return { ...issue, status: 409 };
+  onPreparedInvoice?.(invoice);
+  return null;
 }

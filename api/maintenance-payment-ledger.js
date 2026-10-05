@@ -8,6 +8,8 @@ import {
   assignMaintenanceInvoiceMonths,
   clearMaintenancePaymentMonths,
   emptyMaintenancePaymentLedger,
+  maintenanceInvoicePaymentStatus,
+  maintenanceInvoiceTotalCents,
   moneyToCents,
   normalizeMaintenancePaymentLedger,
   normalizeMonthKey,
@@ -143,20 +145,7 @@ function invoiceBelongsToClient(invoice, client, clients, requestedClientId) {
 }
 
 function canonicalInvoiceTotalCents(invoice) {
-  const candidate = invoice?.total ?? invoice?.amount ?? invoice?.subtotal ?? invoice?.TotalAmt;
-  return Math.max(0, moneyToCents(candidate));
-}
-
-function canonicalInvoiceStatus(invoice, totalCents) {
-  const status = text(invoice?.status).toLowerCase();
-  if (status === "paid" || text(invoice?.paidDate)) return "paid";
-  if (hasOwn(invoice, "balance") || hasOwn(invoice, "Balance")) {
-    const balance = hasOwn(invoice, "balance") ? invoice.balance : invoice.Balance;
-    const balanceCents = Math.max(0, moneyToCents(balance));
-    if (balanceCents === 0) return "paid";
-    if (balanceCents < totalCents) return "partial";
-  }
-  return "due";
+  return maintenanceInvoiceTotalCents(invoice);
 }
 
 function canonicalExpectedCents(client) {
@@ -441,7 +430,7 @@ export default async function handler(req, res) {
   const monthKeys = cleanMonthKeys(body?.monthKeys);
   const note = body?.note == null ? "" : (typeof body.note === "string" ? body.note.trim().slice(0, 1200) : null);
   if (
-    (action === "assign" && !["invoice", "waived"].includes(actionType))
+    (action === "assign" && !["invoice", "paid", "unpaid", "waived"].includes(actionType))
     || !clientId
     || !monthKeys
     || note == null
@@ -450,6 +439,9 @@ export default async function handler(req, res) {
   }
   if (action === "assign" && actionType === "invoice" && !invoiceId) {
     return res.status(400).json({ ok: false, error: "Choose an invoice to assign to these maintenance months." });
+  }
+  if (action === "assign" && ["paid", "waived"].includes(actionType) && !note) {
+    return res.status(400).json({ ok: false, error: "Add a note explaining this paid record or waiver." });
   }
   if (hasOwn(body, "invoiceId") && body.invoiceId != null && !invoiceId) {
     return res.status(400).json({ ok: false, error: "The invoice identifier is invalid." });
@@ -481,7 +473,7 @@ export default async function handler(req, res) {
           monthKeys,
           invoice,
           expectedCents: canonicalExpectedCents(client),
-          status: canonicalInvoiceStatus(invoice, totalCents),
+          status: maintenanceInvoicePaymentStatus(invoice),
           note,
           actor: text(staff.email || staff.id),
           updatedAt: new Date().toISOString(),
@@ -492,10 +484,12 @@ export default async function handler(req, res) {
           nextLedger = setMaintenancePaymentMonthOverride(nextLedger, {
             clientId,
             monthKey,
-            status: "waived",
-            source: { kind: "waiver", waiverId: `waiver:${clientId}:${monthKey}` },
+            status: actionType === "unpaid" ? "due" : actionType,
+            source: actionType === "waived"
+              ? { kind: "waiver", waiverId: `waiver:${clientId}:${monthKey}` }
+              : { kind: "manual", recordId: `manual:${clientId}:${monthKey}`, decision: actionType },
             expectedCents: canonicalExpectedCents(client),
-            allocatedCents: 0,
+            allocatedCents: actionType === "paid" ? (canonicalExpectedCents(client) || 0) : 0,
             note,
             actor: text(staff.email || staff.id),
             updatedAt: new Date().toISOString(),

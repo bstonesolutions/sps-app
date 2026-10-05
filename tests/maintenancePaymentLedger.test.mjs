@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
 
 import {
   assignMaintenanceInvoiceMonths,
@@ -9,6 +10,8 @@ import {
   emptyMaintenancePaymentLedger,
   maintenancePaymentAllocationForMonth,
   maintenancePaymentDisplayStatus,
+  maintenanceInvoicePaymentStatus,
+  maintenanceInvoiceTotalCents,
   moneyToCents,
   normalizeMaintenancePaymentLedger,
   normalizeMonthKey,
@@ -70,6 +73,39 @@ const paidQuickBooksSeriesInvoice = (month, overrides = {}) => {
 const cell = (rows, month, clientId = "client-1") => (
   rows.find((row) => row.clientId === clientId)?.byMonth?.[month]
 );
+
+test("local draft totals follow the actual app calculation for line discounts, invoice discounts, and tax", async () => {
+  const app = await readFile(new URL("../App.jsx", import.meta.url), "utf8");
+  const start = app.indexOf("const invoiceTotals = (inv) => {");
+  const end = app.indexOf("\nconst effectiveStatus", start);
+  const appTotals = Function(`${app.slice(start, end)}\nreturn invoiceTotals;`)();
+  const lineItems = [
+    { desc: "Monthly maintenance", qty: "2", unitPrice: "125", discountType: "pct", discount: "10", taxable: true },
+    { desc: "Supplies", qty: "3", unitPrice: "20", discountType: "amt", discount: "5", taxable: false },
+  ];
+  for (const discountType of ["pct", "amt"]) {
+    const draft = { id: "draft-local", status: "Draft", lineItems, discountType, discount: "10", taxRate: "6" };
+    assert.equal(maintenanceInvoiceTotalCents(draft), Math.round(appTotals(draft).total * 100));
+    assert.equal(maintenanceInvoicePaymentStatus(draft), "due");
+  }
+  assert.equal(maintenanceInvoiceTotalCents({ status: "Draft", lineItems, discountType: "pct", discount: "10", taxRate: "6" }), 26415);
+});
+
+test("missing or invalid local pricing does not invent an invoice total and QB totals are never reconstructed", () => {
+  const draft = { status: "Draft", lineItems: [{ qty: "1", unitPrice: "175" }] };
+  assert.equal(maintenanceInvoiceTotalCents(draft), 17500);
+  for (const lineItems of [[{ unitPrice: 175 }], [{ qty: 1 }], [{ qty: "", unitPrice: 175 }], [{ qty: 1, unitPrice: "175oops" }], [{ qty: 1, unitPrice: true }]]) {
+    assert.equal(maintenanceInvoiceTotalCents({ ...draft, lineItems }), 0);
+    assert.equal(maintenanceInvoiceTotalCents({ ...draft, lineItems }, { unknownAsNull: true }), null);
+  }
+  for (const marker of [{ qbId: "qb-1" }, { Id: "qb-1" }, { source: "quickbooks" }, { qbAuthoritative: true }, { qbSyncToken: "0" }]) {
+    assert.equal(maintenanceInvoiceTotalCents({ ...draft, ...marker }), 0);
+    assert.equal(maintenanceInvoiceTotalCents({ ...draft, ...marker, status: "Paid" }, { unknownAsNull: true }), null);
+    assert.notEqual(maintenanceInvoicePaymentStatus({ ...draft, ...marker, status: "Paid" }), "paid");
+    assert.equal(maintenanceInvoiceTotalCents({ ...draft, ...marker, total: 187.53 }), 18753);
+  }
+  assert.equal(maintenanceInvoiceTotalCents({ ...draft, qbId: "qb-1", TotalAmt: 200, subtotal: 175 }), 20000);
+});
 
 test("money and month normalization are deterministic", () => {
   assert.equal(moneyToCents("$1,229.95"), 122995);
@@ -291,6 +327,68 @@ test("manual month allocation wins only while its invoice or payment source stil
   });
   assert.equal(cell(stale, "2026-05").payment.status, "review");
   assert.match(cell(stale, "2026-05").payment.reasons[0], /no longer points to a valid/i);
+});
+
+test("matching the correct invoice replaces stale review sources and their notes in the selected month", () => {
+  const original = { version: 2, policies: {}, allocations: { "client-1": {
+    "2026-04": { status: "review", sources: [{ kind: "invoice", invoiceId: "missing-old-invoice", amountCents: 90000 }], allocatedCents: 90000, note: "Old match needs review" },
+    "2026-05": { status: "waived", sources: [{ kind: "waiver", waiverId: "may-waiver" }], note: "Courtesy coverage" },
+  } } };
+  const linked = assignMaintenanceInvoiceMonths(original, { clientId: "client-1", monthKeys: ["2026-04"], invoice: invoice(), expectedCents: 22900 });
+  const allocation = linked.allocations["client-1"]["2026-04"];
+  assert.equal(allocation.sources.length, 1);
+  assert.equal(allocation.sources[0].invoiceId, "invoice-1");
+  assert.equal(allocation.allocatedCents, 22900);
+  assert.equal(allocation.note, undefined);
+  assert.deepEqual(linked.allocations["client-1"]["2026-05"], original.allocations["client-1"]["2026-05"]);
+  const rows = buildMaintenancePaymentLedgerRows({ clients: [recurringClient()], invoices: [invoice()], ledger: linked, year: 2026 });
+  assert.equal(cell(rows, "2026-04").payment.status, "paid");
+  assert.equal(original.allocations["client-1"]["2026-04"].status, "review", "assignment is pure");
+});
+
+test("matched invoice status refreshes from the canonical balance instead of keeping an old review or refund", () => {
+  for (const oldStatus of ["review", "partial", "refunded"]) {
+    const linked = assignMaintenanceInvoiceMonths(emptyMaintenancePaymentLedger(), { clientId: "client-1", monthKeys: ["2026-04"], invoice: invoice(), status: oldStatus });
+    for (const [canonical, status] of [[invoice(), "paid"], [invoice({ status: "Sent", balance: 229 }), "due"], [invoice({ status: "Sent", balance: 100 }), "partial"], [invoice({ status: "Voided" }), "refunded"]]) {
+      const rows = buildMaintenancePaymentLedgerRows({ clients: [recurringClient()], invoices: [canonical], ledger: linked, year: 2026 });
+      assert.equal(cell(rows, "2026-04").payment.status, status, `${oldStatus} refreshes to ${status}`);
+    }
+  }
+  assert.equal(maintenanceInvoicePaymentStatus(invoice({ status: "Paid", paidDate: "2026-04-20", balance: 229 })), "due", "an open canonical balance wins over a stale paid label");
+  assert.equal(maintenanceInvoicePaymentStatus(invoice({ balance: "unknown" })), "review");
+});
+
+test("recorded paid and unpaid months need no invoice and survive automatic history reconciliation", () => {
+  for (const decision of ["paid", "unpaid"]) {
+    const status = decision === "paid" ? "paid" : "due";
+    const linked = setMaintenancePaymentMonthOverride(emptyMaintenancePaymentLedger(), {
+      clientId: "client-1", monthKey: "2026-04", status,
+      source: { kind: "manual", recordId: "manual:client-1:2026-04", decision },
+      expectedCents: 22900, allocatedCents: decision === "paid" ? 22900 : 0,
+      note: decision === "paid" ? "Paid by check outside the app" : "Reviewed records; this month is still unpaid",
+      actor: "owner-1", updatedAt: "2026-10-05T12:00:00Z",
+    });
+    assert.ok(linked);
+    const rows = buildMaintenancePaymentLedgerRows({ clients: [recurringClient()], invoices: [], ledger: linked, year: 2026 });
+    assert.equal(cell(rows, "2026-04").payment.status, status);
+    assert.equal(cell(rows, "2026-04").payment.manual, true);
+    assert.equal(cell(rows, "2026-04").payment.sources[0].decision, decision);
+    assert.equal(cell(rows, "2026-04").payment.sources[0].invoiceId, undefined);
+    const reconciled = reconcileMaintenancePaymentHistory({ clients: [recurringClient()], invoices: [invoice()], payments: [], schedule: [], ledger: linked, fromYear: 2026, throughYear: 2026 });
+    assert.deepEqual(reconciled.ledger, linked, "an automatic match does not erase a deliberate month decision");
+    const matched = assignMaintenanceInvoiceMonths(linked, { clientId: "client-1", monthKeys: ["2026-04"], invoice: invoice() });
+    assert.equal(matched.allocations["client-1"]["2026-04"].sources.length, 1);
+    assert.equal(matched.allocations["client-1"]["2026-04"].sources[0].kind, "invoice", "a later explicit match replaces the manual decision");
+  }
+});
+
+test("manual month decisions require consistent audited provenance and a note for paid", () => {
+  const valid = { status: "paid", sources: [{ kind: "manual", recordId: "manual:client-1:2026-04", decision: "paid" }], note: "Recorded check", updatedAt: "2026-10-05T12:00:00Z", updatedBy: "owner-1" };
+  const ledgerFor = (allocation) => ({ version: 2, policies: {}, allocations: { "client-1": { "2026-04": allocation } } });
+  assert.ok(normalizeMaintenancePaymentLedger(ledgerFor(valid)));
+  for (const changes of [{ note: "" }, { updatedBy: "" }, { updatedAt: "" }, { status: "due" }, { sources: [...valid.sources, { kind: "invoice", invoiceId: "invoice-1" }] }]) {
+    assert.equal(normalizeMaintenancePaymentLedger(ledgerFor({ ...valid, ...changes })), null);
+  }
 });
 
 test("SPS and QuickBooks payment identifiers never match across namespaces", () => {

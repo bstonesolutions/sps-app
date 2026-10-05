@@ -167,6 +167,41 @@ test("assign uses canonical invoice evidence, ignores spoofed totals, and fences
   });
 });
 
+test("assign can match an unsynced SPS draft using its valid canonical lines, discounts, and tax", async () => {
+  const localDraft = { id: "draft-local", number: "DRAFT-1", clientId: "c1", status: "Draft", taxRate: "6", discountType: "pct", discount: "10", lineItems: [
+    { desc: "Monthly maintenance", qty: "2", unitPrice: "125", discountType: "pct", discount: "10", taxable: true },
+    { desc: "Supplies", qty: "3", unitPrice: "20", discountType: "amt", discount: "5", taxable: false },
+  ] };
+  const state = { sps_clients: { value: [canonicalClient], version: 3 }, sps_invoices: { value: [localDraft], version: 8 }, sps_maintenance_billing: { value: { version: 2, policies: {}, allocations: {} }, version: 4 } };
+  let batch = null;
+  globalThis.fetch = authenticatedStateFetch({ state, onBatch(operations) { batch = operations; } });
+  const res = mockResponse();
+  await handler({ method: "POST", headers: { authorization: "Bearer owner-token" }, body: { action: "assign", clientId: "c1", invoiceId: "sps:draft-local", monthKeys: ["2026-10"], total: 999999 } }, res);
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.invoice.totalCents, 26415);
+  const allocation = res.body.maintenancePaymentLedger.allocations.c1["2026-10"];
+  assert.equal(allocation.status, "due");
+  assert.equal(allocation.allocatedCents, 26415);
+  assert.equal(allocation.sources[0].invoiceId, localDraft.id);
+  assert.equal(allocation.sources[0].qbInvoiceId, undefined);
+  assert.deepEqual(batch.filter((operation) => !operation.check_only).map((operation) => operation.key), ["sps_maintenance_billing"]);
+});
+
+test("assign refuses missing local prices and missing QuickBooks totals instead of guessing", async () => {
+  for (const savedInvoice of [
+    { id: "local-bad", clientId: "c1", status: "Draft", lineItems: [{ qty: 1 }] },
+    { id: "qb-missing", qbId: "qb-missing", clientId: "c1", status: "Paid", lineItems: [{ qty: 1, unitPrice: 229 }] },
+  ]) {
+    const state = { sps_clients: { value: [canonicalClient], version: 3 }, sps_invoices: { value: [savedInvoice], version: 8 }, sps_maintenance_billing: { value: { version: 2, policies: {}, allocations: {} }, version: 4 } };
+    let writes = 0;
+    globalThis.fetch = authenticatedStateFetch({ state, onBatch() { writes += 1; } });
+    const res = mockResponse();
+    await handler({ method: "POST", headers: { authorization: "Bearer owner-token" }, body: { action: "assign", clientId: "c1", invoiceId: `sps:${savedInvoice.id}`, monthKeys: ["2026-10"] } }, res);
+    assert.equal(res.statusCode, 409);
+    assert.equal(writes, 0);
+  }
+});
+
 test("assign resolves a namespaced QuickBooks invoice without colliding with an SPS invoice ID", async () => {
   const state = {
     sps_clients: { value: [canonicalClient, { id: "c2", name: "Other Client" }], version: 3 },
@@ -353,6 +388,65 @@ test("accounting staff can waive selected months without inventing invoice evide
     assert.equal(written.allocations.c1[month].allocatedCents, 0);
     assert.equal(written.allocations.c1[month].expectedCents, 22900);
     assert.equal(written.allocations.c1[month].sources[0].kind, "waiver");
+  }
+});
+
+for (const actionType of ["paid", "unpaid"]) {
+  test(`accounting staff can record ${actionType} without an invoice, replacing stale review evidence`, async () => {
+    const state = {
+      sps_clients: { value: [canonicalClient], version: 2 },
+      sps_invoices: { value: [], version: 5 },
+      sps_maintenance_billing: { value: { version: 2, policies: {}, allocations: { c1: { "2026-08": { status: "review", sources: [{ kind: "invoice", invoiceId: "missing-old-invoice" }] } } } }, version: 3 },
+    };
+    let batch = null;
+    globalThis.fetch = authenticatedStateFetch({ state, onBatch(operations) { batch = operations; } });
+    const res = mockResponse();
+    await handler({ method: "POST", headers: { authorization: "Bearer owner-token" }, body: {
+      action: "assign", actionType, clientId: "c1", monthKeys: ["2026-08"],
+      note: actionType === "paid" ? "Received a check outside QuickBooks" : "",
+      total: 999999, expectedCents: 1, actor: "spoofed-user",
+    } }, res);
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    const saved = res.body.maintenancePaymentLedger.allocations.c1["2026-08"];
+    assert.equal(saved.status, actionType === "paid" ? "paid" : "due");
+    assert.equal(saved.sources.length, 1);
+    assert.deepEqual(saved.sources[0], { kind: "manual", recordId: "manual:c1:2026-08", decision: actionType, amountCents: actionType === "paid" ? 22900 : 0 });
+    assert.equal(saved.updatedBy, "owner@example.com");
+    assert.ok(saved.updatedAt);
+    assert.equal(saved.expectedCents, 22900);
+    assert.equal(saved.allocatedCents, actionType === "paid" ? 22900 : 0);
+    assert.equal(res.body.invoice, undefined);
+    assert.deepEqual(batch.filter((entry) => !entry.check_only).map((entry) => entry.key), ["sps_maintenance_billing"], "only protected accounting state is written");
+  });
+}
+
+test("recording paid or waived requires a note before any accounting mutation", async () => {
+  let writes = 0;
+  globalThis.fetch = authenticatedStateFetch({ state: {}, onBatch() { writes += 1; } });
+  for (const actionType of ["paid", "waived"]) {
+    const res = mockResponse();
+    await handler({ method: "POST", headers: { authorization: "Bearer owner-token" }, body: { action: "assign", actionType, clientId: "c1", monthKeys: ["2026-08"], note: "  " } }, res);
+    assert.equal(res.statusCode, 400);
+    assert.match(res.body.error, /note/i);
+  }
+  assert.equal(writes, 0);
+});
+
+test("matching a correct invoice resolves stale Review and follows its current canonical balance", async () => {
+  for (const [savedInvoice, expected] of [[{ ...canonicalInvoice, status: "Paid", balance: 0 }, "paid"], [{ ...canonicalInvoice, status: "Paid", paidDate: "2026-08-10", balance: 687 }, "due"], [{ ...canonicalInvoice, balance: 200 }, "partial"], [{ ...canonicalInvoice, status: "Voided" }, "refunded"]]) {
+    const state = {
+      sps_clients: { value: [canonicalClient], version: 2 }, sps_invoices: { value: [savedInvoice], version: 5 },
+      sps_maintenance_billing: { value: { version: 2, policies: {}, allocations: { c1: { "2026-08": { status: "review", sources: [{ kind: "invoice", invoiceId: "missing-old-invoice" }], note: "Stale review" } } } }, version: 3 },
+    };
+    globalThis.fetch = authenticatedStateFetch({ state });
+    const res = mockResponse();
+    await handler({ method: "POST", headers: { authorization: "Bearer owner-token" }, body: { action: "assign", clientId: "c1", invoiceId: "iv1", monthKeys: ["2026-08"] } }, res);
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    const saved = res.body.maintenancePaymentLedger.allocations.c1["2026-08"];
+    assert.equal(saved.status, expected);
+    assert.equal(saved.sources.length, 1);
+    assert.equal(saved.sources[0].invoiceId, "iv1");
+    assert.equal(saved.note, undefined);
   }
 });
 

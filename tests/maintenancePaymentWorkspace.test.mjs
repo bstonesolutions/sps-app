@@ -9,7 +9,8 @@ const readLedger = () => readFile(new URL("../maintenancePaymentLedger.js", impo
 test("maintenance coverage loads once per workspace visit and can be retried explicitly", async () => {
   const app = await readApp();
   const start = app.indexOf("function InvoicesScreen");
-  const end = app.indexOf("function InvoiceDetail", start);
+  const end = app.indexOf("\nfunction ", start + 25);
+  assert.ok(end > start, "invoice workspace boundary exists");
   const screen = app.slice(start, end);
 
   assert.match(screen, /maintenanceLedgerAttemptedRef = useRef\(false\)/);
@@ -24,7 +25,7 @@ test("maintenance payment workspace provides a monthly matrix and explicit invoi
   assert.match(workspace, /Payment calendar/);
   assert.match(workspace, /Future months stay visible without counting as missing/);
   assert.match(workspace, /data-maintenance-invoice-evidence/);
-  assert.match(workspace, /Months covered by this choice/);
+  assert.match(workspace, /Months to update/);
   assert.match(workspace, /QuickBooks confirmed/);
   assert.match(workspace, /Paid invoice/);
   assert.match(workspace, /No SPS visit data/);
@@ -50,7 +51,8 @@ test("maintenance history reconciliation waits for fresh QuickBooks state and ex
   const app = await readApp();
   const workspace = await readWorkspace();
   const start = app.indexOf("function InvoicesScreen");
-  const end = app.indexOf("function InvoiceDetail", start);
+  const end = app.indexOf("\nfunction ", start + 25);
+  assert.ok(end > start, "invoice workspace boundary exists");
   const screen = app.slice(start, end);
 
   assert.match(app, /const maintenanceQuickBooksSnapshotIssue = \(data\) =>/);
@@ -106,7 +108,8 @@ test("reconciliation receipt is touch-actionable, scoped, timestamped, and callb
   const app = await readApp();
   const workspace = await readWorkspace();
   const start = app.indexOf("function InvoicesScreen");
-  const end = app.indexOf("function InvoiceDetail", start);
+  const end = app.indexOf("\nfunction ", start + 25);
+  assert.ok(end > start, "invoice workspace boundary exists");
   const screen = app.slice(start, end);
 
   assert.match(workspace, /data-maintenance-reconciliation-details-toggle/);

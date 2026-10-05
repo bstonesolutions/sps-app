@@ -27,13 +27,24 @@ export default async function handler(req, res) {
   const _u = await requireUser(req, res);
   if (!_u) return;
 
-  const { invoice } = req.body;
+  let { invoice } = req.body;
   if (!invoice || !invoice.qbId) {
     return res.status(400).json({ error: "Missing required fields (need invoice.qbId)" });
   }
 
-  const serviceMonthIssue = invoiceServiceDescriptionIssue(invoice);
-  if (serviceMonthIssue) return res.status(422).json({ error: serviceMonthIssue.message, code: serviceMonthIssue.code, reviewRequired: true });
+  const initialMonthIssue = invoiceServiceDescriptionIssue(invoice);
+  if (initialMonthIssue?.code === "maintenance-service-month-conflict") {
+    return res.status(422).json({ error: initialMonthIssue.message, code: initialMonthIssue.code, reviewRequired: true });
+  }
+  if (initialMonthIssue) {
+    // An explicit saved month match can fill an older undated source invoice.
+    // Resolve it before contacting QuickBooks; ordinary missing months still
+    // stop here, before any external accounting request.
+    const coverageIssue = await quickBooksMaintenanceGuard(invoice, { mode: "update", onPreparedInvoice: prepared => { invoice = prepared; } });
+    if (coverageIssue) return res.status(coverageIssue.status).json({ error: coverageIssue.message, code: coverageIssue.code, reviewRequired: true });
+    const unresolved = invoiceServiceDescriptionIssue(invoice);
+    if (unresolved) return res.status(422).json({ error: unresolved.message, code: unresolved.code, reviewRequired: true });
+  }
 
   // Tokens are read server-side from the store (never passed by the client).
   let access_token, realm_id;
@@ -130,8 +141,10 @@ export default async function handler(req, res) {
       });
     }
 
-    const coverageIssue = await quickBooksMaintenanceGuard(invoice, { mode: "update", existingQuickBooksInvoice: existing });
+    const coverageIssue = await quickBooksMaintenanceGuard(invoice, { mode: "update", existingQuickBooksInvoice: existing, onPreparedInvoice: prepared => { invoice = prepared; } });
     if (coverageIssue) return res.status(coverageIssue.status).json({ error: coverageIssue.message, code: coverageIssue.code, reviewRequired: true });
+    const serviceMonthIssue = invoiceServiceDescriptionIssue(invoice);
+    if (serviceMonthIssue) return res.status(422).json({ error: serviceMonthIssue.message, code: serviceMonthIssue.code, reviewRequired: true });
 
     // Step 2: build updated line items. Keep only real ids imported from
     // QuickBooks; new SPS lines omit Id so QuickBooks creates them.

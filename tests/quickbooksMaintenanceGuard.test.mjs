@@ -340,3 +340,66 @@ for (const [operation, handler] of [["create", createInvoice], ["update", update
     });
   }
 }
+
+const manualBilling = (decision = 'unpaid') => ({ version: 2, policies: {}, allocations: { [client.id]: {
+  '2026-10': { status: decision === 'paid' ? 'paid' : 'due',
+    sources: [{ kind: 'manual', recordId: 'manual-client-a-2026-10', decision }],
+    expectedCents: 17500, allocatedCents: decision === 'paid' ? 17500 : 0,
+    updatedAt: '2026-10-05T12:00:00Z', updatedBy: 'owner@example.test', note: 'Owner checked payment record' },
+} } });
+
+test('owner unpaid allows create before matching without making paid owner months billable', async () => {
+  const uncertain = { ...sourceInvoice, qbId: 'unresolved', status: 'Partial', balance: 25,
+    lineItems: [{ ...serviceLine, desc: 'Maintenance prepayment' }] };
+  let calls = install({ invoices: [uncertain], billing: manualBilling() });
+  let result = res();
+  await createInvoice(request(buildQuickBooksInvoicePayload(draft(), client, {})), result);
+  assert.equal(result.statusCode, 200, JSON.stringify(result.body));
+  assert.equal(qbWrites(calls).length, 1);
+  calls = install({ invoices: [], billing: manualBilling('paid') });
+  result = res();
+  await createInvoice(request(buildQuickBooksInvoicePayload(draft(), client, {})), result);
+  assert.equal(result.body.code, 'maintenance-already-covered');
+  assert.equal(qbWrites(calls).length, 0);
+});
+
+for (const [operation, handler] of [['create', createInvoice], ['update', updateInvoice]]) {
+  test(`${operation} fills an unchanged unpaid source's service month from its explicit match`, async () => {
+    const description = operation === 'create' ? 'Services' : 'Monthly maintenance';
+    const saved = { ...draft(), status: 'Sent', balance: 175, total: 175, date: '12/01/2026',
+      ...(operation === 'update' ? { qbId: 'qb-draft' } : {}),
+      lineItems: [{ ...serviceLine, desc: description }] };
+    const billing = { version: 2, policies: {}, allocations: { [client.id]: { '2026-10': {
+      status: 'due', expectedCents: 17500, allocatedCents: 17500,
+      sources: [{ kind: 'invoice', invoiceId: saved.id, amountCents: 17500 }],
+    } } } };
+    const existing = qbInvoice();
+    const calls = install({ invoices: [saved], billing, existing });
+    const payload = buildQuickBooksInvoicePayload(saved, client, {});
+    if (operation === 'update') payload.qbBaseContentFingerprint = fingerprintQuickBooksInvoiceContent(existing);
+    const result = res();
+    await handler(request(payload), result);
+    assert.equal(result.statusCode, 200, JSON.stringify(result.body));
+    const writes = qbWrites(calls);
+    assert.equal(writes.length, 1);
+    const written = JSON.parse(writes[0].body);
+    assert.equal(written.Line[0].Description, `${description} - October 2026`);
+    assert.equal(written.TxnDate, '2026-12-01');
+  });
+}
+
+test('a matched unpaid source exemption never approves a changed amount or contradictory month', async () => {
+  const saved = { ...draft(), status: 'Sent', balance: 175, total: 175 };
+  const billing = { version: 2, policies: {}, allocations: { [client.id]: { '2026-10': {
+    status: 'due', expectedCents: 17500, allocatedCents: 17500,
+    sources: [{ kind: 'invoice', invoiceId: saved.id, amountCents: 17500 }],
+  } } } };
+  for (const changes of [{ unitPrice: '350' }, { serviceMonth: '2026-11' }, { desc: 'Monthly maintenance - November 2026' }]) {
+    const calls = install({ invoices: [saved], billing });
+    const result = res();
+    await createInvoice(request(buildQuickBooksInvoicePayload({ ...saved,
+      lineItems: [{ ...serviceLine, ...changes }] }, client, {})), result);
+    assert.notEqual(result.statusCode, 200, JSON.stringify({ changes, response: result.body }));
+    assert.equal(qbWrites(calls).length, 0);
+  }
+});

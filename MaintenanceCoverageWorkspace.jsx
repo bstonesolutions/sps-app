@@ -3,13 +3,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   buildMaintenanceCalendarRows,
   maintenancePaymentDisplayStatus,
-  moneyToCents,
 } from "./maintenancePaymentLedger.js";
 import {
   filterMaintenanceCalendarRows,
   MAINTENANCE_CALENDAR_SERVICE_OPTIONS,
   MAINTENANCE_CALENDAR_PAYMENT_OPTIONS,
 } from "./maintenanceCalendarView.js";
+import { maintenanceCoverageInvoiceChoices, maintenanceCoverageInvoicePreview, maintenanceCoverageSavedMessage } from "./maintenanceCoverageActions.js";
 
 const MONTHS = [
   ["01", "Jan", "January"], ["02", "Feb", "February"], ["03", "Mar", "March"],
@@ -33,7 +33,6 @@ const STATUS = {
 };
 
 const text = (value) => String(value == null ? "" : value).trim();
-const normalizedName = (value) => text(value).toLowerCase().replace(/[^a-z0-9]/g, "");
 const hexA = (hex, alpha) => {
   const raw = String(hex || "").replace("#", "");
   if (raw.length !== 6) return `rgba(175,1,26,${alpha})`;
@@ -42,7 +41,6 @@ const hexA = (hex, alpha) => {
 const formatMoney = (cents, hidden = false) => hidden
   ? "Hidden"
   : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format((Number(cents) || 0) / 100);
-const invoiceAmountCents = (invoice) => moneyToCents(invoice?.total ?? invoice?.amount ?? invoice?.subtotal ?? invoice?.TotalAmt);
 const invoiceLinkIdentity = (invoice) => {
   const spsInvoiceId = text(invoice?.id);
   if (spsInvoiceId) return `sps:${spsInvoiceId}`;
@@ -60,7 +58,12 @@ const invoiceEvidenceSourceLabel = (invoice) => (
   invoice?.qbInvoiceId ? "QuickBooks" : (invoice?.invoiceId ? "SPS record" : "Invoice record")
 );
 const displayStatusForMonth = (cell, monthKey) => maintenancePaymentDisplayStatus(cell?.payment?.status, monthKey);
-const coverageLabel = (status) => STATUS[status]?.label || status;
+const coverageLabel = (status, cell) => {
+  const manual = (cell?.payment?.sources || []).find(source => source.kind === "manual");
+  if (manual?.decision === "unpaid" && status === "due") return "Unpaid";
+  if (manual?.decision === "paid" && status === "paid") return "Paid, recorded by you";
+  return STATUS[status]?.label || status;
+};
 const invoiceEvidenceLabel = (cell, compact = false) => {
   const monthInvoiceEvidence = Array.isArray(cell?.invoiceEvidence) ? cell.invoiceEvidence : [];
   if (monthInvoiceEvidence.length) {
@@ -71,7 +74,7 @@ const invoiceEvidenceLabel = (cell, compact = false) => {
     const hasPartial = statusEvidence.some((invoice) => invoice?.status === "partial");
     const hasOpen = statusEvidence.some((invoice) => invoice?.status === "due");
     const unlinkedEvidence = monthInvoiceEvidence.filter((invoice) => !invoice?.linkedToCoverage);
-    const hasReview = unlinkedEvidence.some((invoice) => invoice?.coverageKind === "review");
+    const hasReview = !linkedEvidence.length && unlinkedEvidence.some((invoice) => invoice?.coverageKind === "review");
     const onlyOtherWork = unlinkedEvidence.length === monthInvoiceEvidence.length
       && unlinkedEvidence.every((invoice) => invoice?.coverageKind === "other_work");
     if (statuses.size > 1) {
@@ -81,7 +84,7 @@ const invoiceEvidenceLabel = (cell, compact = false) => {
     const base = hasPaid ? "Paid invoice" : hasPartial ? "Partly paid invoice" : hasOpen ? "Open invoice" : "Invoice found";
     if (hasReview) return compact ? `${base} · needs match` : `${base} · needs maintenance match`;
     if (onlyOtherWork) return compact ? `${base} · other work` : `${base} · other work, not maintenance`;
-    return monthInvoiceEvidence.length > 1 ? `${base} · ${monthInvoiceEvidence.length} records` : base;
+    return statusEvidence.length > 1 ? `${base} · ${statusEvidence.length} records` : base;
   }
   const hasPrepayment = (cell?.payment?.sources || []).some((source) => source?.kind === "prepaid");
   const hasLinkedInvoice = (cell?.payment?.sources || []).some((source) => (
@@ -133,13 +136,7 @@ function statusTone(status, T) {
 }
 
 function clientInvoicesFor(row, invoices, clients) {
-  const client = clients.find((candidate) => String(candidate?.id) === String(row.clientId));
-  const clientName = normalizedName(row.clientName);
-  return (invoices || []).filter((invoice) => {
-    if (String(invoice?.clientId || invoice?.customerId || "") === String(row.clientId)) return true;
-    if (client?.qbId && String(invoice?.qbCustomerId || invoice?.CustomerRef?.value || "") === String(client.qbId)) return true;
-    return normalizedName(invoice?.clientName || invoice?.customerName || invoice?.CustomerRef?.name) === clientName;
-  }).sort((left, right) => String(right?.date || right?.createdAt || right?.TxnDate || "").localeCompare(String(left?.date || left?.createdAt || left?.TxnDate || "")));
+  return maintenanceCoverageInvoiceChoices(row.clientId, clients, invoices);
 }
 
 function sourceInvoiceForCell(cell, invoices) {
@@ -169,7 +166,7 @@ function sourceInvoiceForCell(cell, invoices) {
 function CoverageCell({ cell, monthKey, monthLabel, clientName, selected, T, onClick }) {
   const status = displayStatusForMonth(cell, monthKey);
   const tone = statusTone(status, T);
-  const paymentLabel = coverageLabel(status);
+  const paymentLabel = coverageLabel(status, cell);
   return (
     <button
       type="button"
@@ -184,13 +181,13 @@ function CoverageCell({ cell, monthKey, monthLabel, clientName, selected, T, onC
     >
       <span style={{ display: "inline-flex", gap: 4, alignItems: "center", fontSize: 11.5, lineHeight: 1.25, fontWeight: 730 }}>
         {["paid", "prepaid", "waived"].includes(status) ? <Icon name="check" size={12} /> : null}
-        {STATUS[status]?.short || paymentLabel}
+        {paymentLabel === "Unpaid" ? "Unpaid" : STATUS[status]?.short || paymentLabel}
       </span>
     </button>
   );
 }
 
-function DetailPanel({ selection, rows, invoices, clients, year, hiddenAmounts, T, busy, onClose, onAssign, onClear }) {
+function DetailPanel({ selection, rows, invoices, clients, year, hiddenAmounts, T, busy, onClose, onAssign, onClear, onCreateInvoice }) {
   const row = rows.find((candidate) => candidate.clientId === selection?.clientId);
   const initialMonth = selection?.monthKey;
   const [months, setMonths] = useState(() => initialMonth ? [initialMonth] : []);
@@ -198,46 +195,96 @@ function DetailPanel({ selection, rows, invoices, clients, year, hiddenAmounts, 
   const [mode, setMode] = useState("invoice");
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
+  const [savedMessage, setSavedMessage] = useState("");
+  const [working, setWorking] = useState(false);
+  const [invoiceSearch, setInvoiceSearch] = useState("");
+  const [createdSelectionKey, setCreatedSelectionKey] = useState("");
+  const pendingRef = useRef(false);
+  const disabled = busy || working;
 
   useEffect(() => {
     setMonths(initialMonth ? [initialMonth] : []);
     const invoice = sourceInvoiceForCell(row?.byMonth?.[initialMonth], invoices);
     setInvoiceId(invoiceLinkIdentity(invoice));
-    setMode(row?.byMonth?.[initialMonth]?.payment?.status === "waived" ? "waived" : "invoice");
-    setNote("");
+    const payment = row?.byMonth?.[initialMonth]?.payment;
+    const manual = (payment?.sources || []).find(source => source.kind === "manual");
+    setMode(manual?.decision || (payment?.status === "waived" ? "waived" : "invoice"));
+    setNote(payment?.note || "");
     setError("");
-  }, [row?.clientId, initialMonth, invoices]);
+    setSavedMessage("");
+    setInvoiceSearch("");
+    setCreatedSelectionKey("");
+  }, [row?.clientId, initialMonth]);
+
+  useEffect(() => {
+    const closeOnEscape = event => { if (event.key === "Escape" && !pendingRef.current) onClose(); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
 
   if (!row || !initialMonth || !initialMonth.startsWith(`${year}-`)) return null;
   const candidates = clientInvoicesFor(row, invoices, clients);
   const cell = row.byMonth[initialMonth];
   const status = displayStatusForMonth(cell, initialMonth);
-  const paymentLabel = coverageLabel(status);
+  const paymentLabel = coverageLabel(status, cell);
   const invoiceLabel = invoiceEvidenceLabel(cell);
   const visitLabel = visitEvidenceLabel(cell);
   const monthInvoiceEvidence = Array.isArray(cell?.invoiceEvidence) ? cell.invoiceEvidence : [];
   const selectedInvoice = candidates.find((invoice) => invoiceLinkIdentity(invoice) === invoiceId);
+  const preview = maintenanceCoverageInvoicePreview(selectedInvoice, months);
+  const visibleCandidates = candidates.filter(invoice => !invoiceSearch || [invoice.number, invoice.DocNumber, invoice.date, invoice.TxnDate, ...(invoice.lineItems || []).map(line => line.desc || line.description)].some(value => text(value).toLowerCase().includes(invoiceSearch.toLowerCase())));
+  const requiresNote = mode === "paid" || mode === "waived";
+  const createTotalCents = row.maintenancePriceCents > 0 ? row.maintenancePriceCents * months.length : null;
+  const createSelectionKey = [row.clientId, ...months].join("|");
+  const createMonthLabels = months.map(key => `${MONTHS.find(([number]) => key.endsWith(`-${number}`))?.[1]} ${year}`).join(", ");
   const monthMeta = MONTHS.find(([number]) => initialMonth.endsWith(`-${number}`));
-  const toggleMonth = (monthKey) => setMonths((current) => current.includes(monthKey)
+  const toggleMonth = (monthKey) => { setSavedMessage(""); setMonths((current) => current.includes(monthKey)
     ? (current.length === 1 ? current : current.filter((value) => value !== monthKey))
-    : [...current, monthKey].sort());
+    : [...current, monthKey].sort()); };
   const save = async () => {
+    if (pendingRef.current || disabled) return;
     setError("");
-    if (mode === "invoice" && !invoiceId) {
+    setSavedMessage("");
+    if (mode === "invoice" && !selectedInvoice) {
       setError("Choose the QuickBooks or SPS invoice that covers the selected month.");
       return;
     }
+    if (mode === "invoice" && !(preview?.totalCents > 0)) { setError("Save or sync this invoice first so its total can be confirmed."); return; }
+    if (requiresNote && !note.trim()) { setError(mode === "paid" ? "Add how and when the payment was received." : "Add a reason for waiving this charge."); return; }
+    pendingRef.current = true;
+    setWorking(true);
     try {
-      await onAssign({
+      const saved = await onAssign({
         clientId: row.clientId,
         monthKeys: months,
         actionType: mode,
         invoiceId: mode === "invoice" ? invoiceId : undefined,
         note,
       });
+      setSavedMessage(maintenanceCoverageSavedMessage(saved?.maintenancePaymentLedger || saved?.ledger || saved, row.clientId, months));
     } catch (saveError) {
       setError(saveError?.message || "Coverage could not be saved.");
+    } finally {
+      pendingRef.current = false;
+      setWorking(false);
     }
+  };
+  const clear = async () => {
+    if (pendingRef.current || disabled) return;
+    pendingRef.current = true; setWorking(true); setError(""); setSavedMessage("");
+    try { await onClear({ clientId: row.clientId, monthKeys: months }); setSavedMessage("Saved choice cleared. The calendar now shows the available payment history."); }
+    catch (saveError) { setError(saveError?.message || "The saved choice could not be cleared."); }
+    finally { pendingRef.current = false; setWorking(false); }
+  };
+  const createInvoice = async () => {
+    if (!onCreateInvoice || pendingRef.current || disabled || createdSelectionKey === createSelectionKey) return;
+    pendingRef.current = true; setWorking(true); setError(""); setSavedMessage("");
+    try {
+      const result = await onCreateInvoice({ clientId: row.clientId, monthKeys: [...months], returnToMaintenance: true });
+      const invoice = result?.invoice || result;
+      if (invoiceLinkIdentity(invoice)) { setCreatedSelectionKey(createSelectionKey); setInvoiceId(invoiceLinkIdentity(invoice)); setInvoiceSearch(""); setMode("invoice"); setSavedMessage("Draft invoice created. Review it below, then link it to these months. It has not been sent."); }
+    } catch (createError) { setError(createError?.message || "The invoice could not be opened."); }
+    finally { pendingRef.current = false; setWorking(false); }
   };
 
   return (
@@ -257,20 +304,23 @@ function DetailPanel({ selection, rows, invoices, clients, year, hiddenAmounts, 
           <h3 style={{ margin: "5px 0 0", fontSize: 27, lineHeight: 1.05, letterSpacing: "-.035em", color: T.text }}>{row.clientName}</h3>
           <div style={{ marginTop: 7, fontSize: 13, color: T.textMuted }}>{paymentLabel} · {formatMoney(cell.expectedCents, hiddenAmounts)} expected</div>
         </div>
-        <button type="button" onClick={onClose} aria-label="Close" style={{ width: 38, height: 38, border: `1px solid ${T.border}`, borderRadius: "50%", background: T.surface, color: T.textMuted, display: "grid", placeItems: "center", cursor: "pointer" }}><Icon name="close" size={17}/></button>
+        <button type="button" disabled={disabled} onClick={onClose} aria-label="Close" style={{ width: 38, height: 38, border: `1px solid ${T.border}`, borderRadius: "50%", background: T.surface, color: T.textMuted, display: "grid", placeItems: "center", cursor: "pointer" }}><Icon name="close" size={17}/></button>
       </div>
 
       <div style={{ padding: "22px 24px 38px" }}>
+        {savedMessage ? <div role="status" data-maintenance-saved-result style={{ display: "flex", gap: 9, alignItems: "flex-start", borderLeft: `3px solid ${T.primary}`, background: hexA(T.primary, .045), padding: "12px 13px", marginBottom: 18, fontSize: 13, fontWeight: 700, lineHeight: 1.45 }}><span style={{ color: T.primary, paddingTop: 1 }}><Icon name="check" size={16}/></span>{savedMessage}</div> : null}
         <section style={{ borderTop: `3px solid ${T.text}`, borderBottom: `1px solid ${T.border}`, padding: "15px 0 17px" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 18 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 18 }}>
             <div><div style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: ".07em", textTransform: "uppercase", color: T.textMuted }}>Coverage</div><div style={{ marginTop: 5, fontSize: 17, fontWeight: 800 }}>{paymentLabel}</div></div>
             <div><div style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: ".07em", textTransform: "uppercase", color: T.textMuted }}>Invoice evidence</div><div style={{ marginTop: 5, fontSize: 17, fontWeight: 800 }}>{invoiceLabel}</div></div>
-            <div><div style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: ".07em", textTransform: "uppercase", color: T.textMuted }}>SPS visits</div><div style={{ marginTop: 5, fontSize: 17, fontWeight: 800 }}>{visitLabel}</div></div>
           </div>
-          {status === "review" ? <div style={{ marginTop: 13, padding: "10px 11px", borderLeft: `3px solid ${T.primary}`, background: hexA(T.primary, .045), color: T.text, fontSize: 12.5, lineHeight: 1.45 }}>Invoice evidence exists, but this month is not counted as maintenance coverage until the invoice is safely linked.</div> : null}
+          <div style={{ marginTop: 10, fontSize: 12, color: T.textMuted }}>{visitLabel}</div>
+          {status === "review" ? <div style={{ marginTop: 13, color: T.text, fontSize: 12.5, lineHeight: 1.45 }}>Link the correct invoice below, or record this month's payment status.</div> : null}
+          {cell.payment?.note ? <div style={{ marginTop: 12, fontSize: 12.5, lineHeight: 1.45 }}><strong>Saved note:</strong> {cell.payment.note}{cell.payment.updatedAt ? <div style={{ marginTop: 4, color: T.textMuted, fontSize: 11 }}>{formatReceiptTimestamp(cell.payment.updatedAt)}{cell.payment.updatedBy ? ` · ${cell.payment.updatedBy}` : ""}</div> : null}</div> : null}
           {cell.payment?.reasons?.length ? <div style={{ marginTop: 13, paddingLeft: 11, borderLeft: `2px solid ${T.primary}`, color: T.textMuted, fontSize: 12.5, lineHeight: 1.45 }}>{cell.payment.reasons.join(" ")}</div> : null}
           {monthInvoiceEvidence.length ? (
-            <div data-maintenance-month-invoice-evidence style={{ marginTop: 15, borderTop: `1px solid ${T.border}` }}>
+            <details data-maintenance-month-invoice-evidence style={{ marginTop: 15, borderTop: `1px solid ${T.border}` }}>
+              <summary style={{ padding: "10px 0", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Invoice history for this month ({monthInvoiceEvidence.length})</summary>
               {monthInvoiceEvidence.map((invoice, index) => (
                 <div key={invoiceEvidenceIdentity(invoice, index)} style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 12, padding: "11px 0", borderBottom: `1px solid ${T.border}` }}>
                   <div>
@@ -283,44 +333,46 @@ function DetailPanel({ selection, rows, invoices, clients, year, hiddenAmounts, 
                   </div>
                 </div>
               ))}
-            </div>
+            </details>
           ) : null}
         </section>
 
         <section style={{ marginTop: 25 }}>
-          <div style={{ fontSize: 11, fontWeight: 850, letterSpacing: ".075em", textTransform: "uppercase", color: T.textMuted }}>Months covered by this choice</div>
+          <div style={{ fontSize: 11, fontWeight: 850, letterSpacing: ".075em", textTransform: "uppercase", color: T.textMuted }}>Months to update</div>
           <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "repeat(6, minmax(0, 1fr))", borderTop: `1px solid ${T.border}`, borderLeft: `1px solid ${T.border}` }}>
             {MONTHS.map(([number, short]) => {
               const key = `${year}-${number}`;
               const active = months.includes(key);
-              return <button key={key} type="button" onClick={() => toggleMonth(key)} style={{ minHeight: 44, border: "none", borderRight: `1px solid ${T.border}`, borderBottom: `1px solid ${T.border}`, background: active ? T.text : T.surface, color: active ? T.surface : T.textMuted, fontFamily: "inherit", fontSize: 11.5, fontWeight: 780, cursor: "pointer" }}>{short}</button>;
+              return <button key={key} type="button" disabled={disabled} aria-pressed={active} aria-label={`${short} ${year}`} onClick={() => toggleMonth(key)} style={{ minHeight: 44, border: "none", borderRight: `1px solid ${T.border}`, borderBottom: `1px solid ${T.border}`, background: active ? T.text : T.surface, color: active ? T.surface : T.textMuted, fontFamily: "inherit", fontSize: 11.5, fontWeight: 780, cursor: "pointer" }}>{short}</button>;
             })}
           </div>
         </section>
 
         <section style={{ marginTop: 25 }}>
-          <div style={{ display: "flex", gap: 0, borderBottom: `1px solid ${T.border}` }}>
-            {[['invoice', 'Link invoice'], ['waived', 'Waive charge']].map(([value, label]) => (
-              <button key={value} type="button" onClick={() => setMode(value)} style={{ border: "none", borderBottom: `3px solid ${mode === value ? T.primary : "transparent"}`, background: "transparent", color: mode === value ? T.text : T.textMuted, padding: "10px 15px 9px 0", marginRight: 18, fontSize: 12.5, fontWeight: 800, fontFamily: "inherit", cursor: "pointer" }}>{label}</button>
+          <div role="group" aria-label="Update payment status" style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", columnGap: 20, rowGap: 3, borderBottom: `1px solid ${T.border}` }}>
+            {[["invoice", "Link invoice"], ["paid", "Record paid"], ["unpaid", "Mark unpaid"], ["waived", "Waive"]].map(([value, label]) => (
+              <button key={value} type="button" disabled={disabled} aria-pressed={mode === value} onClick={() => { setMode(value); setError(""); setSavedMessage(""); }} style={{ border: "none", borderBottom: `2px solid ${mode === value ? T.primary : "transparent"}`, borderRadius: 0, background: "transparent", color: mode === value ? T.primary : T.textMuted, minHeight: 42, padding: "9px 0", fontSize: 12.5, fontWeight: 750, fontFamily: "inherit", cursor: "pointer", textAlign: "left" }}>{label}</button>
             ))}
           </div>
 
           {mode === "invoice" ? (
             <div style={{ marginTop: 17 }}>
               <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12, marginBottom: 8 }}>
-                <label style={{ fontSize: 11, fontWeight: 850, letterSpacing: ".06em", textTransform: "uppercase", color: T.textMuted }}>Invoice evidence</label>
+                <label htmlFor="maintenance-invoice-search" style={{ fontSize: 11, fontWeight: 850, letterSpacing: ".06em", textTransform: "uppercase", color: T.textMuted }}>Choose an invoice</label>
                 <span style={{ fontSize: 11, color: T.textMuted }}>{candidates.length} matching record{candidates.length === 1 ? "" : "s"}</span>
               </div>
+              {!!candidates.length && <input id="maintenance-invoice-search" type="search" value={invoiceSearch} disabled={disabled} onChange={event => setInvoiceSearch(event.target.value)} placeholder="Find invoice number or service" style={{ width: "100%", boxSizing: "border-box", minHeight: 42, border: `1px solid ${T.border}`, borderRadius: 7, background: T.surface, color: T.text, padding: "9px 11px", fontFamily: "inherit", fontSize: 13, marginBottom: 10 }} />}
               <div data-maintenance-invoice-evidence style={{ maxHeight: 236, overflowY: "auto", borderTop: `1px solid ${T.border}` }}>
-                {candidates.map((invoice) => {
+                {visibleCandidates.map((invoice) => {
                   const value = invoiceLinkIdentity(invoice);
                   const active = value === invoiceId;
+                  const candidatePreview = maintenanceCoverageInvoicePreview(invoice, months);
                   return (
                     <button
                       key={value || `number:${text(invoice.number || invoice.DocNumber)}`}
                       type="button"
-                      onClick={() => setInvoiceId(value)}
-                      disabled={!value}
+                      onClick={() => { setInvoiceId(value); setSavedMessage(""); setError(""); }}
+                      disabled={!value || disabled}
                       aria-pressed={active}
                       style={{
                         width: "100%", display: "grid", gridTemplateColumns: "1fr auto", gap: 14,
@@ -334,30 +386,34 @@ function DetailPanel({ selection, rows, invoices, clients, year, hiddenAmounts, 
                         <span style={{ display: "block", marginTop: 4, color: T.textMuted, fontSize: 11.5 }}>{invoice.date || invoice.TxnDate || "No issue date"} · {invoice.qbId || invoice.Id ? "QuickBooks confirmed" : "SPS record"}</span>
                       </span>
                       <span style={{ textAlign: "right" }}>
-                        <span style={{ display: "block", fontSize: 13, fontWeight: 850 }}>{formatMoney(invoiceAmountCents(invoice), hiddenAmounts)}</span>
-                        <span style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 5, marginTop: 4, color: active ? T.primary : T.textMuted, fontSize: 11.5 }}>{active ? <Icon name="check" size={12}/> : null}{invoice.status || "Unknown"}</span>
+                        <span style={{ display: "block", fontSize: 13, fontWeight: 850 }}>{candidatePreview.totalCents == null ? "Total not saved" : formatMoney(candidatePreview.totalCents, hiddenAmounts)}</span>
+                        <span style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 5, marginTop: 4, color: active ? T.primary : T.textMuted, fontSize: 11.5 }}>{active ? <Icon name="check" size={12}/> : null}{candidatePreview.label}</span>
                       </span>
                     </button>
                   );
                 })}
               </div>
-              {selectedInvoice ? <div style={{ marginTop: 9, color: T.textMuted, fontSize: 11.5 }}>Selected invoice will cover {months.length} month{months.length === 1 ? "" : "s"}. Nothing in QuickBooks is edited.</div> : null}
-              {!candidates.length ? <div style={{ marginTop: 10, color: T.primary, fontSize: 12.5 }}>No matching invoice was found for this client. Refresh QuickBooks before creating a manual exception.</div> : null}
+              {preview ? <div data-maintenance-match-preview style={{ marginTop: 12, borderLeft: `3px solid ${T.primary}`, background: hexA(T.primary, .035), padding: "11px 12px", fontSize: 12.5, lineHeight: 1.5 }}><strong>After linking: {preview.label}</strong><div>{months.length} selected month{months.length === 1 ? "" : "s"} will use invoice #{selectedInvoice.number || selectedInvoice.DocNumber || "Unnumbered"}.</div>{preview.status === "due" || preview.status === "partial" ? <div style={{ marginTop: 5, color: T.textMuted }}>This invoice still has an unpaid balance{preview.balanceCents != null && !hiddenAmounts ? ` of ${formatMoney(preview.balanceCents)}` : ""}.</div> : null}<div style={{ marginTop: 5, color: T.textMuted }}>The selected match replaces the previous choice for these months. QuickBooks is unchanged.</div></div> : null}
+              {!visibleCandidates.length ? <div style={{ marginTop: 10, color: T.textMuted, fontSize: 12.5 }}>{candidates.length ? "No invoices match this search." : "No invoice is saved for this client. Create one, or record paid or unpaid without an invoice."}</div> : null}
             </div>
           ) : (
-            <div style={{ marginTop: 17, padding: "13px 0 13px 13px", borderLeft: `3px solid ${T.primary}`, color: T.textMuted, fontSize: 12.5, lineHeight: 1.5 }}>Waiving a month records an owner decision. It does not edit or delete anything in QuickBooks.</div>
+            <div style={{ marginTop: 17, padding: "13px 0 13px 13px", borderLeft: `3px solid ${T.primary}`, color: T.textMuted, fontSize: 12.5, lineHeight: 1.5 }}>{mode === "paid" ? "Record a payment received outside an invoice, such as cash or check. These months will be marked paid in SPS; no QuickBooks payment is created." : mode === "unpaid" ? "Mark these months unpaid, even if no invoice exists yet. You can create and link an invoice later." : "Waive these months when no payment is owed. Add a reason for the record. QuickBooks is unchanged."}</div>
           )}
+          {onCreateInvoice && ["invoice", "unpaid"].includes(mode) && createdSelectionKey !== createSelectionKey ? <div style={{ marginTop: 17, paddingTop: 14, borderTop: `1px solid ${T.border}` }}>
+            <div style={{ fontSize: 12, lineHeight: 1.5, color: T.textMuted }}>{createTotalCents != null ? <>Create an unsent draft for <strong style={{ color: T.text }}>{createMonthLabels}</strong>{hiddenAmounts ? "." : <> at {formatMoney(row.maintenancePriceCents)} per month, <strong style={{ color: T.text }}>{formatMoney(createTotalCents)} total</strong>.</>}</> : "Set this client's maintenance price before creating a draft from the calendar."}</div>
+            <button type="button" disabled={disabled || createTotalCents == null} onClick={createInvoice} style={{ marginTop: 9, minHeight: 42, border: `1px solid ${T.border}`, borderRadius: 7, background: T.surface, color: T.primary, padding: "9px 13px", fontFamily: "inherit", fontWeight: 750, fontSize: 12.5, cursor: "pointer", opacity: disabled || createTotalCents == null ? .55 : 1 }}>Create draft invoice</button>
+          </div> : null}
         </section>
 
         <section style={{ marginTop: 22 }}>
-          <label style={{ display: "block", fontSize: 11, fontWeight: 850, letterSpacing: ".06em", textTransform: "uppercase", color: T.textMuted, marginBottom: 7 }}>Internal note</label>
-          <textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="Why these months are covered" rows={3} style={{ width: "100%", resize: "vertical", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 8, background: T.surface, color: T.text, padding: 12, fontFamily: "inherit", fontSize: 13.5, lineHeight: 1.45 }} />
+          <label htmlFor="maintenance-status-note" style={{ display: "block", fontSize: 11, fontWeight: 850, letterSpacing: ".06em", textTransform: "uppercase", color: T.textMuted, marginBottom: 7 }}>{mode === "paid" ? "Payment details" : mode === "waived" ? "Reason" : mode === "unpaid" ? "Unpaid note" : "Matching note"}{requiresNote ? " (required)" : " (optional)"}</label>
+          <textarea id="maintenance-status-note" value={note} disabled={disabled} required={requiresNote} onChange={(event) => { setNote(event.target.value); setSavedMessage(""); }} placeholder={mode === "paid" ? "Payment method, date received, and receipt or check number" : mode === "waived" ? "Why no payment is owed" : mode === "unpaid" ? "Why does this month still need an invoice?" : "Which service dates does this invoice cover?"} rows={3} style={{ width: "100%", resize: "vertical", boxSizing: "border-box", borderRadius: 8, border: `1px solid ${T.border}`, background: T.surface, color: T.text, padding: 12, fontFamily: "inherit", fontSize: 13.5, lineHeight: 1.45 }} />
         </section>
 
         {error ? <div role="alert" style={{ marginTop: 14, color: T.primary, fontSize: 12.5, fontWeight: 750 }}>{error}</div> : null}
         <div style={{ marginTop: 22, display: "flex", alignItems: "center", gap: 10 }}>
-          <button type="button" disabled={busy} onClick={save} style={{ flex: 1, minHeight: 48, border: "none", borderRadius: 8, background: T.primary, color: "#fff", fontFamily: "inherit", fontSize: 13.5, fontWeight: 850, cursor: busy ? "wait" : "pointer", opacity: busy ? .65 : 1 }}>{busy ? "Saving coverage" : mode === "waived" ? "Waive selected months" : "Save invoice coverage"}</button>
-          {cell?.payment?.manual ? <button type="button" disabled={busy} onClick={() => onClear({ clientId: row.clientId, monthKeys: months })} style={{ minHeight: 48, border: `1px solid ${T.border}`, borderRadius: 8, background: T.surface, color: T.textMuted, padding: "0 14px", fontFamily: "inherit", fontSize: 12.5, fontWeight: 800, cursor: "pointer" }}>Clear</button> : null}
+          <button type="button" disabled={disabled || !onAssign || (mode === "invoice" && !selectedInvoice)} onClick={save} style={{ flex: 1, minHeight: 48, border: "none", borderRadius: 8, background: T.primary, color: "#fff", fontFamily: "inherit", fontSize: 13.5, fontWeight: 850, cursor: disabled ? "wait" : "pointer", opacity: disabled || (mode === "invoice" && !selectedInvoice) ? .55 : 1 }}>{disabled ? "Saving" : mode === "waived" ? "Waive selected months" : mode === "paid" ? "Save as paid" : mode === "unpaid" ? "Save as unpaid" : "Link selected invoice"}</button>
+          {cell?.payment?.manual && onClear ? <button type="button" disabled={disabled} onClick={clear} style={{ minHeight: 48, border: `1px solid ${T.border}`, borderRadius: 8, background: T.surface, color: T.textMuted, padding: "0 14px", fontFamily: "inherit", fontSize: 12.5, fontWeight: 800, cursor: "pointer" }}>Clear choice</button> : null}
         </div>
       </div>
     </div>
@@ -367,7 +423,7 @@ function DetailPanel({ selection, rows, invoices, clients, year, hiddenAmounts, 
 export default function MaintenanceCoverageWorkspace({
   clients = [], invoices = [], payments = [], schedule = [], ledger = null,
   T, vp = {}, loading = false, saving = false, error = "", onReload, onReconcile,
-  reconciliationReceipt = null, onAssign, onClear,
+  reconciliationReceipt = null, onAssign, onClear, onCreateInvoice,
   canSeeAmounts = true, autoRefreshConnected = false, lastCheckedAt = null,
 }) {
   const currentYear = new Date().getFullYear();
@@ -670,7 +726,7 @@ export default function MaintenanceCoverageWorkspace({
       </div>
 
       {!loading && visibleRows.length === 0 ? <div style={{ padding: "50px 12px", textAlign: "center", color: T.textMuted }}><div style={{ fontSize: 16, fontWeight: 800, color: T.text }}>No maintenance clients match this view</div><div style={{ marginTop: 6, fontSize: 12.5 }}>Change the service, month, or payment filters, or clear the search.</div></div> : null}
-      {selection ? <DetailPanel selection={selection} rows={rows} invoices={invoices} clients={clients} year={year} hiddenAmounts={!canSeeAmounts} T={T} busy={saving} onClose={() => setSelection(null)} onAssign={onAssign} onClear={onClear} /> : null}
+      {selection ? <DetailPanel selection={selection} rows={rows} invoices={invoices} clients={clients} year={year} hiddenAmounts={!canSeeAmounts} T={T} busy={saving} onClose={() => setSelection(null)} onAssign={onAssign} onClear={onClear} onCreateInvoice={onCreateInvoice} /> : null}
     </div>
   );
 }

@@ -148,7 +148,7 @@ test("changing an original payment amount or linked service month does not borro
     const sends = mockEmailState({ invoices: [saved, draft] });
     const result = res();
     await sendInvoice(emailRequest(invoice), result);
-    assert.equal(result.statusCode, 409, JSON.stringify(result.body));
+    assert.equal(result.statusCode, changedLine.serviceMonth === "2026-11" ? 422 : 409, JSON.stringify(result.body));
     assert.equal(sends.length, 0);
   }
 });
@@ -162,4 +162,51 @@ test("delivery cannot remove a canonical maintenance marker to bypass payment co
   assert.equal(result.statusCode, 409, JSON.stringify(result.body));
   assert.equal(result.body.code, "maintenance-already-covered");
   assert.equal(sends.length, 0);
+});
+
+test('delivery permits a verified owner unpaid month before an invoice exists to match', async () => {
+  const billing = { version: 2, policies: {}, allocations: { [client.id]: { '2026-10': {
+    status: 'due', allocatedCents: 0, expectedCents: 17500,
+    sources: [{ kind: 'manual', recordId: 'manual-client-a-2026-10', decision: 'unpaid' }],
+    updatedAt: '2026-10-05T12:00:00Z', updatedBy: 'owner@example.test',
+  } } } };
+  assert.equal(await assertInvoiceDeliveryCoverage({ ...options, invoices: [], invoice: draft, loadLedger: async () => billing }), draft);
+  const sends = mockEmailState({ invoices: [], billing });
+  const result = res();
+  await sendInvoice(emailRequest(draft), result);
+  assert.equal(result.statusCode, 200, JSON.stringify(result.body));
+  assert.equal(sends.length, 1);
+});
+
+test('an explicitly matched unpaid original reaches email with the actual service month', async () => {
+  const original = { ...draft, date: '12/01/2026', lineItems: [{ ...line, desc: 'Services', serviceMonth: undefined }] };
+  const billing = { version: 2, policies: {}, allocations: { [client.id]: { '2026-10': {
+    status: 'due', allocatedCents: 17500, expectedCents: 17500,
+    sources: [{ kind: 'invoice', invoiceId: original.id, amountCents: 17500 }],
+  } } } };
+  const prepared = await assertInvoiceDeliveryCoverage({ ...options, invoices: [original], invoice: original, loadLedger: async () => billing });
+  assert.equal(prepared.lineItems[0].serviceMonth, '2026-10');
+  assert.equal(prepared.date, '12/01/2026');
+  const sends = mockEmailState({ invoices: [original], billing });
+  const result = res();
+  await sendInvoice(emailRequest(original), result);
+  assert.equal(result.statusCode, 200, JSON.stringify(result.body));
+  assert.equal(sends.length, 1);
+  assert.match(JSON.parse(sends[0]).html, /Services - October 2026/);
+});
+
+test('changed original source charges fail browser preflight before any message channel', async () => {
+  const sent = [];
+  for (const status of ['Paid', 'Sent']) {
+    const canonical = { ...source, status, balance: status === 'Paid' ? 0 : 175 };
+    const billing = structuredClone(ledger);
+    billing.allocations[client.id]['2026-10'].status = status === 'Paid' ? 'paid' : 'due';
+    const changed = { ...canonical, lineItems: [{ ...line, unitPrice: 350 }] };
+    const [result] = await deliverSelectedInvoices({ invoices: [changed], buildChannels: async invoice => {
+      await assertInvoiceDeliveryCoverage({ ...options, invoices: [canonical], invoice, loadLedger: async () => billing });
+      return ['sms', 'email', 'portal'].map(id => ({ id, enabled: true, send: async () => { sent.push(id); return { ok: true }; } }));
+    } });
+    assert.equal(result.accepted, false);
+  }
+  assert.deepEqual(sent, []);
 });

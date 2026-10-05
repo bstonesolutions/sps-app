@@ -20,7 +20,7 @@ export const MAINTENANCE_PAYMENT_STATUSES = Object.freeze([
 ]);
 
 const PERSISTED_STATUSES = new Set(MAINTENANCE_PAYMENT_STATUSES);
-const SOURCE_KINDS = new Set(["invoice", "payment", "prepaid", "waiver", "refund"]);
+const SOURCE_KINDS = new Set(["invoice", "payment", "prepaid", "waiver", "refund", "manual"]);
 const text = (value) => String(value == null ? "" : value).trim();
 const isRecord = (value) => !!value && typeof value === "object" && !Array.isArray(value);
 const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
@@ -102,6 +102,8 @@ function sourceIdentity(source) {
     normalized.policyId,
     normalized.waiverId,
     normalized.refundId,
+    normalized.recordId,
+    normalized.decision,
   ].map(text).join("|");
 }
 
@@ -123,6 +125,13 @@ export function normalizeAllocationSource(rawSource) {
   copyText("policyId", "policyId");
   copyText("waiverId", "waiverId");
   copyText("refundId", "refundId");
+  copyText("recordId", "recordId");
+  if (kind === "manual") {
+    const decision = text(rawSource.decision).toLowerCase();
+    if (!["paid", "unpaid"].includes(decision) || !source.recordId) return null;
+    if (["invoiceId", "qbInvoiceId", "invoiceNumber", "paymentId", "qbPaymentId", "policyId", "waiverId", "refundId"].some((key) => source[key])) return null;
+    source.decision = decision;
+  }
   if (hasOwn(rawSource, "amountCents")) {
     const amountCents = Number(rawSource.amountCents);
     if (!Number.isSafeInteger(amountCents)) return null;
@@ -134,6 +143,7 @@ export function normalizeAllocationSource(rawSource) {
     || (kind === "prepaid" && !!(source.policyId || source.invoiceId || source.qbInvoiceId || source.invoiceNumber))
     || (kind === "waiver" && !!source.waiverId)
     || (kind === "refund" && !!(source.refundId || source.invoiceId || source.qbInvoiceId || source.paymentId || source.qbPaymentId))
+    || (kind === "manual" && !!source.recordId && !!source.decision)
   );
   return valid ? source : null;
 }
@@ -171,6 +181,11 @@ function normalizeAllocation(rawAllocation) {
   const note = text(rawAllocation.note);
   const updatedAt = text(rawAllocation.updatedAt);
   const updatedBy = text(rawAllocation.updatedBy || rawAllocation.actor);
+  const manual = sources.find((source) => source.kind === "manual");
+  if (manual && (sources.length !== 1 || status !== (manual.decision === "paid" ? "paid" : "due")
+    || !updatedAt || !updatedBy || (manual.decision === "paid" && !note)
+    || (manual.amountCents != null && (manual.amountCents < 0 || (manual.decision === "unpaid" && manual.amountCents !== 0)))
+    || (allocation.allocatedCents != null && (allocation.allocatedCents < 0 || (manual.decision === "unpaid" && allocation.allocatedCents !== 0))))) return null;
   if (note) allocation.note = note.slice(0, 1200);
   if (updatedAt) allocation.updatedAt = updatedAt.slice(0, 80);
   if (updatedBy) allocation.updatedBy = updatedBy.slice(0, 220);
@@ -331,7 +346,7 @@ export function assignMaintenanceInvoiceMonths(rawLedger, {
   invoice,
   payment,
   expectedCents,
-  status = "paid",
+  status,
   note,
   actor,
   updatedAt,
@@ -356,11 +371,15 @@ export function assignMaintenanceInvoiceMonths(rawLedger, {
   const totalCents = payment
     ? moneyToCents(payment?.appliedAmount ?? payment?.total ?? payment?.amount)
     : invoiceTotalCents(invoice);
-  return assignMaintenancePaymentSourceAcrossMonths(rawLedger, {
+  // Explicitly matching an invoice resolves the selected months. Old invalid
+  // references or manual decisions must not remain beside the chosen invoice.
+  const cleared = clearMaintenancePaymentMonths(rawLedger == null ? emptyMaintenancePaymentLedger() : rawLedger, { clientId, monthKeys });
+  if (!cleared) return null;
+  return assignMaintenancePaymentSourceAcrossMonths(cleared, {
     clientId,
     months: monthKeys,
     source,
-    status,
+    status: status || maintenanceInvoicePaymentStatus(invoice, payment ? totalCents : 0),
     totalCents,
     expectedCents,
     note,
@@ -380,7 +399,9 @@ export function setMaintenancePaymentMonthOverride(rawLedger, {
   actor,
   updatedAt,
 } = {}) {
-  return assignMaintenancePaymentSourceAcrossMonths(rawLedger, {
+  const cleared = clearMaintenancePaymentMonths(rawLedger == null ? emptyMaintenancePaymentLedger() : rawLedger, { clientId, monthKeys: [monthKey] });
+  if (!cleared) return null;
+  return assignMaintenancePaymentSourceAcrossMonths(cleared, {
     clientId,
     months: [monthKey],
     source,
@@ -487,7 +508,54 @@ function invoiceClientId(invoice, clients, uniqueClientByName) {
 }
 
 function invoiceTotalCents(invoice) {
-  return Math.max(0, moneyToCents(invoice?.total ?? invoice?.amount ?? invoice?.subtotal ?? invoice?.TotalAmt));
+  return maintenanceInvoiceTotalCents(invoice);
+}
+
+export function maintenanceInvoiceTotalCents(invoice, { unknownAsNull = false } = {}) {
+  const unknown = unknownAsNull ? null : 0;
+  const saved = [invoice?.total, invoice?.TotalAmt, invoice?.amount, invoice?.subtotal]
+    .find((value) => value != null && text(value) !== "");
+  if (saved != null) {
+    if (!["string", "number"].includes(typeof saved)) return unknown;
+    const amount = Number(text(saved).replace(/[$,\s]/g, ""));
+    const total = Math.round(amount * 100);
+    return Number.isFinite(amount) && Number.isSafeInteger(total) ? Math.max(0, total) : unknown;
+  }
+  // A QuickBooks total is authoritative even when its local copy is incomplete.
+  // Never reconstruct it from lines or from the app's tax and discount fields.
+  if (text(invoice?.qbId || invoice?.Id) || invoice?.qbAuthoritative === true || invoice?.qbPushed === true
+    || text(invoice?.qbSyncToken) || ["quickbooks", "qb"].includes(text(invoice?.source || invoice?.origin).toLowerCase())) return unknown;
+  const items = invoice?.lineItems;
+  if (!Array.isArray(items) || !items.length) return unknown;
+  const numeric = (value, optional = false) => {
+    if (value == null || text(value) === "") return optional ? 0 : null;
+    if (!["string", "number"].includes(typeof value)) return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  };
+  let subtotalAfterLineDiscount = 0;
+  let taxableAfterLineDiscount = 0;
+  for (const line of items) {
+    const qty = numeric(line?.qty);
+    const price = numeric(line?.unitPrice);
+    const discount = numeric(line?.discount, true);
+    if (qty == null || price == null || discount == null) return unknown;
+    const gross = qty * price;
+    const reduction = line.discountType === "pct" ? gross * (discount / 100) : line.discountType === "amt" ? discount : 0;
+    const net = Math.max(0, gross - reduction);
+    subtotalAfterLineDiscount += net;
+    if (line.taxable) taxableAfterLineDiscount += net;
+  }
+  const discount = numeric(invoice?.discount, true);
+  const taxRate = numeric(invoice?.taxRate, true);
+  if (discount == null || taxRate == null) return unknown;
+  const invoiceDiscount = Math.min(subtotalAfterLineDiscount, invoice?.discountType === "pct"
+    ? subtotalAfterLineDiscount * (discount / 100) : invoice?.discountType === "amt" ? discount : 0);
+  const subtotal = subtotalAfterLineDiscount - invoiceDiscount;
+  const discountFactor = subtotalAfterLineDiscount > 0 ? 1 - invoiceDiscount / subtotalAfterLineDiscount : 1;
+  const tax = (taxableAfterLineDiscount * discountFactor) * (taxRate / 100);
+  const total = Math.round((subtotal + tax) * 100);
+  return Number.isSafeInteger(total) ? Math.max(0, total) : unknown;
 }
 
 function invoiceBalanceCents(invoice) {
@@ -1497,6 +1565,7 @@ function resolveSource(source, { invoices, payments, policy, month }) {
     return { valid: true, policy };
   }
   if (source.kind === "waiver" && source.waiverId) return { valid: true, waiver: true };
+  if (source.kind === "manual" && source.recordId) return { valid: true, manual: true };
   return { valid: false };
 }
 
@@ -1531,16 +1600,21 @@ function clientPlanExpectationForMonth(client, month, { inferredStart = "", exac
   return !inactive && recurringClient(client) ? "expected" : "not_expected";
 }
 
-function statusFromInvoice(invoice, appliedFromPaymentsCents = 0) {
+export function maintenanceInvoicePaymentStatus(invoice, appliedFromPaymentsCents = 0) {
   const rawStatus = text(invoice?.status).toLowerCase();
-  if (/refund|void|reversed/.test(rawStatus) || invoiceTotalCents(invoice) < 0) return "refunded";
+  if (/refund|void|reversed/.test(rawStatus) || moneyToCents(invoice?.total ?? invoice?.TotalAmt) < 0) return "refunded";
   const total = invoiceTotalCents(invoice);
+  const hasBalance = hasOwn(invoice, "balance") || hasOwn(invoice, "Balance");
+  const rawBalance = hasOwn(invoice, "balance") ? invoice.balance : invoice?.Balance;
+  if (hasBalance && (rawBalance == null || !text(rawBalance) || !Number.isFinite(Number(text(rawBalance).replace(/[$,\s]/g, ""))))) return "review";
   const balance = invoiceBalanceCents(invoice);
   const applied = Math.max(appliedFromPaymentsCents, Math.max(0, total - balance));
-  if (total > 0 && (balance <= 0 || applied >= total || !!invoice?.paidDate)) return "paid";
+  if (total > 0 && (balance <= 0 || applied >= total || (!hasBalance && !!invoice?.paidDate))) return "paid";
   if (applied > 0 || (balance > 0 && balance < total)) return "partial";
   return "due";
 }
+
+const statusFromInvoice = maintenanceInvoicePaymentStatus;
 
 function automaticCandidateForMonth({ invoice, month, expectedCents, paymentIndex }) {
   const explicit = explicitInvoiceAllocations(invoice);
@@ -1586,12 +1660,12 @@ function summarizeCell({ expected, expectedCents, policy, manual, month, clientI
     if (resolved.every((entry) => entry.valid)) {
       const invoices = resolved.map((entry) => entry.invoice).filter(Boolean);
       let status = manual.status;
-      if (invoices.length && !["waived", "prepaid", "review", "refunded"].includes(status)) {
+      if (invoices.length && manual.sources.every((source) => ["invoice", "payment"].includes(source.kind))) {
         const statuses = invoices.map((invoice) => statusFromInvoice(
           invoice,
           indexes.payments.appliedByInvoice.get(text(invoice?.qbId || invoice?.Id))?.amountCents || 0,
         ));
-        status = statuses.includes("partial") ? "partial" : (statuses.includes("due") ? "due" : "paid");
+        status = ["review", "refunded", "partial", "due"].find((candidate) => statuses.includes(candidate)) || "paid";
       }
       return {
         status,

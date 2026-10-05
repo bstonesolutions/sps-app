@@ -2,7 +2,7 @@ const text = (value) => String(value == null ? "" : value).trim();
 
 const scheduleStops = (schedule) => (
   Array.isArray(schedule)
-    ? schedule.flatMap((day) => (Array.isArray(day?.stops) ? day.stops : []))
+    ? schedule.flatMap((day) => (Array.isArray(day?.stops) ? day.stops : [day]))
     : []
 );
 
@@ -37,4 +37,25 @@ export function invoiceDeletionBlockedMessage(invoice, references) {
   ].filter(Boolean).join(" and ");
 
   return `${number} is linked to ${links || "scheduled or estimated work"}. Keep the invoice as the billing record, or remove the job link before deleting it.`;
+}
+
+// Explicit unlinking removes only the deleted invoice's backlink. Estimates,
+// visits, source relationships, dates, and every other field remain intact.
+export function unlinkInvoiceDeletionReferences(invoice, estimates = [], schedule = []) {
+  const invoiceId = text(invoice?.id);
+  let changed = false;
+  const unlink = (record) => {
+    if (!invoiceId || text(record?.linkedInvoiceId) !== invoiceId) return record;
+    const next = { ...record };
+    delete next.linkedInvoiceId;
+    changed = true;
+    return next;
+  };
+  const nextEstimates = (Array.isArray(estimates) ? estimates : []).map(unlink);
+  const nextSchedule = (Array.isArray(schedule) ? schedule : []).map((day) => {
+    if (!Array.isArray(day?.stops)) return unlink(day);
+    const stops = day.stops.map(unlink);
+    return stops.some((stop, index) => stop !== day.stops[index]) ? { ...day, stops } : day;
+  });
+  return { estimates: nextEstimates, schedule: nextSchedule, changed };
 }

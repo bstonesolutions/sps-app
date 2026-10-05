@@ -111,7 +111,7 @@ test("invoice deletion fresh-checks links and fences invoices, estimates, and sc
   assert.match(deletion, /key: "sps_schedule"/);
   assert.match(deletion, /const confirmedRead = await store\.get\("sps_invoices"\)/);
   assert.ok(
-    deletion.indexOf('store.replaceMany([') < deletion.indexOf('fetch(`${QB_API}/delete-invoice`'),
-    "QuickBooks must only be changed after the atomic local deletion succeeds",
+    deletion.indexOf('fetch(`${QB_API}/delete-invoice`') < deletion.indexOf('store.replaceMany(['),
+    "QuickBooks failures must leave the SPS invoice available to retry",
   );
 });

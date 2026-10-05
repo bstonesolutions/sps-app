@@ -23,23 +23,25 @@ import { stableKeyboardInset } from "./keyboardViewport";
 import { ESTIMATE_CHARGE_TYPES, estimateChargeBreakdown, estimateLineChargeLabel, estimateLineChargeType } from "./estimateBreakdown";
 import { completeEstimateWithInvoice, estimateTaxMigrationImpact, estimateToDraftInvoice, findInvoiceForEstimate, normalizeEstimateTaxForInvoice } from "./estimateInvoiceConversion";
 import { findScheduledStopForEstimate, scheduleApprovedEstimate } from "./estimateScheduleLink";
-import { findInvoiceDeletionReferences, invoiceDeletionBlockedMessage } from "./invoiceDeletionGuard";
+import { findInvoiceDeletionReferences, invoiceDeletionBlockedMessage, unlinkInvoiceDeletionReferences } from "./invoiceDeletionGuard";
 import { applySafeBulkInvoiceEdits, invoiceSelectionForVisible, pruneInvoiceSelection, summarizeSelectedInvoices } from "./invoiceBulkActions";
 import { invoiceServiceDescriptionIssue, invoiceHasMaintenanceServiceLines, formatInvoiceServiceLineDescription } from "./invoiceServiceDescription";
 import { invoiceDescription, invoiceMatchesSearch, invoiceListDate, sortInvoiceList, INVOICE_LIST_SORT_OPTIONS } from "./invoiceListView";
 import { deliverSelectedInvoices } from "./invoiceBulkDelivery";
 import { assertInvoiceDeliveryCoverage, invoiceDeliveryIdentity, invoiceDeliveryLine } from "./invoiceDeliveryCoverage";
-import { deleteSelectedInvoiceDrafts, invoiceBulkDeleteEligibility, invoiceDeletionReviewMatches, partitionInvoiceBulkDeletion } from "./invoiceBulkDeletion";
+import { deleteSelectedInvoiceDrafts, invoiceBulkDeleteEligibility, invoiceDeletionReviewMatches, partitionInvoiceBulkDeletion, unlinkUnpaidInvoiceCoverage } from "./invoiceBulkDeletion";
 import { emptyMaintenancePaymentLedger, normalizeMaintenancePaymentLedger } from "./maintenancePaymentLedger";
 import InvoiceClientPicker from "./InvoiceClientPicker";
+import InvoiceDeletionReview, { InvoiceDeletionConflicts } from "./InvoiceDeletionReview.jsx";
 import { initialInvoiceClientId, invoiceClientSnapshot, resolveInvoiceClient } from "./invoiceClientSelection";
-import { invoiceMaintenanceCoverageIssue } from "./maintenanceInvoiceCoverage";
+import { invoiceMaintenanceCoverageIssue, withMatchedMaintenanceServiceMonths } from "./maintenanceInvoiceCoverage";
 import { deleteInvoiceAndCompactSafeDrafts, draftInvoiceCanBeRenumbered } from "./invoiceNumbering";
 import { buildQuickBooksInvoicePayload, partitionQuickBooksDraftSelection } from "./quickbooksDraftSync";
 import { quickBooksInvoiceSyncEligibility, quickBooksInvoiceUrl, syncInvoiceToQuickBooks } from "./quickbooksDirectSync";
 import { appendCompletedVisitsToInvoice, completedVisitBillableTotal, completedVisitInvoiceLink, completedVisitLineItems, completedVisitSource, invoiceCompletedVisitSources, removeInvoiceLineAndPruneCompletedVisitSources, reserveCompletedVisitInvoice } from "./invoiceVisitImport";
 import { normalizeMaintenanceBillingPolicy } from "./maintenanceBilling";
 import MaintenanceCoverageWorkspace from "./MaintenanceCoverageWorkspace";
+import { maintenanceDraftInvoice } from "./maintenanceDraftInvoice";
 import useMaintenanceCalendarRefresh from "./useMaintenanceCalendarRefresh";
 import { automaticReportChannels, reportEmailUiResult } from "./reportDelivery";
 import { buildCompletedReportIndex, canRebuildCompletedReport, resolveCompletedReport } from "./completedReport";
@@ -18531,8 +18533,9 @@ function InvoiceSendStep({ invoice, client, onClose, onSent }) {
   const send = async () => {
     if (finished) { onClose(); return; }
     setSending(true); setErr("");
+    let preparedInvoice = invoice;
     try {
-      await assertInvoiceDeliveryCoverage({ invoice, client, clients: allClients, invoices: allInvoices, schedule, loadLedger: loadInvoiceDeliveryLedger });
+      preparedInvoice = await assertInvoiceDeliveryCoverage({ invoice, client, clients: allClients, invoices: allInvoices, schedule, loadLedger: loadInvoiceDeliveryLedger });
     } catch (error) {
       setErr(error?.message || "Payment coverage could not be checked. No messages were sent.");
       setSending(false);
@@ -18569,7 +18572,7 @@ function InvoiceSendStep({ invoice, client, onClose, onSent }) {
             to: clientEmail,
             clientName: invoice.clientName || client?.name || "",
             branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", logoType: branding.logoType || "", logoImage: branding.logoImage || "", accent: T.primary },
-            invoice: { ...invoiceDeliveryIdentity(invoice, client?.id), number: invoice.number, date: invoice.date, dueDate: invoice.dueDate, terms: invoice.notes || "", taxRate: invoice.taxRate || 0, lineItems: (invoice.lineItems || []).map(invoiceDeliveryLine), subtotal: totals.subtotal, tax: totals.tax, total: totals.total, discountTotal: totals.discountTotal },
+            invoice: { ...invoiceDeliveryIdentity(preparedInvoice, client?.id), number: invoice.number, date: invoice.date, dueDate: invoice.dueDate, terms: invoice.notes || "", taxRate: invoice.taxRate || 0, lineItems: (preparedInvoice.lineItems || []).map(invoiceDeliveryLine), subtotal: totals.subtotal, tax: totals.tax, total: totals.total, discountTotal: totals.discountTotal },
             payLink: payLink || PROD_URL,
           }),
         });
@@ -19038,7 +19041,6 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     });
     setVisitPick(false);
   };
-  const [deleteBusy, setDeleteBusy] = useState(false);
   const qbConnected = qbIsConnected();
   const editorInvoiceTotals = invoiceTotals(inv);
   const editorNeedsReview = invoiceNeedsReconciliationReview(inv, {
@@ -19142,7 +19144,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   };
 
   // Keep single-invoice and bulk-draft QuickBooks writes on one payload contract.
-  const buildQbPayload = () => buildQuickBooksInvoicePayload(inv, client, invoicing);
+  const buildQbPayload = (prepared = inv) => buildQuickBooksInvoicePayload(prepared, client, invoicing);
 
   // Save the invoice. If QuickBooks is connected, sync automatically (no extra button).
   // B9-2: persist, then stay in-flow and offer the client-notification step (when
@@ -19281,8 +19283,6 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     if (progressState === "saving" || qbState === "sending") return;
     let baseInv = selectedClientSnapshot();
     if (!baseInv) return;
-    const serviceMonthIssue = invoiceServiceDescriptionIssue(baseInv);
-    if (serviceMonthIssue) { setQbState("error"); setQbMsg(serviceMonthIssue.message); return; }
     const revisionAtSaveStart = editRevisionRef.current;
     // Persist the client link + a name snapshot on the record (Bug 1) — never rely on
     // a transient field. clientId resolves the live client; clientName is the fallback.
@@ -19291,6 +19291,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
       setQbState("sending");
       setQbMsg("");
       const ledger = await loadInvoiceCoverage();
+      baseInv = withMatchedMaintenanceServiceMonths({ invoice: baseInv, client, clients, ledger, invoices });
       const issue = invoiceMaintenanceCoverageIssue({ invoice: baseInv, client, clients, ledger, invoices, schedule });
       if (issue || !ledger) {
         setQbState("error");
@@ -19303,6 +19304,9 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         return;
       }
     }
+
+    const serviceMonthIssue = invoiceServiceDescriptionIssue(baseInv);
+    if (serviceMonthIssue) { setQbState("error"); setQbMsg(serviceMonthIssue.message); return; }
 
     // Claim every completed-stop source in the latest shared invoice snapshot before
     // QuickBooks sees this invoice. The CAS retry makes two devices race safely: only
@@ -19341,7 +19345,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     }
 
     setQbState("sending"); setQbMsg("");
-    const qbPayload = buildQbPayload();
+    const qbPayload = buildQbPayload(baseInv);
     const currentCreateIntent = quickBooksInvoiceIntentSignature(qbPayload);
     const originalCreateIntent = inv.qbCreateIntentSignature || "";
     let createAttempted = !inv.qbId;
@@ -19891,38 +19895,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         )}
         </div>
 
-        {invoice && onDelete && perms.invoiceDelete && (
-          <button
-            disabled={deleteBusy}
-            onClick={async () => {
-              const closesDraftGap = draftInvoiceCanBeRenumbered(inv);
-              const deleteMessage = closesDraftGap
-                ? `Delete draft ${inv.number || ""}? Later unsynced drafts in this number series will close the gap. QuickBooks, sent, and paid invoice numbers will not change.`
-                : `Delete invoice ${inv.number || ""}? This cannot be undone.`;
-              if (!confirm(deleteMessage)) return;
-              setDeleteBusy(true);
-              try {
-                const result = await onDelete(inv.id);
-                if (!result?.ok) {
-                  window.alert(result?.error || "The invoice was not deleted.");
-                  return;
-                }
-                if (result.warning) window.alert(result.warning);
-                else if (result.renumbered?.length) {
-                  window.alert(`Deleted draft. Renumbered ${result.renumbered.length} later unsynced draft${result.renumbered.length === 1 ? "" : "s"} to close the gap.`);
-                }
-                onClose();
-              } catch (error) {
-                window.alert(error?.message || "The invoice was not deleted.");
-              } finally {
-                setDeleteBusy(false);
-              }
-            }}
-            style={{ background: "none", border: "none", color: "#C0392B", fontSize: 13, fontWeight: 700, cursor: deleteBusy ? "default" : "pointer", padding: 6, fontFamily: "inherit", opacity: deleteBusy ? 0.6 : 1 }}
-          >
-            {deleteBusy ? "Checking links…" : "Delete this invoice"}
-          </button>
-        )}
+        {invoice && onDelete && perms.invoiceDelete && <InvoiceDeletionReview invoice={invoice} onDelete={onDelete} onClose={onClose} T={T} store={store} totalOf={entry => invoiceTotals(entry).total} clientNameOf={entry => clients.find(client => invoiceMatchesClient(entry, client))?.name || entry.clientName || ""} />}
       </div>
 
       {/* Catalog item picker sheet */}
@@ -21282,6 +21255,7 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onPersis
   const sendToClient = async () => {
     if (!clientEmail || sendState === "sending") return;
     setSendState("sending"); setSendMsg("");
+    let preparedInvoice = invoice;
     const payLink = invoice.paymentLink || PROD_URL;
     // Fill the editable invoice-email templates with this invoice's details.
     const fillInv = (tpl) => String(tpl || "")
@@ -21292,7 +21266,7 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onPersis
       .replace(/\{dueDate\}/g, invoice.dueDate || "soon");
     try {
       // 1) Branded invoice email via Resend
-      await assertInvoiceDeliveryCoverage({ invoice, client, clients: allClients, invoices: allInvoices, schedule, loadLedger: loadInvoiceDeliveryLedger });
+      preparedInvoice = await assertInvoiceDeliveryCoverage({ invoice, client, clients: allClients, invoices: allInvoices, schedule, loadLedger: loadInvoiceDeliveryLedger });
       const r = await fetch(`${PROD_URL}/api/send-invoice`, {
         method: "POST",
         headers: await authHeaders({ "Content-Type": "application/json" }),
@@ -21312,11 +21286,11 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onPersis
             accent,
           },
           invoice: {
-            ...invoiceDeliveryIdentity(invoice, client?.id),
+            ...invoiceDeliveryIdentity(preparedInvoice, client?.id),
             number: invoice.number, date: invoice.date, dueDate: invoice.dueDate,
             terms: invoice.notes || cfg.terms || "",
             taxRate: invoice.taxRate || 0,
-            lineItems: (invoice.lineItems || []).map(invoiceDeliveryLine),
+            lineItems: (preparedInvoice.lineItems || []).map(invoiceDeliveryLine),
             subtotal: totals.subtotal, tax: totals.tax, total: totals.total, discountTotal: totals.discountTotal,
           },
           payLink,
@@ -21459,6 +21433,12 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onPersis
     <InvoiceQuickBooksDraftSyncModal individual invoices={[invoice]} clients={client ? [client] : []} invoicing={invoicing} onPersistInvoice={onPersistInvoice} onClose={() => setQuickBooksReview(false)} />
   );
 
+  const deleteControl = canManage && perms.invoiceDelete && onDelete ? <InvoiceDeletionReview
+    invoice={invoice} onDelete={onDelete} onClose={onClose} T={T} store={store}
+    totalOf={entry => invoiceTotals(entry).total}
+    clientNameOf={entry => allClients.find(candidate => invoiceMatchesClient(entry, candidate))?.name || client?.name || entry.clientName || ""}
+  /> : null;
+
   // ── Modal layout (mobile / inside a client record): accounting action, then document. ──
   const body = (
     <div style={{ display: "flex", flexDirection: "column", gap: 14, paddingBottom: "max(16px, env(safe-area-inset-bottom))" }}>
@@ -21468,6 +21448,7 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onPersis
       {paidInfo}
       {sendBlock}
       {actionRow}
+      {deleteControl}
     </div>
   );
 
@@ -21495,6 +21476,7 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onPersis
               {invoice.status === "Draft" && canMarkPaid && <Btn sm variant="ghost" onClick={() => setStatus("Sent")} style={{ borderRadius: 10 }}>Record manual send</Btn>}
               {eff === "Paid" && canMarkPaid && <Btn sm variant="ghost" onClick={() => setStatus("Sent")} style={{ borderRadius: 10 }}>Reopen</Btn>}
               {canEditInv && <Btn sm variant="ghost" onClick={() => onEdit(invoice)} style={{ borderRadius: 10 }}>Edit</Btn>}
+              {deleteControl}
               <Btn sm variant="ghost" onClick={print} disabled={printing} style={{ borderRadius: 10 }}>{printing ? "Preparing…" : "Print / PDF"}</Btn>
             </div>
           )}
@@ -23006,6 +22988,10 @@ function InvoiceBulkEditModal({ invoices, selectedIds, onApply, onClose }) {
 function InvoiceBulkDeleteModal({ invoices, allInvoices, clients, schedule, loadLedger, onDelete, onDeleted, onClose }) {
   const { T } = useApp();
   const [reviewedInvoices] = useState(() => invoices);
+  const [includeQuickBooks, setIncludeQuickBooks] = useState(false);
+  const [unlinkJobs, setUnlinkJobs] = useState(false);
+  const [conflicts, setConflicts] = useState([]);
+  const [reviewAgain, setReviewAgain] = useState(false);
   const [ledger, setLedger] = useState(null);
   const [checking, setChecking] = useState(true);
   const [error, setError] = useState("");
@@ -23027,7 +23013,7 @@ function InvoiceBulkDeleteModal({ invoices, allInvoices, clients, schedule, load
   useEffect(() => { void checkCoverage(); }, [checkCoverage]);
   const selectedIds = reviewedInvoices.map((invoice) => String(invoice.id));
   const plan = partitionInvoiceBulkDeletion(allInvoices, selectedIds, {
-    ledger, schedule, totalOf: (invoice) => invoiceTotals(invoice).total,
+    ledger, schedule, includeQuickBooks, unlinkJobs, reviewedInvoices, totalOf: (invoice) => invoiceTotals(invoice).total,
   });
   const remaining = plan.ready.filter((row) => !["deleted", "skipped"].includes(outcomes[String(row.invoice.id)]?.status));
   const deletedCount = Object.values(outcomes).filter((outcome) => outcome.status === "deleted").length;
@@ -23041,8 +23027,12 @@ function InvoiceBulkDeleteModal({ invoices, allInvoices, clients, schedule, load
       await deleteSelectedInvoiceDrafts({
         invoices: allInvoices,
         selectedIds: selectedIds.filter((id) => !["deleted", "skipped"].includes(outcomes[id]?.status)),
-        context: { ledger, schedule, totalOf: (invoice) => invoiceTotals(invoice).total },
-        onDelete: (id, options) => onDelete(id, { ...options, reviewedInvoice: reviewedInvoices.find((invoice) => String(invoice.id) === id) }),
+        context: { ledger, schedule, includeQuickBooks, unlinkJobs, reviewedInvoices, totalOf: (invoice) => invoiceTotals(invoice).total },
+        onDelete: async (id, options) => {
+          const result = await onDelete(id, { ...options, reviewedInvoice: reviewedInvoices.find((invoice) => String(invoice.id) === id) });
+          if (result?.conflicts?.length) setConflicts(result.conflicts);
+          return result;
+        },
         onOutcome: (outcome) => {
           setOutcomes((current) => ({ ...current, [outcome.id]: outcome }));
           if (outcome.status === "deleted") onDeleted(outcome.id);
@@ -23054,13 +23044,17 @@ function InvoiceBulkDeleteModal({ invoices, allInvoices, clients, schedule, load
     }
   };
   return (
-    <Modal title="Delete selected drafts" onClose={() => { if (!running) onClose(); }} maxWidth={700}>
+    <Modal title="Delete selected invoices" onClose={() => { if (!running) onClose(); }} maxWidth={700}>
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <div style={{ borderLeft: `4px solid ${T.primary}`, padding: "11px 14px", background: hexA(T.primary, 0.035) }}>
-          <div style={{ fontSize: 14, fontWeight: 800, color: T.text }}>{checking ? "Checking payment coverage…" : `${remaining.length} draft${remaining.length === 1 ? "" : "s"} ready to delete`}</div>
-          <div style={{ fontSize: 12.5, lineHeight: 1.5, color: T.textMuted, marginTop: 5 }}>Review the list below. Deleting cannot be undone. Paid, shared, QuickBooks-linked, and payment coverage records are protected. Job links and shared changes are checked again before each deletion.</div>
+          <div style={{ fontSize: 14, fontWeight: 800, color: T.text }}>{checking ? "Checking payment coverage…" : `${remaining.length} invoice${remaining.length === 1 ? "" : "s"} ready to delete`}</div>
+          <div style={{ fontSize: 12.5, lineHeight: 1.5, color: T.textMuted, marginTop: 5 }}>Review the list below. Deleting cannot be undone. Paid and prepaid coverage records are kept. QuickBooks invoices and job links require the choices below. Every invoice is checked again before deletion.</div>
           <div style={{ fontSize: 11.5, lineHeight: 1.5, color: T.textMuted, marginTop: 5 }}>Only later pristine drafts may be renumbered to close gaps.</div>
         </div>
+        <label style={{ display: "flex", alignItems: "start", gap: 9, fontSize: 12.5, lineHeight: 1.5 }}><input type="checkbox" checked={includeQuickBooks} disabled={running || hasResults} onChange={event => setIncludeQuickBooks(event.target.checked)} style={{ accentColor: T.primary }} />Also delete selected unpaid invoices from QuickBooks.</label>
+        <label style={{ display: "flex", alignItems: "start", gap: 9, fontSize: 12.5, lineHeight: 1.5 }}><input type="checkbox" checked={unlinkJobs} disabled={running || hasResults} onChange={event => setUnlinkJobs(event.target.checked)} style={{ accentColor: T.primary }} />Remove invoice links from unpaid maintenance months, jobs and estimates. Keep the jobs and estimates.</label>
+        {conflicts.length > 0 && <InvoiceDeletionConflicts conflicts={conflicts} store={store} T={T} onResolved={() => { setConflicts(store.listConflicts()); setReviewAgain(true); }} />}
+        {reviewAgain && <div role="status">Saved changes reviewed. Close this list and reopen it to review the current invoices before deleting.</div>}
         {error && <div role="alert" style={{ color: T.warning, fontSize: 12.5, lineHeight: 1.5 }}>{error} <button type="button" onClick={checkCoverage} style={{ border: "none", background: "none", color: T.primary, font: "inherit", fontWeight: 800, padding: "4px 0", cursor: "pointer" }}>Check again</button></div>}
         <div style={{ maxHeight: 350, overflowY: "auto", borderTop: `1px solid ${T.border}`, borderBottom: `1px solid ${T.border}` }}>
           {reviewedInvoices.map((invoice, index) => {
@@ -23082,7 +23076,7 @@ function InvoiceBulkDeleteModal({ invoices, allInvoices, clients, schedule, load
         {hasResults && <div role="status" style={{ color: T.text, fontSize: 12.5, lineHeight: 1.5 }}>{deletedCount} deleted.{failedCount > 0 ? ` ${failedCount} could not be deleted and remain selected.` : ""} {plan.skipped.filter((row) => outcomes[String(row.invoice.id)]?.status !== "deleted").length > 0 ? "Protected invoices remain selected." : ""}</div>}
         <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "flex-end", gap: 9 }}>
           <Btn variant="ghost" disabled={running} onClick={onClose}>{hasResults ? "Done" : "Cancel"}</Btn>
-          <Btn disabled={checking || !!error || running || remaining.length === 0} onClick={removeDrafts}>{running ? "Deleting…" : `${hasResults ? "Retry" : "Delete"} ${remaining.length} draft${remaining.length === 1 ? "" : "s"}`}</Btn>
+          {(!hasResults || remaining.length > 0) && <Btn disabled={checking || !!error || running || reviewAgain || conflicts.length > 0 || remaining.length === 0} onClick={removeDrafts}>{running ? "Deleting…" : `${hasResults ? "Retry" : "Delete"} ${remaining.length} invoice${remaining.length === 1 ? "" : "s"}`}</Btn>}
         </div>
       </div>
     </Modal>
@@ -23113,9 +23107,10 @@ function InvoiceBulkSendModal({ invoices, clients, onSave, onClose }) {
     const target = invoices.filter(invoice => pendingIds.includes(String(invoice.id)));
     const nextResults = await deliverSelectedInvoices({
       invoices: target,
-      buildChannels: async (invoice) => {
+      buildChannels: async (originalInvoice) => {
+        const invoice = { ...originalInvoice };
         const client = clients.find(candidate => invoiceMatchesClient(invoice, candidate));
-        await assertInvoiceDeliveryCoverage({ invoice, client, clients, invoices: allInvoices, schedule, loadLedger: loadInvoiceDeliveryLedger });
+        const preparedInvoice = await assertInvoiceDeliveryCoverage({ invoice, client, clients, invoices: allInvoices, schedule, loadLedger: loadInvoiceDeliveryLedger });
         const phone = String(client?.phone || "").replace(/[^\d+]/g, "");
         const clientEmail = String(invoice.clientEmail || client?.email || "").trim();
         const payLink = invoice.paymentLink || "";
@@ -23155,7 +23150,7 @@ function InvoiceBulkSendModal({ invoices, clients, onSave, onClose }) {
                   to: clientEmail,
                   clientName: invoice.clientName || client?.name || "",
                   branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", logoType: branding.logoType || "", logoImage: branding.logoImage || "", accent: T.primary },
-                  invoice: { ...invoiceDeliveryIdentity(invoice, client?.id), number: invoice.number, date: invoice.date, dueDate: invoice.dueDate, terms: invoice.notes || "", taxRate: invoice.taxRate || 0, lineItems: (invoice.lineItems || []).map(invoiceDeliveryLine), subtotal: totals.subtotal, tax: totals.tax, total: totals.total, discountTotal: totals.discountTotal },
+                  invoice: { ...invoiceDeliveryIdentity(preparedInvoice, client?.id), number: invoice.number, date: invoice.date, dueDate: invoice.dueDate, terms: invoice.notes || "", taxRate: invoice.taxRate || 0, lineItems: (preparedInvoice.lineItems || []).map(invoiceDeliveryLine), subtotal: totals.subtotal, tax: totals.tax, total: totals.total, discountTotal: totals.discountTotal },
                   payLink: payLink || PROD_URL,
                 }),
               });
@@ -23529,9 +23524,9 @@ function BatchInvoiceModal({ clients, invoices, invoicing, maintenanceLedger = n
     const billingHolds = [];
     for (const p of created) {
       const c = clients.find(x => String(x.id) === String(p.id)); if (!c) continue;
-      const inv = p.invoice;
+      let inv = p.invoice;
       try {
-        await assertInvoiceDeliveryCoverage({ invoice: inv, client: c, clients, invoices, schedule, loadLedger: loadBatchCoverage });
+        inv = await assertInvoiceDeliveryCoverage({ invoice: inv, client: c, clients, invoices, schedule, loadLedger: loadBatchCoverage });
       } catch (error) {
         billingHolds.push(`${c.name}: ${error.message}`);
         continue;
@@ -23959,6 +23954,8 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
   });
   const maintenanceLedgerAttemptedRef = useRef(false);
   const maintenanceLedgerRequestRef = useRef(0);
+  const maintenanceLedgerWritingRef = useRef(false);
+  const maintenanceDraftRequestsRef = useRef(new Map());
   useEffect(() => {
     try {
       const saved = sessionStorage.getItem(maintenanceReceiptStorageKey);
@@ -24036,6 +24033,7 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
   }, [canReviewAccounting, onSyncData]);
   const loadMaintenanceLedger = useCallback(async () => {
     if (!canReviewAccounting) return null;
+    if (maintenanceLedgerWritingRef.current) throw new Error("The current maintenance change is still saving. Try again when it finishes.");
     const requestId = ++maintenanceLedgerRequestRef.current;
     setMaintenanceLedgerLoading(true);
     setMaintenanceLedgerError("");
@@ -24082,7 +24080,9 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
   }, [loadMaintenanceLedger, syncQuickBooks]);
   const mutateMaintenanceLedger = useCallback(async (payload) => {
     if (!canReviewAccounting) throw new Error("Accounting permission is required.");
-    maintenanceLedgerRequestRef.current += 1;
+    if (maintenanceLedgerWritingRef.current) throw new Error("The current maintenance change is still saving. Try again when it finishes.");
+    maintenanceLedgerWritingRef.current = true;
+    const requestId = ++maintenanceLedgerRequestRef.current;
     setMaintenanceLedgerLoading(false);
     setMaintenanceLedgerSaving(true);
     setMaintenanceLedgerError("");
@@ -24096,12 +24096,13 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
       if (!response.ok || data.error) throw new Error(data.error || "Maintenance payment coverage could not be saved.");
       const nextLedger = data.ledger || data.maintenancePaymentLedger || null;
       if (!nextLedger) throw new Error("The server did not return the saved maintenance payment coverage.");
-      setMaintenanceLedger(nextLedger);
+      if (requestId === maintenanceLedgerRequestRef.current) setMaintenanceLedger(nextLedger);
       return nextLedger;
     } catch (error) {
-      setMaintenanceLedgerError(error?.message || "Maintenance payment coverage could not be saved.");
+      if (requestId === maintenanceLedgerRequestRef.current) setMaintenanceLedgerError(error?.message || "Maintenance payment coverage could not be saved.");
       throw error;
     } finally {
+      maintenanceLedgerWritingRef.current = false;
       setMaintenanceLedgerSaving(false);
     }
   }, [canReviewAccounting]);
@@ -24113,6 +24114,25 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
     ...(invoiceId ? { invoiceId } : {}),
     ...(note ? { note } : {}),
   }), [mutateMaintenanceLedger]);
+  const createMaintenanceDraft = async ({ clientId, monthKeys }) => {
+    if (!perms.invoiceCreate || !onPersistProgress) throw new Error("Invoice creation is unavailable for this account.");
+    const requestKey = JSON.stringify([String(clientId), [...new Set(monthKeys)].sort()]);
+    const priorDraft = maintenanceDraftRequestsRef.current.get(requestKey);
+    if (priorDraft && invoices.some(entry => String(entry.id) === String(priorDraft.id))) return priorDraft;
+    const client = clients.find(entry => String(entry.id) === String(clientId));
+    const invoice = maintenanceDraftInvoice({
+      client, monthKeys, id: `iv${crypto.randomUUID()}`,
+      number: `${invoicing.numberPrefix ?? "INV-"}${nextInvoiceNumber(invoices, invoicing)}`,
+      date: todayMDY(), dueDate: addDaysMDY(todayMDY(), invoicing.dueDays), notes: invoicing.terms,
+    });
+    const ledger = await loadMaintenanceLedger();
+    const issue = invoiceMaintenanceCoverageIssue({ invoice, client, clients, ledger, invoices, schedule });
+    if (issue) throw new Error(issue.covered ? "This month already has paid or prepaid coverage. Review that payment before creating another maintenance charge." : issue.message);
+    const saved = await onPersistProgress(invoice, { baselineJson: "" });
+    if (!saved || String(saved.id) !== String(invoice.id)) throw new Error("The draft save was not confirmed. Nothing was sent.");
+    maintenanceDraftRequestsRef.current.set(requestKey, saved);
+    return saved;
+  };
   const clearMaintenanceCoverage = useCallback(({ clientId, monthKeys }) => mutateMaintenanceLedger({
     action: "clear",
     clientId,
@@ -24120,7 +24140,9 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
   }), [mutateMaintenanceLedger]);
   const reconcileMaintenanceHistory = useCallback(async ({ fromYear, toYear, automatic = false } = {}) => {
     if (!canReviewAccounting) throw new Error("Accounting permission is required.");
-    maintenanceLedgerRequestRef.current += 1;
+    if (maintenanceLedgerWritingRef.current) return null;
+    maintenanceLedgerWritingRef.current = true;
+    const requestId = ++maintenanceLedgerRequestRef.current;
     setMaintenanceLedgerLoading(false);
     setMaintenanceLedgerSaving(true);
     setMaintenanceLedgerError("");
@@ -24130,6 +24152,7 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
       if (!freshQuickBooks) throw new Error("QuickBooks refresh did not finish. History was not reconciled from stale data.");
       const snapshotIssue = maintenanceQuickBooksSnapshotIssue(freshQuickBooks);
       if (snapshotIssue) throw new Error(`${snapshotIssue}. History was not reconciled.`);
+      if (requestId !== maintenanceLedgerRequestRef.current) return null;
       const receiptStorageKey = maintenanceReconciliationStorageKey(
         currentUserId,
         freshQuickBooks.realmId || branding?.companyName || "company",
@@ -24143,7 +24166,8 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
       if (!response.ok || data.error) throw new Error(data.error || "Maintenance payment history could not be reconciled.");
       const nextLedger = data.maintenancePaymentLedger || data.ledger || null;
       if (!nextLedger || !data.reconciliationReceipt) throw new Error("The server did not return reconciliation evidence.");
-      setMaintenanceLedger(nextLedger);
+      if (requestId === maintenanceLedgerRequestRef.current) setMaintenanceLedger(nextLedger);
+      if (requestId !== maintenanceLedgerRequestRef.current) return data;
       const reconciliationEvidence = {
         ...data.reconciliationReceipt,
         automatic,
@@ -24156,9 +24180,10 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
       try { sessionStorage.setItem(receiptStorageKey, JSON.stringify(reconciliationEvidence)); } catch (_) {}
       return data;
     } catch (error) {
-      setMaintenanceLedgerError(error?.message || "Maintenance payment history could not be reconciled.");
+      if (requestId === maintenanceLedgerRequestRef.current) setMaintenanceLedgerError(error?.message || "Maintenance payment history could not be reconciled.");
       throw error;
     } finally {
+      maintenanceLedgerWritingRef.current = false;
       setMaintenanceLedgerSaving(false);
     }
   }, [branding?.companyName, canReviewAccounting, currentUserId, syncQuickBooks]);
@@ -24397,6 +24422,7 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
             reconciliationReceipt={maintenanceReconciliationReceipt}
             onAssign={assignMaintenanceCoverage}
             onClear={clearMaintenanceCoverage}
+            onCreateInvoice={perms.invoiceCreate ? createMaintenanceDraft : undefined}
             canSeeAmounts={!!(perms.seeTotalSales || perms.isAdmin)}
           />
         </div>
@@ -24613,7 +24639,7 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
             )}
             {perms.invoiceSend && <Btn sm variant="ghost" onClick={() => setBulkSending(true)}>Send to clients</Btn>}
             {perms.invoiceCreate && <Btn sm variant="ghost" onClick={() => setBulkEditing(true)}>Edit selected</Btn>}
-            {canBulkDelete && <Btn sm variant="ghost" onClick={() => setBulkDeleting(selectedInvoices)}>Delete drafts</Btn>}
+            {canBulkDelete && <Btn sm variant="ghost" onClick={() => setBulkDeleting(selectedInvoices)}>Delete selected</Btn>}
             <button type="button" onClick={() => setSelectedIds([])} style={{ border: "none", background: "transparent", color: T.textMuted, fontSize: 12.5, fontWeight: 750, padding: "8px 9px", cursor: "pointer", fontFamily: "inherit" }}>Clear</button>
           </div>
         </div>
@@ -43135,22 +43161,22 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
 
     return { ok: false, error: "Estimates changed repeatedly on another device. Refresh and try again." };
   };
-  const handleDeleteInvoice = async (id, { draftOnly = false, reviewedInvoice } = {}) => {
+  const handleDeleteInvoice = async (id, { draftOnly = false, reviewedInvoice, includeQuickBooks = false, unlinkJobs = false } = {}) => {
+    let quickBooksDeleted = false;
+    const deletionFailure = (result) => quickBooksDeleted ? { ...result, error: `QuickBooks confirmed deletion, but SPS cleanup could not be confirmed. Retry deletion to finish. ${result.error || ""}` } : result;
     const targetId = String(id || "").trim();
-    if (!targetId) return { ok: false, error: "Choose an invoice to delete." };
-    if (draftOnly && (!perms.isAdmin || !perms.invoiceDelete)) {
-      return { ok: false, protected: true, error: "An owner with invoice deletion permission must review bulk draft deletion." };
+    if (!targetId) return deletionFailure({ ok: false, error: "Choose an invoice to delete." });
+    if (!perms.invoiceDelete || (draftOnly && !perms.isAdmin)) {
+      return deletionFailure({ ok: false, protected: true, error: "Invoice deletion permission is required." });
     }
 
     try {
-      const flushed = await store.flush();
-      if (!flushed?.ok && !flushed?.empty) {
-        return { ok: false, error: "Pending invoice, estimate, or schedule changes must finish syncing before an invoice can be deleted." };
-      }
-      const hasRelevantConflict = (typeof store.listConflicts === "function" ? store.listConflicts() : [])
-        .some(({ key }) => key === "sps_invoices" || key === "sps_estimates" || key === "sps_schedule" || (draftOnly && key === "sps_maintenance_billing"));
-      if (hasRelevantConflict) {
-        return { ok: false, error: "Resolve the invoice, estimate, or schedule sync conflict before deleting this invoice." };
+      const keys = ["sps_invoices", "sps_estimates", "sps_schedule", "sps_maintenance_billing"];
+      const conflicts = store.listConflicts().filter(({ key }) => keys.includes(key));
+      if (conflicts.length) return deletionFailure({ ok: false, conflicts, error: "Review the overlapping saved changes below, then retry deletion. No invoice was deleted." });
+      for (const key of keys) {
+        const flushed = await store.flushKey(key);
+        if (!flushed?.ok) return deletionFailure({ ok: false, conflicts: store.listConflicts().filter(entry => keys.includes(entry.key)), error: flushed?.error?.message || "A related invoice or job change is still saving. Try again when it finishes." });
       }
 
       for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -43158,17 +43184,17 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
           store.refresh("sps_invoices"),
           store.refresh("sps_estimates"),
           store.refresh("sps_schedule"),
-          draftOnly ? store.refresh("sps_maintenance_billing") : Promise.resolve(null),
+          store.refresh("sps_maintenance_billing"),
         ]);
-        if (!invoiceRead?.ok || !estimateRead?.ok || !scheduleRead?.ok || (draftOnly && !ledgerRead?.ok)) {
-          return {
+        if (!invoiceRead?.ok || !estimateRead?.ok || !scheduleRead?.ok || !ledgerRead?.ok) {
+          return deletionFailure({
             ok: false,
             error: invoiceRead?.error?.message
               || estimateRead?.error?.message
               || scheduleRead?.error?.message
               || ledgerRead?.error?.message
               || "The latest invoice links could not be checked. Nothing was deleted.",
-          };
+          });
         }
 
         let latestInvoices;
@@ -43179,15 +43205,15 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
           latestInvoices = invoiceRead.exists ? JSON.parse(invoiceRead.value || "[]") : [];
           latestEstimates = estimateRead.exists ? JSON.parse(estimateRead.value || "[]") : [];
           latestSchedule = scheduleRead.exists ? JSON.parse(scheduleRead.value || "[]") : [];
-          if (draftOnly) latestLedger = ledgerRead.exists ? JSON.parse(ledgerRead.value) : emptyMaintenancePaymentLedger();
+          latestLedger = ledgerRead.exists ? JSON.parse(ledgerRead.value) : emptyMaintenancePaymentLedger();
         } catch (_) {
-          return { ok: false, error: "The shared invoice, estimate, or schedule data is invalid. Nothing was deleted." };
+          return deletionFailure({ ok: false, error: "The shared invoice, estimate, or schedule data is invalid. Nothing was deleted." });
         }
         if (!Array.isArray(latestInvoices) || !Array.isArray(latestEstimates) || !Array.isArray(latestSchedule)) {
-          return { ok: false, error: "The shared invoice, estimate, or schedule data is invalid. Nothing was deleted." };
+          return deletionFailure({ ok: false, error: "The shared invoice, estimate, or schedule data is invalid. Nothing was deleted." });
         }
-        if (draftOnly && !normalizeMaintenancePaymentLedger(latestLedger)) {
-          return { ok: false, protected: true, error: "Shared payment coverage could not be verified. Nothing was deleted." };
+        if (!normalizeMaintenancePaymentLedger(latestLedger)) {
+          return deletionFailure({ ok: false, protected: true, error: "Shared payment coverage could not be verified. Nothing was deleted." });
         }
 
         const target = latestInvoices.find((invoice) => String(invoice?.id || "") === targetId);
@@ -43197,24 +43223,25 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
           setSchedule(latestSchedule);
           return { ok: true, existing: true };
         }
-        if (draftOnly) {
+        {
           const eligibility = invoiceBulkDeleteEligibility(target, {
             invoices: latestInvoices, estimates: latestEstimates, schedule: latestSchedule,
             ledger: latestLedger, totalOf: (invoice) => invoiceTotals(invoice).total,
+            includeQuickBooks, unlinkJobs, reviewedInvoice,
           });
-          if (!eligibility.eligible) return { ok: false, protected: true, error: eligibility.reason };
+          if (!eligibility.eligible) return deletionFailure({ ok: false, protected: true, error: eligibility.reason });
           if (!invoiceDeletionReviewMatches(reviewedInvoice, target)) {
-            return { ok: false, protected: true, error: "This draft changed after the deletion list opened. Close this list and review it again." };
+            return deletionFailure({ ok: false, protected: true, error: "This invoice changed after the deletion review opened. Close this review and reopen it to see the current details." });
           }
         }
 
         const references = findInvoiceDeletionReferences(target, latestEstimates, latestSchedule);
-        if (references.blocked) {
-          return {
+        if (references.blocked && !unlinkJobs) {
+          return deletionFailure({
             ok: false,
             linked: true,
             error: invoiceDeletionBlockedMessage(target, references),
-          };
+          });
         }
 
         // Close a numbering gap only inside the same series of pristine, never-synced drafts.
@@ -43223,15 +43250,28 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
         const protectedInvoiceIds = new Set(
           latestInvoices
             .filter((invoice) => findInvoiceDeletionReferences(invoice, latestEstimates, latestSchedule).blocked
-              || (draftOnly && !invoiceBulkDeleteEligibility(invoice, {
+              || (!invoiceBulkDeleteEligibility(invoice, {
                 invoices: latestInvoices, estimates: latestEstimates, schedule: latestSchedule,
                 ledger: latestLedger, totalOf: (entry) => invoiceTotals(entry).total,
               }).eligible))
             .map((invoice) => String(invoice?.id || ""))
             .filter(Boolean),
         );
+        const unlinked = unlinkJobs ? unlinkInvoiceDeletionReferences(target, latestEstimates, latestSchedule) : { estimates: latestEstimates, schedule: latestSchedule };
         const deletionPlan = deleteInvoiceAndCompactSafeDrafts(latestInvoices, targetId, { protectedInvoiceIds });
         const nextInvoices = deletionPlan.invoices;
+        // Verify and remove the accounting invoice first. An accounting error leaves
+        // the SPS row available to retry; never report a local-only deletion as complete.
+        if (target.qbId && !quickBooksDeleted) {
+          if (!includeQuickBooks) return deletionFailure({ ok: false, error: "Review deletion from QuickBooks before continuing." });
+          const response = await fetch(`${QB_API}/delete-invoice`, {
+            method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
+            body: JSON.stringify({ qb_id: target.qbId, reviewed_invoice: target, unlinkJobs }),
+          });
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok || data.success !== true) return deletionFailure({ ok: false, error: data.error || "QuickBooks did not confirm deletion. The SPS invoice remains available to retry." });
+          quickBooksDeleted = true;
+        }
         const saved = await store.replaceMany([
           {
             key: "sps_invoices",
@@ -43240,87 +43280,57 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
           },
           {
             key: "sps_estimates",
-            value: estimateRead.exists ? estimateRead.value : "[]",
+            value: JSON.stringify(unlinked.estimates),
             expectedVersion: Number(estimateRead.version) || 0,
           },
           {
             key: "sps_schedule",
-            value: scheduleRead.exists ? scheduleRead.value : "[]",
+            value: JSON.stringify(unlinked.schedule),
             expectedVersion: Number(scheduleRead.version) || 0,
           },
-          // The browser batch primitive accepts writes, not check-only fences.
-          // An owner-only same-value write atomically fences coverage without
-          // changing any policy/allocation or adding a new persistence path.
-          ...(draftOnly ? [{
+          // Fence protected payments, and remove only explicitly approved unpaid links.
+          {
             key: "sps_maintenance_billing",
-            value: ledgerRead.exists ? ledgerRead.value : JSON.stringify(latestLedger),
+            value: unlinkJobs ? JSON.stringify(unlinkUnpaidInvoiceCoverage(target, latestLedger)) : (ledgerRead.exists ? ledgerRead.value : JSON.stringify(latestLedger)),
             expectedVersion: Number(ledgerRead.version) || 0,
-          }] : []),
+          },
         ]);
         if (!saved?.ok) {
           if (saved?.conflict && attempt < 2) continue;
-          return {
+          return deletionFailure({
             ok: false,
             error: saved?.conflict
               ? "Another employee changed an invoice or job link at the same time. Refresh and try again."
               : (saved?.error?.message || "The server did not confirm the invoice deletion."),
-          };
+          });
         }
 
         const confirmedRead = await store.get("sps_invoices");
         let confirmedInvoices;
         try {
-          if (draftOnly && !confirmedRead?.value) throw new Error("Missing confirmed invoice snapshot");
+          if (!confirmedRead?.value) throw new Error("Missing confirmed invoice snapshot");
           confirmedInvoices = confirmedRead?.value ? JSON.parse(confirmedRead.value) : nextInvoices;
         } catch (_) {
-          return { ok: false, error: "The saved invoice list could not be reopened. Refresh before trying again." };
+          return deletionFailure({ ok: false, error: "The saved invoice list could not be reopened. Refresh before trying again." });
         }
         if (
           !Array.isArray(confirmedInvoices)
           || confirmedInvoices.some((invoice) => String(invoice?.id || "") === targetId)
         ) {
-          return { ok: false, error: "The server confirmed the save, but the deleted invoice is still present. Refresh before trying again." };
+          return deletionFailure({ ok: false, error: "The server confirmed the save, but the deleted invoice is still present. Refresh before trying again." });
         }
 
         setInvoices(confirmedInvoices);
-        setEstimatesRaw(latestEstimates);
-        setSchedule(latestSchedule);
+        setEstimatesRaw(unlinked.estimates);
+        setSchedule(unlinked.schedule);
 
-        // QuickBooks deletion is deliberately last. A linked estimate/stop must never lose its
-        // external invoice before the three local sections atomically confirm that deletion is safe.
-        if (!draftOnly && target.qbId && qbIsConnected()) {
-          try {
-            const response = await fetch(`${QB_API}/delete-invoice`, {
-              method: "POST",
-              headers: await authHeaders({ "Content-Type": "application/json" }),
-              body: JSON.stringify({ qb_id: target.qbId }),
-            });
-            const data = await response.json().catch(() => ({}));
-            if (!response.ok || data.error) {
-              const detail = data.error || "QuickBooks did not confirm the deletion.";
-              console.error("QB delete failed:", detail);
-              return {
-                ok: true,
-                warning: `Deleted from SPS Way, but QuickBooks did not confirm it: ${detail} Sync again before recreating this invoice.`,
-                renumbered: deletionPlan.renumbered,
-              };
-            }
-          } catch (error) {
-            console.error("QB delete error:", error?.message || error);
-            return {
-              ok: true,
-              warning: "Deleted from SPS Way, but QuickBooks could not be reached. Sync again before recreating this invoice.",
-              renumbered: deletionPlan.renumbered,
-            };
-          }
-        }
         return { ok: true, renumbered: deletionPlan.renumbered };
       }
     } catch (error) {
-      return { ok: false, error: error?.message || "The invoice could not be deleted." };
+      return deletionFailure({ ok: false, error: error?.message || "The invoice could not be deleted." });
     }
 
-    return { ok: false, error: "Invoice links changed repeatedly on another device. Refresh and try again." };
+    return deletionFailure({ ok: false, error: "Invoice links changed repeatedly on another device. Refresh and try again." });
   };
 
   // Re-read the three authoritative sections immediately before an arrival is recorded or any

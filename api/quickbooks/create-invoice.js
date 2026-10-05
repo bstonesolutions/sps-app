@@ -25,16 +25,15 @@ export default async function handler(req, res) {
   const _u = await requireUser(req, res);
   if (!_u) return;
 
-  const { invoice } = req.body;
+  let { invoice } = req.body;
   if (!invoice) {
     return res.status(400).json({ error: "Missing invoice" });
   }
 
+  const coverageIssue = await quickBooksMaintenanceGuard(invoice, { onPreparedInvoice: prepared => { invoice = prepared; } });
+  if (coverageIssue) return res.status(coverageIssue.status).json({ error: coverageIssue.message, code: coverageIssue.code, reviewRequired: true });
   const serviceMonthIssue = invoiceServiceDescriptionIssue(invoice);
   if (serviceMonthIssue) return res.status(422).json({ error: serviceMonthIssue.message, code: serviceMonthIssue.code, reviewRequired: true });
-
-  const coverageIssue = await quickBooksMaintenanceGuard(invoice);
-  if (coverageIssue) return res.status(coverageIssue.status).json({ error: coverageIssue.message, code: coverageIssue.code, reviewRequired: true });
 
   // Tokens are read server-side from the store (never passed by the client).
   let access_token, realm_id;

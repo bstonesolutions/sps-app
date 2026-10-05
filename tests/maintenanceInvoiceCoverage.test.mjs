@@ -29,7 +29,7 @@ test("allocated prepaid months use settled canonical invoice evidence without re
 });
 
 test("an exact paid monthly QuickBooks invoice prevents a duplicate before allocations are saved", () => {
-  const currentPaid = { ...sourceInvoice, qbId: "qb-paid", date: "10/01/2026", total: 175, lineItems: [{ desc: "Monthly maintenance", qty: 1, unitPrice: 175 }] };
+  const currentPaid = { ...sourceInvoice, qbId: "qb-paid", date: "10/01/2026", total: 175, lineItems: [{ desc: "Monthly maintenance - October 2026", qty: 1, unitPrice: 175 }] };
   const noAllocations = { version: 2, policies: {}, allocations: {} };
   const result = maintenanceCoverageForService({ ...fixture(), ledger: noAllocations, invoices: [currentPaid] });
   assert.equal(result.covered, true);
@@ -157,9 +157,11 @@ test("a billing review preserves work completion and extras without rebilling ma
 });
 
 test("invoice checks block covered service, permit original payment evidence and unrelated charges", () => {
-  const options = { client, clients: [client], ledger: ledger(), invoices: [sourceInvoice] };
+  const original = { ...sourceInvoice, lineItems: [{ ...draft().lineItems[0], desc: "Monthly maintenance - October and November 2026", qty: 2 }] };
+  const options = { client, clients: [client], ledger: ledger(), invoices: [original] };
   assert.equal(invoiceMaintenanceCoverageIssue({ ...options, invoice: draft() }).code, "maintenance-already-covered");
-  assert.equal(invoiceMaintenanceCoverageIssue({ ...options, invoice: { ...draft(), id: sourceInvoice.id } }), null);
+  assert.equal(invoiceMaintenanceCoverageIssue({ ...options, invoice: original }), null);
+  assert.equal(invoiceMaintenanceCoverageIssue({ ...options, invoice: { ...draft(), id: sourceInvoice.id } }).covered, true);
   for (const line of [{ desc: "Pump repair", kind: "service" }, { desc: "Maintenance kit", kind: "product" }, { desc: "Replacement part", kind: "part" }]) {
     assert.equal(invoiceMaintenanceCoverageIssue({ ...options, invoice: { ...draft(), lineItems: [{ ...line, qty: 1, unitPrice: 50 }] } }), null);
   }
@@ -175,15 +177,17 @@ test("invoice coverage follows the service month rather than a later invoice iss
 
 test("explicit monthly periods respect protected prepaid policies and exempt their source invoice", () => {
   const invoice = { ...draft(), autoPeriod: "2026-10", date: "12/01/2026" };
+  const original = { ...sourceInvoice, ...invoice, id: sourceInvoice.id, number: sourceInvoice.number };
+  const options = { ...fixture(), invoices: [original] };
   const policyLedger = { version: 1, policies: { [client.id]: { version: 1, mode: "prepaid", coveredFrom: "2026-10-01", coveredThrough: "2026-10-31", sourceInvoiceId: sourceInvoice.id } } };
-  assert.equal(invoiceMaintenanceCoverageIssue({ ...fixture(), ledger: policyLedger, invoice }).covered, true);
-  assert.equal(invoiceMaintenanceCoverageIssue({ ...fixture(), ledger: policyLedger, invoice: { ...invoice, id: sourceInvoice.id } }), null);
-  assert.equal(invoiceMaintenanceCoverageIssue({ ...fixture(), ledger: policyLedger, invoice: { ...invoice, number: sourceInvoice.number, qbId: sourceInvoice.id } }).covered, true);
+  assert.equal(invoiceMaintenanceCoverageIssue({ ...options, ledger: policyLedger, invoice }).covered, true);
+  assert.equal(invoiceMaintenanceCoverageIssue({ ...options, ledger: policyLedger, invoice: original }), null);
+  assert.equal(invoiceMaintenanceCoverageIssue({ ...options, ledger: policyLedger, invoice: { ...invoice, number: sourceInvoice.number, qbId: sourceInvoice.id } }).covered, true);
   const numberOnlyPolicy = structuredClone(policyLedger);
   delete numberOnlyPolicy.policies[client.id].sourceInvoiceId;
   numberOnlyPolicy.policies[client.id].sourceInvoiceNumber = sourceInvoice.number;
-  assert.equal(invoiceMaintenanceCoverageIssue({ ...fixture(), ledger: numberOnlyPolicy, invoice: { ...invoice, number: sourceInvoice.number } }).covered, true);
-  assert.equal(invoiceMaintenanceCoverageIssue({ ...fixture(), ledger: numberOnlyPolicy, invoice: { ...invoice, id: sourceInvoice.id } }), null);
+  assert.equal(invoiceMaintenanceCoverageIssue({ ...options, ledger: numberOnlyPolicy, invoice: { ...invoice, number: sourceInvoice.number } }).covered, true);
+  assert.equal(invoiceMaintenanceCoverageIssue({ ...options, ledger: numberOnlyPolicy, invoice: original }), null);
 });
 
 test("candidate service dates and dated descriptions override the invoice issue month", () => {
@@ -259,4 +263,70 @@ test("seasonal work and repairs do not acquire maintenance coverage or require a
       lineItems: [{ ...draft().lineItems[0], desc }] };
     assert.equal(invoiceMaintenanceCoverageIssue({ ...fixture(), invoice, ledger: null, client: { ...client, history: [{ ...stop, date: "10/15/2026" }] } }), null, desc);
   }
+});
+
+const ownerDecisionLedger = (decision = 'unpaid') => ({ version: 2, policies: {}, allocations: {
+  [client.id]: { '2026-10': { status: decision === 'paid' ? 'paid' : 'due',
+    sources: [{ kind: 'manual', recordId: `manual:${client.id}:2026-10`, decision }],
+    expectedCents: 17500, allocatedCents: decision === 'paid' ? 17500 : 0,
+    note: 'Owner checked the maintenance record', updatedAt: '2026-10-05T12:00:00Z', updatedBy: 'owner@example.test' } },
+} });
+
+test('an explicit owner unpaid month permits a new invoice despite uncertain history', () => {
+  const uncertain = { ...sourceInvoice, qbId: 'uncertain', status: 'Partial', balance: 250,
+    lineItems: [{ desc: 'Maintenance prepayment', qty: 1, unitPrice: 350 }] };
+  const args = { ...fixture(), ledger: ownerDecisionLedger(), invoices: [uncertain] };
+  assert.equal(maintenanceCoverageForService(args).reason, 'maintenance-month-owner-unpaid');
+  assert.equal(invoiceMaintenanceCoverageIssue({ ...args, invoice: draft() }), null);
+});
+
+test('owner unpaid cannot override a prepaid policy, actual dated payment, or immutable paid completion', () => {
+  const manual = ownerDecisionLedger();
+  const policy = { ...manual, policies: { [client.id]: { version: 1, mode: 'prepaid', coveredFrom: '2026-10-01', coveredThrough: '2026-10-31' } } };
+  assert.equal(maintenanceCoverageForService({ ...fixture(), ledger: policy }).covered, true);
+  const actualPaid = { ...sourceInvoice, qbId: 'dated-paid', total: 175,
+    lineItems: [{ desc: 'Monthly maintenance - October 2026', qty: 1, unitPrice: 175 }] };
+  const paid = maintenanceCoverageForService({ ...fixture(), ledger: manual, invoices: [actualPaid] });
+  assert.equal(paid.covered, true);
+  const partlyPaid = { ...actualPaid, status: 'Partial', balance: 25 };
+  assert.equal(maintenanceCoverageForService({ ...fixture(), ledger: manual, invoices: [partlyPaid] }).blocked, true);
+  const completed = prepareCoveredMaintenanceEntry({ ...fixture(), entry: { ...stop, invoice: '$175', services: [service] } }).entry;
+  assert.equal(maintenanceCoverageForService({ ...fixture(), ledger: manual, invoices: [], entry: completed }).covered, true);
+});
+
+test('owner paid protects a month and later owner unpaid resolves only stored review holds', () => {
+  const manuallyPaid = ownerDecisionLedger('paid');
+  const paid = prepareCoveredMaintenanceEntry({ ...fixture(), ledger: manuallyPaid, invoices: [], entry: { ...stop, invoice: '$175', services: [service] } });
+  assert.equal(paid.decision.covered, true);
+  assert.equal(savedMaintenanceCoverage(paid.entry).covered, true);
+  assert.equal(invoiceMaintenanceCoverageIssue({ ...fixture(), ledger: manuallyPaid, invoice: draft() }).code, 'maintenance-already-covered');
+
+  const reviewed = { sid: stop.sid, type: stop.type, date: '10/01/2026', billingDisposition: 'maintenance-review',
+    maintenanceBillingServiceDate: '2026-10-01', maintenanceBillingSnapshot: { version: 1, mode: 'review', clientId: client.id, month: '2026-10', reason: 'maintenance-payment-evidence-unverified' } };
+  const linkedClient = { ...client, history: [reviewed] };
+  const args = { ...fixture(), client: linkedClient, clients: [linkedClient], ledger: ownerDecisionLedger(), invoices: [] };
+  assert.equal(maintenanceCoverageForService({ ...args, entry: reviewed }).blocked, undefined);
+  assert.equal(invoiceMaintenanceCoverageIssue({ ...args, invoice: { ...draft(), sourceStopId: stop.sid } }), null);
+});
+
+test('an unchanged matched unpaid invoice can be sent without declaring its month paid', () => {
+  const original = { ...draft(), status: 'Sent', balance: 175, total: 175 };
+  const matched = { version: 2, policies: {}, allocations: { [client.id]: { '2026-10': {
+    status: 'due', expectedCents: 17500, allocatedCents: 17500,
+    sources: [{ kind: 'invoice', invoiceId: original.id, amountCents: 17500 }],
+  } } } };
+  const args = { ...fixture(), ledger: matched, invoices: [original] };
+  assert.equal(maintenanceCoverageForService(args).covered, false);
+  assert.equal(invoiceMaintenanceCoverageIssue({ ...args, invoice: original }), null);
+  assert.equal(invoiceMaintenanceCoverageIssue({ ...args, invoice: { ...original, id: 'duplicate' } }).covered, false);
+  assert.equal(invoiceMaintenanceCoverageIssue({ ...args, invoice: { ...original, id: 'duplicate' } }).code, 'maintenance-coverage-review');
+});
+
+test('automatic coverage never turns an invoice issue date into a service month', () => {
+  const undated = { ...sourceInvoice, qbId: 'undated-paid', date: '10/01/2026', total: 175,
+    lineItems: [{ desc: 'Monthly maintenance', qty: 1, unitPrice: 175 }] };
+  const empty = { version: 2, policies: {}, allocations: {} };
+  assert.equal(maintenanceCoverageForService({ ...fixture(), ledger: empty, invoices: [undated] }).covered, false);
+  assert.equal(maintenanceCoverageForService({ ...fixture(), ledger: empty, invoices: [{ ...undated,
+    lineItems: [{ desc: 'Monthly maintenance - September 2026', qty: 1, unitPrice: 175 }] }] }).covered, false);
 });

@@ -8,6 +8,7 @@
 import { brandLogoSource } from "../brandAssets.js";
 import { buildQuickBooksInvoicePayload } from "../quickbooksDraftSync.js";
 import { quickBooksMaintenanceGuard } from "./quickbooks/maintenance-guard.js";
+import { formatInvoiceServiceLineDescription } from "../invoiceServiceDescription.js";
 
 const escapeHtml = (s) => String(s == null ? "" : s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -133,7 +134,8 @@ export default async function handler(req, res) {
   const _u = await requireCapability(req, res, "invoiceSend", "sending invoices");
   if (!_u) return;
 
-  const { to, clientName, branding = {}, invoice = {}, payLink, emailSubject, emailIntro } = req.body || {};
+  const { to, clientName, branding = {}, payLink, emailSubject, emailIntro } = req.body || {};
+  let invoice = req.body?.invoice || {};
   if (!to || !/.+@.+\..+/.test(to)) return res.status(400).json({ error: "A valid client email is required" });
 
   // Test/launch safety — enforced server-side so a forgotten call site can't leak to a
@@ -150,7 +152,17 @@ export default async function handler(req, res) {
     { ...invoice, id: invoice.id || invoice.spsInvoiceId || "" },
     { id: invoice.clientId || req.body.clientId || "", name: clientName, email: to, qbId: invoice.qbCustomerId },
     {},
-  ), { mode: "send" });
+  ), { mode: "send", onPreparedInvoice: prepared => {
+    invoice = { ...invoice, lineItems: (invoice.lineItems || []).map((line, index) => {
+      const preparedLine = prepared.lineItems[index];
+      if (!preparedLine) return line;
+      return { ...line,
+        ...(preparedLine.serviceMonth ? { serviceMonth: preparedLine.serviceMonth } : {}),
+        ...(preparedLine.sourceVisitDates ? { sourceVisitDates: preparedLine.sourceVisitDates } : {}),
+        desc: formatInvoiceServiceLineDescription(prepared, preparedLine),
+      };
+    }) };
+  } });
   if (coverageIssue) return res.status(coverageIssue.status || 409).json({
     error: coverageIssue.message,
     code: coverageIssue.code,

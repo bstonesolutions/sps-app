@@ -567,7 +567,7 @@ test("invoice editor exposes a searchable multi-visit picker instead of the eigh
   assert.match(editorSource, /reservedSources = invoiceCompletedVisitSources\(reservation\.reservedInvoice\)/);
   assert.match(editorSource, /removeInvoiceLineAndPruneCompletedVisitSources\(s, id\)[\s\S]*\{ replace: true \}/);
   assert.ok(
-    editorSource.indexOf("reserveVisitSourcesBeforeAccounting(baseInv)") < editorSource.indexOf("const qbPayload = buildQbPayload()"),
+    editorSource.indexOf("reserveVisitSourcesBeforeAccounting(baseInv)") < editorSource.indexOf("const qbPayload = buildQbPayload(baseInv)"),
     "visit sources must be reserved before any QuickBooks payload/request path",
   );
   assert.match(pickerSource, /Possible legacy link to invoice/);
