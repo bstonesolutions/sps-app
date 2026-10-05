@@ -5,6 +5,8 @@ import {
 } from "./maintenanceBilling.js";
 import { isMaintenanceServiceExtra, savedMaintenanceCoverage } from "./maintenanceInvoiceCoverage.js";
 import { isMaintenanceServiceFromSource } from "./maintenanceServiceLine.js";
+import { billingRecordsShareSource, isBillingReview, isBillingReviewNumberClaim, makeBillingReview } from "./billingReview.js";
+import { invoiceCompletedVisitSources } from "./invoiceVisitImport.js";
 
 export const COMPLETION_INVOICE_VERSION = 1;
 
@@ -375,7 +377,7 @@ function buildDraftBase({ invoices, invoicing, client, lineItems, issueDate, cre
     : text(invoicing.terms);
   return {
     id: source.id,
-    number: nextInvoiceNumber(invoices, invoicing),
+    number: invoicing?._billingReview ? "" : nextInvoiceNumber(invoices, invoicing),
     clientId: client.id,
     clientName: client.name || "",
     clientAddress: client.address || "",
@@ -919,4 +921,130 @@ export function planCompletionInvoice({
       sourceStopId: text(stop.sid),
     },
   };
+}
+
+/** Completion billing is separate from accounting. The legacy planner remains the single source
+ * for visit pricing, prepaid exclusions and monthly aggregation; only its output destination and
+ * lifecycle change. Actual invoices are read-only duplicate fences, never regenerated or removed.
+ */
+export function planCompletionBillingReview(input = {}) {
+  const { invoices = [], reviews = [], stop, entry, client, mode = "complete", now = Date.now() } = input;
+  if (!text(stop?.sid) || !text(client?.id) || !sameId(stopClientId(stop), client.id)) throw new Error("The completed stop and billing review client must match.");
+  if (!["complete", "reverse"].includes(mode)) throw new Error("Billing review planning mode is invalid.");
+  if (mode === "complete" && stop.cancelled) return { invoices, reviews, changed: false, outcome: { status: "review_required", kind: "none", reason: "stop-cancelled" }, billingReview: null };
+  if (!Array.isArray(reviews) || reviews.some(row => !isBillingReview(row) && !isBillingReviewNumberClaim(row))) throw new Error("Shared billing reviews are invalid.");
+  if (new Set(reviews.map(row => text(row.id))).size !== reviews.length) throw new Error("Billing review IDs are duplicated.");
+  const receiptId = text(input.receiptId || entry?.completionReceiptId || markerReceiptId(input.completed, stop?.sid));
+  const revived = new Set(reviews.filter(row => row.reviewState === "discarded" && row.discardReason === "stop-reopened"
+    && (text(row.sourceStopId) === text(stop?.sid) || list(row.sourceStopIds).some(id => text(id) === text(stop?.sid)))
+    && receiptId && receiptId !== text(row.sourceCompletionReceiptId) && !list(row.sourceCompletionReceiptIds).includes(receiptId)).map(row => text(row.id)));
+  const activeReviews = reviews.filter(row => !revived.has(text(row.id)));
+  const reviewDrafts = activeReviews.map(row => ({
+    ...row, status: isBillingReview(row) && row.reviewState === "pending" ? "Draft" : "Review",
+    locallyEdited: isBillingReviewNumberClaim(row) || row.locallyEdited || row.reviewRevision > 1 || row.reviewState !== "pending" || !!row.approval,
+  }));
+  const realIds = new Set(list(invoices).map(row => text(row?.id)));
+  if (reviewDrafts.some(row => isBillingReview(row) && realIds.has(text(row.id)) && row.reviewState !== "synced")) throw new Error("A billing review and invoice share an unresolved identity.");
+  const combined = [...list(invoices).map(row => {
+    const claim = reviewDrafts.find(review => text(review.id) === text(row.id));
+    if (!claim) return { ...row, locallyEdited: true };
+    const actualSources = invoiceCompletedVisitSources(row), claimedSources = invoiceCompletedVisitSources(claim);
+    return { ...row, locallyEdited: true,
+      sourceStopIds: [...new Set([...actualSources.sourceStopIds, ...claimedSources.sourceStopIds])],
+      sourceCompletionReceiptIds: [...new Set([...actualSources.sourceCompletionReceiptIds, ...claimedSources.sourceCompletionReceiptIds])],
+      ...(text(row.sourceEstimateId || claim.sourceEstimateId) ? { sourceEstimateId: row.sourceEstimateId || claim.sourceEstimateId } : {}),
+    };
+  }), ...reviewDrafts.filter(row => !realIds.has(text(row.id)))];
+  let plan;
+  if (isEstimateStop(stop, entry) && !text(stop?.linkedInvoiceId)) {
+    const sourceEstimateId = text(stop?.sourceEstimateId || entry?.sourceEstimateId);
+    const matches = combined.filter(row => text(row.sourceEstimateId) === sourceEstimateId || (text(stop.linkedBillingReviewId) && text(row.id) === text(stop.linkedBillingReviewId)));
+    if (mode === "reverse") {
+      // Reuse the same untouched-source protection as every other completed job.
+      plan = planReopen({ invoices: combined, stop: { ...stop, source: "completed-stop", sourceEstimateId: undefined } });
+    } else if (matches.length) {
+      plan = { invoices: combined, changed: false, outcome: existingOutcome(matches, "estimate", { sourceStopId: text(stop.sid) }) };
+      if (matches.length === 1 && isBillingReview(matches[0]) && matches[0].reviewState === "pending"
+        && !matches[0].approval && !text(matches[0].sourceCompletionReceiptId) && receiptId) {
+        const attached = { ...matches[0], sourceStopId: text(stop.sid), sourceCompletionReceiptId: receiptId,
+          sourceVisitClientId: client.id, sourceVisitClientIds: [client.id] };
+        plan = { ...plan, changed: true, invoices: combined.map(row => row === matches[0] ? attached : row), outcome: { ...plan.outcome, status: "updated" } };
+      }
+    } else if (!isCompleted(input.completed, stop?.sid)) {
+      plan = { invoices: combined, changed: false, outcome: { status: "pending", kind: "estimate", reason: "stop-not-confirmed" } };
+    } else {
+      const quoted = list(stop?.estimateItems);
+      if (!quoted.length) throw new Error("This estimate stop has no saved quoted scope for billing review.");
+      const lineItems = quoted.map((line, index) => ({
+        ...copy(line), id: `il_est_${safeIdPart(sourceEstimateId)}_${safeIdPart(line.id || index + 1)}`,
+        desc: text(line.description || line.desc), qty: text(line.quantity ?? line.qty ?? "1"), unitPrice: text(line.unitPrice),
+        taxable: line.taxable === true, sourceEstimateLineId: line.id,
+        sourceStopId: text(stop.sid), ...(receiptId ? { sourceCompletionReceiptId: receiptId } : {}),
+      }));
+      const extraEntry = { ...entry };
+      for (const [key, kind] of [["partsUsed", "part"], ["productsPurchased", "product"]]) {
+        extraEntry[key] = list(entry?.[key]).map(item => {
+          const included = list(stop.plannedMaterials).filter(material => material.kind === kind && text(material.refId) === text(item.id))
+            .reduce((sum, material) => sum + number(material.quantity), 0);
+          return { ...item, qty: Math.max(0, number(item.qty) - included) };
+        });
+      }
+      lineItems.push(...purchasedLines(extraEntry, text(stop.sid), receiptId));
+      const draft = finalizeAutoDraft(buildDraftBase({ invoices: combined, invoicing: { ...input.invoicing, _billingReview: true }, client, lineItems,
+        issueDate: formatMDY(input.completedAt || now) || formatMDY(entry?.date), createdAt: timestamp(now),
+        source: { id: `iv_est_${safeIdPart(sourceEstimateId)}`, fields: { source: "estimate", sourceEstimateId,
+          sourceEstimateNumber: stop.sourceEstimateNumber || "", sourceEstimateTitle: stop.sourceEstimateTitle || stop.type || "",
+          sourceStopId: text(stop.sid), sourceCompletionReceiptId: receiptId,
+          taxRate: stop.estimateTaxEnabled === true ? text(stop.estimateTaxRate || "0") : "0" } },
+      }));
+      plan = { invoices: [draft, ...combined], changed: true, outcome: { status: "created", kind: "estimate", invoiceId: draft.id, invoiceNumber: "", sourceStopId: text(stop.sid) } };
+    }
+  } else {
+    plan = planCompletionInvoice({ ...input, invoices: combined, invoicing: { ...input.invoicing, _billingReview: true } });
+  }
+  if (mode === "complete" && plan.changed) {
+    // A monthly review can include a visit already billed by a differently named
+    // manual invoice. Source identity, including line-level provenance, is the
+    // duplicate fence; deterministic generated IDs alone are not sufficient.
+    const candidate = plan.invoices.find(row => text(row.id) === text(plan.outcome.invoiceId));
+    const conflicts = candidate ? combined.filter(row => text(row.id) !== text(candidate.id) && billingRecordsShareSource(candidate, row)) : [];
+    if (conflicts.length) return { invoices, reviews, changed: false, billingReview: null, outcome: {
+      status: "review_required", kind: plan.outcome.kind, reason: "source-already-linked", action: "preserve-existing-billing",
+      invoiceIds: conflicts.map(row => row.id), sourceStopId: text(stop.sid),
+    } };
+  }
+  const beforeById = new Map(reviewDrafts.map(row => [text(row.id), row]));
+  const afterById = new Map(plan.invoices.filter(row => !realIds.has(text(row.id))).map(row => [text(row.id), row]));
+  let changed = false;
+  let nextReviews = reviews.map(row => {
+    if (isBillingReviewNumberClaim(row)) return row;
+    const id = text(row.id);
+    const next = afterById.get(id);
+    if (next && next !== beforeById.get(id)) {
+      changed = true;
+      const revised = { ...makeBillingReview(next, { now }), reviewCreatedAt: row.reviewCreatedAt, reviewRevision: row.reviewRevision + 1 };
+      revised.autoDraftFingerprint = completionInvoiceFingerprint(revised);
+      return revised;
+    }
+    if (plan.changed && beforeById.has(id) && !next && !realIds.has(id)) {
+      changed = true;
+      return { ...row, reviewState: "discarded", discardReason: "stop-reopened", reviewRevision: row.reviewRevision + 1, reviewUpdatedAt: new Date(now).toISOString() };
+    }
+    return row;
+  });
+  for (const [id, row] of afterById) {
+    if (reviews.some(prior => text(prior.id) === id)) continue;
+    changed = true;
+    const review = makeBillingReview(row, { now });
+    review.autoDraftFingerprint = completionInvoiceFingerprint(review);
+    nextReviews = [review, ...nextReviews];
+  }
+  const target = nextReviews.find(row => isBillingReview(row) && text(row.id) === text(plan.outcome.invoiceId));
+  const outcome = { ...plan.outcome };
+  if (target && !realIds.has(text(target.id))) {
+    outcome.billingReviewId = target.id;
+    outcome.invoiceNumber = "";
+    if (target.reviewState === "discarded" && outcome.status === "existing") outcome.status = "discarded";
+  }
+  return { invoices, reviews: nextReviews, changed, outcome, billingReview: target || null };
 }

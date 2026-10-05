@@ -100,7 +100,7 @@ function possibleMaintenance(invoice) {
   return !!invoiceMaintenanceCoverageIssue({ invoice, client: { id: "inspection", history: [] }, ledger: null });
 }
 
-export async function quickBooksMaintenanceGuard(invoice, { mode = "create", existingQuickBooksInvoice = null, onPreparedInvoice } = {}) {
+export async function quickBooksMaintenanceGuard(invoice, { mode = "create", existingQuickBooksInvoice = null, onPreparedInvoice, trustedCanonicalInvoice = null } = {}) {
   const incomingLines = list(invoice?.lineItems || invoice?.items);
   // Parts and other extras are not maintenance service charges. This also keeps
   // an unrelated purchase from depending on maintenance-ledger availability.
@@ -117,7 +117,9 @@ export async function quickBooksMaintenanceGuard(invoice, { mode = "create", exi
     return review("Shared clients and invoices could not be verified. Refresh SPS before sending this invoice to QuickBooks.", "maintenance-coverage-unavailable", 503);
   }
   const clients = snapshot.sps_clients.value;
-  const invoices = snapshot.sps_invoices.value;
+  const invoices = trustedCanonicalInvoice
+    ? [...snapshot.sps_invoices.value.filter(saved => text(saved.id) !== text(trustedCanonicalInvoice.id)), trustedCanonicalInvoice]
+    : snapshot.sps_invoices.value;
   const spsId = text(invoice.spsInvoiceId || invoice.id);
   const qbId = text(existingQuickBooksInvoice?.Id || invoice.qbId);
   const byId = spsId ? invoices.filter(saved => text(saved.id) === spsId) : [];

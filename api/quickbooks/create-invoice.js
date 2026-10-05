@@ -13,6 +13,9 @@ import { getValidAccessToken, QB_API_BASE, setCors } from "./qb-store.js";
 import { requireUser } from "../_auth.js";
 import { quickBooksMaintenanceGuard } from "./maintenance-guard.js";
 import { invoiceServiceDescriptionIssue, formatInvoiceServiceLineDescription } from "../../invoiceServiceDescription.js";
+import { BILLING_REVIEW_CREATE_CONTEXT } from "../_billing-review-context.js";
+import { readAppStatesVersioned } from "../_app-state.js";
+import { billingReviewAccountingIssue, reserveDirectInvoiceAccountingClaim, settleDirectInvoiceAccountingClaim } from "../_billing-review-claims.js";
 
 export default async function handler(req, res) {
   setCors(res);
@@ -30,7 +33,25 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Missing invoice" });
   }
 
-  const coverageIssue = await quickBooksMaintenanceGuard(invoice, { onPreparedInvoice: prepared => { invoice = prepared; } });
+  const reviewContext = req[BILLING_REVIEW_CREATE_CONTEXT];
+  if (!reviewContext) {
+    // An old browser must not turn an unapproved review into accounting data.
+    try {
+      const snapshot = await readAppStatesVersioned(["sps_billing_reviews", "sps_invoices"]);
+      const reviews = snapshot.sps_billing_reviews?.value;
+      if (snapshot.sps_billing_reviews?.exists && !Array.isArray(reviews)) throw new Error("invalid_reviews");
+      const conflict = billingReviewAccountingIssue(invoice, reviews || [], snapshot.sps_invoices?.value || []);
+      if (invoice.recordType === "billing-review" || String(invoice.status).toLowerCase() === "review" || conflict)
+        return res.status(409).json({ error: conflict?.message || "Confirm this billing review in SPS before creating an invoice.", code: "billing_review_confirmation_required" });
+    } catch (_) {
+      return res.status(503).json({ error: "Billing reviews could not be checked. Try again before creating an invoice." });
+    }
+  }
+
+  const coverageIssue = reviewContext?.recovering ? null : await quickBooksMaintenanceGuard(invoice, {
+    trustedCanonicalInvoice: reviewContext?.canonicalInvoice,
+    onPreparedInvoice: prepared => { invoice = prepared; },
+  });
   if (coverageIssue) return res.status(coverageIssue.status).json({ error: coverageIssue.message, code: coverageIssue.code, reviewRequired: true });
   const serviceMonthIssue = invoiceServiceDescriptionIssue(invoice);
   if (serviceMonthIssue) return res.status(422).json({ error: serviceMonthIssue.message, code: serviceMonthIssue.code, reviewRequired: true });
@@ -41,6 +62,9 @@ export default async function handler(req, res) {
     ({ access_token, realm_id } = await getValidAccessToken());
   } catch (e) {
     return res.status(401).json({ error: "Not connected to QuickBooks", reconnect: true });
+  }
+  if (reviewContext?.realmId && String(reviewContext.realmId) !== String(realm_id)) {
+    return res.status(409).json({ error: "QuickBooks is connected to a different company. Reconnect the original company before retrying.", code: "billing_review_company_changed" });
   }
 
   const base = `${QB_API_BASE}/v3/company/${realm_id}`;
@@ -64,10 +88,13 @@ export default async function handler(req, res) {
   let qbId = null;
   let qbRequestId = null;
   let createWriteStarted = false;
+  let directClaim = null;
 
   try {
     // ── Step 1: Find or create the customer ──
     let qbCustomerId = invoice.qbCustomerId;
+    let qbInvoice = reviewContext?.frozenQuickBooksInvoice || null;
+    if (!qbInvoice) {
     let qbCustomer = null;
     const clientAddress = {
       Line1: String(invoice.clientStreet || invoice.clientAddress || "").trim() || undefined,
@@ -182,7 +209,7 @@ export default async function handler(req, res) {
       });
     }
 
-    const qbInvoice = {
+    qbInvoice = {
       CustomerRef:  { value: qbCustomerId },
       DocNumber:    invoice.number,
       TxnDate:      invoice.date || new Date().toISOString().split("T")[0],
@@ -211,6 +238,7 @@ export default async function handler(req, res) {
           : { PercentBased: false },
       });
     }
+    }
 
     // ── Step 3: Create the invoice ──
     // Intuit strongly recommends a stable requestid for every write. If the
@@ -222,11 +250,23 @@ export default async function handler(req, res) {
       || invoice.id
       || `${qbCustomerId}:${invoice.number || "auto"}`,
     );
-    qbRequestId = quickBooksInvoiceCreateRequestId(realm_id, requestKey);
+    if (!reviewContext) directClaim = await reserveDirectInvoiceAccountingClaim(invoice, {
+      requestKey, quickBooksInvoice: qbInvoice, realmId: realm_id,
+      verifyRecreation: async ({ canonical }) => {
+        if (!canonical?.qbId || requestKey !== `${canonical.id}:recreate:${canonical.qbId}`) return false;
+        const prior = await fetch(`${base}/invoice/${encodeURIComponent(canonical.qbId)}?minorversion=65`, { headers });
+        return prior.status === 404;
+      },
+    });
+    qbRequestId = quickBooksInvoiceCreateRequestId(realm_id, directClaim?.createIntent?.requestKey || requestKey);
+    if (directClaim?.createIntent?.quickBooksInvoice) qbInvoice = directClaim.createIntent.quickBooksInvoice;
+    if (reviewContext?.frozenQuickBooksInvoice) qbInvoice = reviewContext.frozenQuickBooksInvoice;
+    if (reviewContext?.beforeInvoiceWrite) await reviewContext.beforeInvoiceWrite(qbInvoice, { realmId: realm_id, qbRequestId });
     // From this point forward, a thrown network/response error is ambiguous:
     // QuickBooks may have committed the invoice before the connection failed.
     // The stable request id lets a later retry recover that same create safely.
     createWriteStarted = true;
+    if (reviewContext) reviewContext.writeStarted = true;
     const createRes = await fetch(
       `${base}/invoice?minorversion=65&requestid=${encodeURIComponent(qbRequestId)}`,
       {
@@ -239,12 +279,18 @@ export default async function handler(req, res) {
     if (!createRes.ok) {
       const err = await createRes.text();
       console.error("QB create invoice error:", err);
-      // Nothing was created — safe to report failure
-      return res.status(500).json({ error: "QuickBooks rejected the invoice: " + readableQbError(err), details: err });
+      const knownRejected = createRes.status >= 400 && createRes.status < 500 && createRes.status !== 408;
+      if (directClaim) await settleDirectInvoiceAccountingClaim(directClaim, { state: knownRejected ? "rejected" : "unknown", httpStatus: createRes.status });
+      if (!knownRejected) {
+        return res.status(502).json({ error: "QuickBooks did not confirm the invoice. Retry this same invoice to recover it.", createOutcomeUnknown: true, qbRequestId });
+      }
+      return res.status(500).json({ error: "QuickBooks rejected the invoice: " + readableQbError(err), details: err, createRejected: true });
     }
 
     const created = await createRes.json();
     qbId = created?.Invoice?.Id;
+    if (!qbId) throw new Error("QuickBooks returned no invoice ID");
+    if (directClaim) await settleDirectInvoiceAccountingClaim(directClaim, { state: "created", qbId: String(qbId) });
     let paymentLink = created?.Invoice?.InvoiceLink || null;
     let canonicalInvoice = created?.Invoice || null;
 
@@ -292,12 +338,16 @@ export default async function handler(req, res) {
       });
     }
     if (createWriteStarted) {
+      if (directClaim) {
+        try { await settleDirectInvoiceAccountingClaim(directClaim, { state: "unknown" }); }
+        catch (claimError) { console.error("QB creation outcome could not be journaled:", claimError.message); }
+      }
       return res.status(502).json({
         error: "QuickBooks may have created this invoice, but the response could not be confirmed. Retry the same invoice to recover it safely.",
         createOutcomeUnknown: true,
         qbRequestId,
       });
     }
-    return res.status(500).json({ error: err.message });
+    return res.status(err.status || 500).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
   }
 }

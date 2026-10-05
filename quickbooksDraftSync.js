@@ -91,7 +91,9 @@ export function buildQuickBooksInvoicePayload(invoice, client, invoicing, { toda
       const discount = line?.discountType === "pct"
         ? gross * (number(line?.discount) / 100)
         : line?.discountType === "amt" ? number(line?.discount) : 0;
-      const net = Math.max(0, gross - discount);
+      // A completed job can have a legitimate negative adjustment reducing the
+      // quoted service total. Preserve that credit instead of billing it as zero.
+      const net = gross < 0 && discount === 0 ? gross : Math.max(0, gross - discount);
       return {
         id: line?.id,
         sourceStopId: line?.sourceStopId,

@@ -10,7 +10,7 @@ assert.ok(editorStart >= 0 && finishStart > editorStart && finishEnd > finishSta
 const finishSource = app.slice(finishStart, finishEnd).trim().replace(/;$/, "");
 const sendBranch = app.slice(finishEnd).match(/if \(([^\n]+)\) return <InvoiceSendStep invoice=\{sendStep\}/);
 assert.ok(sendBranch, "the real editor must expose its post-save notification step");
-const showsSendStep = new Function("sendStep", "sendClient", "coverageIssue", `return Boolean(${sendBranch[1]});`);
+const showsSendStep = new Function("sendStep", "sendClient", "coverageIssue", "billingReview = false", `return Boolean(${sendBranch[1]});`);
 
 const draft = { id: "sample-invoice", clientId: "sample-client", number: "SAMPLE-1", status: "Sent", lineItems: [{ id: "service", desc: "Monthly service", serviceMonth: "2026-08", qty: 1, unitPrice: 350 }] };
 const synced = { ...draft, qbId: "sample-qb", qbSyncStatus: "synced", qbAuthoritative: true, total: 350, balance: 350,

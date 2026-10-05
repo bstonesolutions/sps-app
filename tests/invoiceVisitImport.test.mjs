@@ -562,7 +562,7 @@ test("invoice editor exposes a searchable multi-visit picker instead of the eigh
   assert.match(editorSource, /appendCompletedVisitsToInvoice/);
   assert.match(editorSource, /sourceStopIds: result\.sourceStopIds/);
   assert.match(editorSource, /sourceCompletionReceiptIds: result\.sourceCompletionReceiptIds/);
-  assert.match(editorSource, /disabled=\{clientLockedByImportedVisits \|\| progressState === "saving" \|\| qbState === "sending"\}/);
+  assert.match(editorSource, /disabled=\{billingReview \|\| clientLockedByImportedVisits \|\| progressState === "saving" \|\| qbState === "sending"\}/);
   assert.match(editorSource, /reserveVisitSourcesBeforeAccounting\(baseInv\)/);
   assert.match(editorSource, /reservedSources = invoiceCompletedVisitSources\(reservation\.reservedInvoice\)/);
   assert.match(editorSource, /removeInvoiceLineAndPruneCompletedVisitSources\(s, id\)[\s\S]*\{ replace: true \}/);

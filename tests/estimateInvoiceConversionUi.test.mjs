@@ -4,28 +4,31 @@ import test from "node:test";
 
 const app = fs.readFileSync(new URL("../App.jsx", import.meta.url), "utf8");
 
-test("estimate editor exposes a confirmed local draft conversion and reopens the linked invoice", () => {
+test("estimate editor opens unnumbered billing review and reopens actual linked invoices", () => {
   assert.match(app, /data-estimate-invoice-conversion/);
-  assert.match(app, /Create draft invoice/);
+  assert.match(app, /Review billing/);
+  assert.match(app, /billingReview=\{!!invoiceEditor\.reviewState\}/);
+  assert.match(app, /onConfirmReview=\{/);
+  assert.match(app, /onDiscardReview=\{/);
   assert.match(app, /Open invoice \$\{linkedInvoice\.number/);
   assert.match(app, /onConvertEstimate=\{handleConvertEstimateToInvoice\}/);
-  assert.match(app, /findInvoiceForEstimate\(list, estimate\)/);
-  assert.match(app, /estimateToDraftInvoice\(/);
-  assert.match(app, /setInvoiceEditor\(saved\)/);
+  assert.match(app, /action: "from-estimate", estimateId: estimate\.id/);
+  assert.match(app, /setInvoiceEditor\(result\.review \|\| result\.invoice\)/);
 });
 
 test("conversion is permission-gated, rejects declined estimates, and does not invoke QuickBooks", () => {
   const start = app.indexOf("const handleConvertEstimateToInvoice");
-  const end = app.indexOf("const handleDeleteInvoice", start);
+  const end = app.indexOf("const handleCompleteEstimate", start);
   assert.ok(start > 0 && end > start);
   const conversion = app.slice(start, end);
 
   assert.match(app, /const canCreateInvoice = canManage && !!\(perms\.isAdmin \|\| perms\.invoiceCreate\)/);
-  assert.match(conversion, /declined estimate cannot be converted/i);
-  assert.match(conversion, /await store\.flush\(\)/);
-  assert.match(conversion, /await store\.refresh\("sps_invoices"\)/);
-  assert.match(conversion, /await store\.replaceMany\(/);
-  assert.match(conversion, /expectedVersion: Number\(refreshed\.version\) \|\| 0/);
+  assert.match(app, /const canReviewBilling = canManage && !!perms\.isAdmin/);
+  assert.match(conversion, /declined estimate cannot be prepared/i);
+  assert.match(conversion, /await store\.flushKey\("sps_estimates"\)/);
+  assert.match(conversion, /await requestBillingReview\(/);
+  assert.match(conversion, /await refreshBillingInvoiceState\(\)/);
+  assert.doesNotMatch(conversion, /estimateToDraftInvoice|nextInvoiceNumber|store\.replaceMany/);
   assert.doesNotMatch(conversion, /QB_API|quickbooks|syncToQuickBooks/i);
 });
 
@@ -58,7 +61,7 @@ test("estimate completion is server-confirmed and never invokes invoice or Quick
   assert.doesNotMatch(completion, /QB_API|quickbooks|syncToQuickBooks|handleSaveInvoice|setInvoices/i);
 });
 
-test("scheduling approved work atomically creates or reuses its one draft invoice", () => {
+test("scheduling approved work retains links without creating an invoice", () => {
   const start = app.indexOf("const handleScheduleApprovedEstimate");
   const end = app.indexOf("const handleResetData", start);
   assert.ok(start > 0 && end > start);
@@ -68,7 +71,8 @@ test("scheduling approved work atomically creates or reuses its one draft invoic
   assert.match(scheduling, /options\.taxMigrationConfirmed !== true/);
   assert.match(scheduling, /taxMigrationConfirmedAt/);
   assert.match(scheduling, /findInvoiceForEstimate\(latestInvoices, billingEstimate\)/);
-  assert.match(scheduling, /estimateToDraftInvoice\(billingEstimate/);
+  assert.doesNotMatch(scheduling, /estimateToDraftInvoice|nextInvoiceNumber|createdInvoice/);
+  assert.match(scheduling, /invoiceCreated: false/);
   assert.match(scheduling, /key: "sps_estimates"/);
   assert.match(scheduling, /key: "sps_schedule"/);
   assert.match(scheduling, /key: "sps_invoices"/);
@@ -79,7 +83,7 @@ test("legacy service-tax totals require explicit owner confirmation before conve
   assert.match(app, /estimateTaxMigrationImpact\(linkedEstimate\)/);
   assert.match(app, /Current invoice rules make services non-taxable/);
   assert.match(app, /taxMigrationConfirmed: taxMigration\.requiresConfirmation/);
-  assert.match(app, /Review and confirm the corrected service-tax total before creating this invoice/);
+  assert.match(app, /Review and confirm the corrected service-tax total before preparing this billing review/);
 });
 
 test("estimate-linked schedule and billing records cannot be orphaned by delete actions", () => {
@@ -92,7 +96,7 @@ test("estimate-linked schedule and billing records cannot be orphaned by delete 
 
   assert.match(app.slice(scheduleStart, scheduleEnd), /selectedStops\.some\(s => s\?\.sourceEstimateId\)/);
   assert.match(app.slice(estimateStart, estimateEnd), /findInvoiceForEstimate\(invoices, target\)/);
-  assert.match(app.slice(estimateStart, estimateEnd), /target\.linkedScheduledStopId \|\| target\.linkedInvoiceId \|\| linkedInvoice/);
+  assert.match(app.slice(estimateStart, estimateEnd), /target\.linkedScheduledStopId \|\| target\.linkedInvoiceId \|\| target\.linkedBillingReviewId \|\| linkedInvoice/);
 });
 
 test("invoice deletion fresh-checks links and fences invoices, estimates, and schedule atomically", () => {

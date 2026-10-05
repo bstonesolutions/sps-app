@@ -60,6 +60,8 @@ function quickBooksTokenRow() {
 }
 
 function installAuthAndTokenMocks(routeFetch) {
+  let reviewClaims = [];
+  let reviewVersion = 1;
   globalThis.fetch = async (url, options = {}) => {
     const href = String(url);
     if (href === "https://supabase.test/auth/v1/user") {
@@ -68,12 +70,19 @@ function installAuthAndTokenMocks(routeFetch) {
     if (href.startsWith("https://supabase.test/rest/v1/qb_tokens")) {
       return jsonResponse(quickBooksTokenRow());
     }
+    if (href.endsWith("/rpc/sps_app_state_batch_cas")) {
+      const operation = JSON.parse(options.body).p_operations.find(row => row.key === "sps_billing_reviews");
+      if (operation.expected_version !== reviewVersion) return jsonResponse([{ applied: false, outcome: "conflict" }]);
+      reviewClaims = JSON.parse(operation.value); reviewVersion += 1;
+      return jsonResponse([{ applied: true, outcome: "applied", current_versions: { sps_billing_reviews: reviewVersion, sps_invoices: 1 } }]);
+    }
     if (href.startsWith("https://supabase.test/rest/v1/app_state?")) {
       return jsonResponse(Object.entries({
         sps_clients: [{ id: "client-42", qbId: "42", name: "Generic Client" }],
         sps_invoices: [], sps_schedule: [],
         sps_maintenance_billing: { version: 2, policies: {}, allocations: {} },
-      }).map(([key, value]) => ({ key, value: JSON.stringify(value), version: 1 })));
+        sps_billing_reviews: reviewClaims,
+      }).map(([key, value]) => ({ key, value: JSON.stringify(value), version: key === "sps_billing_reviews" ? reviewVersion : 1 })));
     }
     return routeFetch(href, options);
   };
@@ -963,6 +972,12 @@ test("QuickBooks create marks a thrown post-create outcome unknown and safely re
     new URL(createUrls[0]).searchParams.get("requestid"),
   );
 
+  const changed = mockResponse();
+  await createInvoiceHandler(authenticatedRequest({ invoice: { ...request.body.invoice, number: "1968" } }), changed);
+  assert.equal(changed.statusCode, 409);
+  assert.equal(changed.body.code, "quickbooks_create_intent_changed");
+  assert.equal(createAttempts, 1, "an unknown create cannot be replaced with changed invoice contents");
+
   const recovered = mockResponse();
   await createInvoiceHandler(request, recovered);
 
@@ -1020,4 +1035,35 @@ test("QuickBooks create keeps a known non-2xx rejection distinct from an unknown
   assert.match(res.body.error, /Duplicate Document Number Error/i);
   assert.equal(Object.hasOwn(res.body, "createOutcomeUnknown"), false);
   assert.equal(Object.hasOwn(res.body, "qbRequestId"), false);
+});
+
+test("a direct invoice rejected by QB can be edited and successfully synced under a new request ID", async () => {
+  const writes = [];
+  let created;
+  installAuthAndTokenMocks(async (href, options = {}) => {
+    const url = new URL(href);
+    if (url.pathname.endsWith("/customer/42")) return jsonResponse({ Customer: { Id: "42" } });
+    if (url.pathname.endsWith("/invoice") && options.method === "POST") {
+      const payload = JSON.parse(options.body);
+      writes.push({ requestId: url.searchParams.get("requestid"), payload });
+      if (writes.length === 1) return jsonResponse({ Fault: { Error: [{ Message: "Invalid line amount" }] } }, 400);
+      created = { ...payload, Id: "synthetic-created", TotalAmt: 125, Balance: 125, SyncToken: "0" };
+      return jsonResponse({ Invoice: created });
+    }
+    if (url.pathname.endsWith("/invoice/synthetic-created")) return jsonResponse({ Invoice: created });
+    throw new Error(`Unexpected fetch: ${href}`);
+  });
+  const invoice = { spsInvoiceId: "direct-correction", qbCustomerId: "42", number: "INV-2001", taxRate: 0,
+    lineItems: [{ qbItemRef: { value: "8", name: "Services" }, description: "Repair", qty: 1, unitPrice: 100, taxable: false }] };
+  const rejected = mockResponse();
+  await createInvoiceHandler(authenticatedRequest({ invoice }), rejected);
+  assert.equal(rejected.body.createRejected, true);
+  const corrected = { ...invoice, lineItems: [{ ...invoice.lineItems[0], unitPrice: 125 }] };
+  const success = mockResponse();
+  await createInvoiceHandler(authenticatedRequest({ invoice: corrected }), success);
+  assert.equal(success.statusCode, 200, JSON.stringify(success.body));
+  assert.equal(success.body.qbId, "synthetic-created");
+  assert.equal(writes.length, 2);
+  assert.notEqual(writes[0].requestId, writes[1].requestId);
+  assert.equal(writes[1].payload.Line[0].Amount, 125);
 });

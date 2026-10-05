@@ -305,17 +305,20 @@ test("field completion is validated server-side and committed through one servic
   assert.equal(res.body.invoiceOutcome.status, "created");
   assert.equal(res.body.invoiceOutcome.kind, "one-off");
   assert.deepEqual(res.body.inventoryDeducted[0].deductions, [{ locationId: "truck", amount: 4 }]);
-  assert.deepEqual(batchBody.p_operations.map((operation) => operation.key).sort(), ["sps_catalog", "sps_clients", "sps_completed", "sps_invoices", "sps_maintenance_billing", "sps_schedule"]);
+  assert.deepEqual(batchBody.p_operations.map((operation) => operation.key).sort(), ["sps_billing_reviews", "sps_catalog", "sps_clients", "sps_completed", "sps_invoices", "sps_maintenance_billing", "sps_schedule"]);
   assert.equal(batchBody.p_operations.find((operation) => operation.key === "sps_clients").expected_version, 2);
   const scheduleFence = batchBody.p_operations.find((operation) => operation.key === "sps_schedule");
   assert.deepEqual(scheduleFence, { key: "sps_schedule", expected_version: 7, check_only: true });
   const writtenClients = JSON.parse(batchBody.p_operations.find((operation) => operation.key === "sps_clients").value);
-  assert.equal(writtenClients[0].balance, "$75");
+  assert.equal(writtenClients[0].balance, "$10", "unconfirmed work never changes customer debt");
   assert.equal(writtenClients[0].history.length, 1);
-  const writtenInvoices = JSON.parse(batchBody.p_operations.find((operation) => operation.key === "sps_invoices").value);
+  const writtenInvoices = JSON.parse(batchBody.p_operations.find((operation) => operation.key === "sps_billing_reviews").value);
   assert.equal(writtenInvoices.length, 1);
   assert.equal(writtenInvoices[0].id, "iv_stop_s1");
-  assert.equal(writtenInvoices[0].status, "Draft");
+  assert.equal(writtenInvoices[0].status, "Review");
+  assert.equal(writtenInvoices[0].number, "");
+  assert.equal(writtenInvoices[0].reviewState, "pending");
+  assert.deepEqual(state.sps_invoices.value, []);
   assert.equal(writtenInvoices[0].lineItems[0].unitPrice, "75");
   assert.equal(state.sps_schedule.version, 7, "the unchanged schedule fence is not rewritten or versioned");
   assert.equal(state.sps_clients.version, 3);
@@ -390,10 +393,10 @@ test("a lost batch response is confirmed from authoritative state and returned a
   assert.deepEqual(res.body.inventoryDeducted[0].deductions, [{ locationId: "truck", amount: 2 }]);
   assert.equal(batchWrites, 1);
   assert.equal(stateReadKeySets.length, 2);
-  assert.deepEqual(stateReadKeySets[1], ["sps_clients", "sps_completed", "sps_invoices"]);
+  assert.deepEqual(stateReadKeySets[1], ["sps_billing_reviews", "sps_clients", "sps_completed", "sps_invoices"]);
   assert.equal(state.sps_clients.value[0].history.length, 1);
-  assert.equal(state.sps_invoices.value.length, 1);
-  assert.equal(state.sps_invoices.value[0].id, "iv_stop_s1");
+  assert.equal(state.sps_invoices.value.length, 0);
+  assert.equal(state.sps_billing_reviews.value[0].id, "iv_stop_s1");
   assert.equal(state.sps_catalog.value.treatments[0].stockByLoc.truck, 3);
 });
 
@@ -457,7 +460,7 @@ test("a pre-commit batch timeout returns an unconfirmed retryable result without
     assert.match(res.body.error, /retry automatically/i);
     assert.doesNotMatch(res.body.error, /nothing (was )?changed/i);
     assert.equal(stateReadKeySets.length, 2);
-    assert.deepEqual(stateReadKeySets[1], ["sps_clients", "sps_completed", "sps_invoices"]);
+    assert.deepEqual(stateReadKeySets[1], ["sps_billing_reviews", "sps_clients", "sps_completed", "sps_invoices"]);
     assert.equal(state.sps_clients.value[0].history.length, 0);
     assert.equal(Object.keys(state.sps_completed.value).length, 0);
     assert.equal(state.sps_invoices.value.length, 0);
@@ -616,8 +619,8 @@ test("server-enforced prepaid maintenance preserves quoted value without changin
   });
   assert.deepEqual(
     writtenOperations.map((operation) => operation.key).sort(),
-    ["sps_clients", "sps_completed", "sps_maintenance_billing", "sps_schedule"],
-    "a covered service with no extras does not write invoices or unchanged catalog data",
+    ["sps_billing_reviews", "sps_clients", "sps_completed", "sps_invoices", "sps_maintenance_billing", "sps_schedule"],
+    "a covered service retains an empty review list and checks invoice evidence without billing",
   );
   const writtenClient = JSON.parse(writtenOperations.find((operation) => operation.key === "sps_clients").value)[0];
   assert.equal(writtenClient.balance, "$410");
@@ -972,22 +975,23 @@ test("the final weekly maintenance visit atomically creates one monthly draft", 
     kind: "monthly",
     period: "2026-08",
     invoiceId: "iv_maint_c1_2026-08",
-    invoiceNumber: "INV-3000",
+    invoiceNumber: "",
+    billingReviewId: "iv_maint_c1_2026-08",
     visitCount: 2,
   });
-  assert.deepEqual(writtenOperations.map((operation) => operation.key).sort(), ["sps_catalog", "sps_clients", "sps_completed", "sps_invoices", "sps_maintenance_billing", "sps_schedule"]);
-  assert.equal(state.sps_invoices.value.length, 1);
-  assert.equal(state.sps_invoices.value[0].lineItems[0].unitPrice, "400");
-  assert.equal(state.sps_invoices.value[0].lineItems[1].qty, "3");
-  assert.deepEqual(state.sps_invoices.value[0].sourceStopIds, ["weekly-1", "weekly-2"]);
+  assert.deepEqual(writtenOperations.map((operation) => operation.key).sort(), ["sps_billing_reviews", "sps_catalog", "sps_clients", "sps_completed", "sps_invoices", "sps_maintenance_billing", "sps_schedule"]);
+  assert.equal(state.sps_invoices.value.length, 0);
+  assert.equal(state.sps_billing_reviews.value[0].lineItems[0].unitPrice, "400");
+  assert.equal(state.sps_billing_reviews.value[0].lineItems[1].qty, "3");
+  assert.deepEqual(state.sps_billing_reviews.value[0].sourceStopIds, ["weekly-1", "weekly-2"]);
 });
 
-test("reopening removes an untouched auto-draft but preserves a sent draft for office review", async () => {
+test("reopening discards an untouched review but preserves an approving review", async () => {
   const team = [{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }];
 
   for (const scenario of [
     { name: "untouched", editInvoice: (invoice) => invoice, expectedStatus: "removed", invoiceWriteOnReverse: true },
-    { name: "sent", editInvoice: (invoice) => ({ ...invoice, status: "Sent", sentDate: "08/11/2026" }), expectedStatus: "review_required", invoiceWriteOnReverse: false },
+    { name: "approving", editInvoice: (invoice) => ({ ...invoice, reviewState: "approving", approval: { requestKey: "claim" } }), expectedStatus: "review_required", invoiceWriteOnReverse: false },
   ]) {
     const state = {
       sps_clients: { value: [{ id: "c1", name: "Client", balance: "$0", history: [] }], version: 1 },
@@ -1027,11 +1031,11 @@ test("reopening removes an untouched auto-draft but preserves a sent draft for o
       },
     }, completedResponse);
     assert.equal(completedResponse.statusCode, 200);
-    assert.equal(state.sps_invoices.value.length, 1);
+    assert.equal(state.sps_billing_reviews.value.length, 1);
 
-    state.sps_invoices = {
-      value: [scenario.editInvoice(state.sps_invoices.value[0])],
-      version: state.sps_invoices.version + 1,
+    state.sps_billing_reviews = {
+      value: [scenario.editInvoice(state.sps_billing_reviews.value[0])],
+      version: state.sps_billing_reviews.version + 1,
     };
     const reopenedResponse = mockResponse();
     await stopCompletionHandler({
@@ -1043,9 +1047,10 @@ test("reopening removes an untouched auto-draft but preserves a sent draft for o
     assert.equal(reopenedResponse.statusCode, 200, scenario.name);
     assert.equal(reopenedResponse.body.invoiceOutcome.status, scenario.expectedStatus, scenario.name);
     assert.equal(reopenedResponse.body.invoiceOutcome.safeToRemove, scenario.name === "untouched", scenario.name);
-    assert.equal(state.sps_invoices.value.length, scenario.name === "untouched" ? 0 : 1, scenario.name);
+    assert.equal(state.sps_billing_reviews.value.length, 1, "reopen leaves a retry-safe tombstone");
+    assert.equal(state.sps_billing_reviews.value[0].reviewState, scenario.name === "untouched" ? "discarded" : "approving");
     assert.equal(
-      batches[1].some((operation) => operation.key === "sps_invoices"),
+      batches[1].some((operation) => operation.key === "sps_billing_reviews" && !operation.check_only),
       scenario.invoiceWriteOnReverse,
       scenario.name,
     );
@@ -1345,7 +1350,7 @@ test("estimate completion validates the linked invoice's client and source estim
   }
 });
 
-test("estimate-linked completion without a draft invoice fails before any shared write", async () => {
+test("estimate completion without an invoice or frozen quote scope fails before any shared write", async () => {
   const team = [{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }];
   const stop = {
     sid: "stop-needs-invoice",
@@ -1402,11 +1407,123 @@ test("estimate-linked completion without a draft invoice fails before any shared
   }, res);
 
   assert.equal(res.statusCode, 409);
-  assert.equal(res.body.code, "estimate-invoice-required");
-  assert.match(res.body.error, /draft invoice/i);
+  assert.equal(res.body.code, "estimate-scope-missing");
+  assert.match(res.body.error, /quoted scope/i);
   assert.equal(batchWrites, 0);
   assert.deepEqual(state.sps_completed.value, {});
   assert.equal(state.sps_clients.value[0].history.length, 0);
+});
+
+test("estimate completion creates an unnumbered review from frozen scope without a preliminary invoice", async () => {
+  const team = [{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }];
+  const stop = { sid: "estimate-review-stop", clientId: "c1", source: "estimate", sourceEstimateId: "e1", plannedMaterials: [],
+    estimateItems: [{ id: "line-1", description: "Approved project", quantity: "1", unitPrice: "500", taxable: false, kind: "custom" }],
+    estimateFulfillment: { state: "scheduled", completionReceiptId: null, billingDisposition: "billing-review" } };
+  const state = {
+    sps_clients: { version: 1, value: [{ id: "c1", name: "Client", balance: "$20", history: [] }] },
+    sps_catalog: { version: 1, value: { locations: [], products: [], parts: [], treatments: [] } },
+    sps_completed: { version: 1, value: {} }, sps_schedule: { version: 1, value: [{ date: "10/05/2026", stops: [stop] }] },
+    sps_invoices: { version: 1, value: [] },
+  };
+  const requests = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const href = String(url); requests.push(href);
+    if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
+    if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
+    if (href.includes("/rest/v1/app_state?")) return response(stateRows(href, state));
+    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+      applyBatchOperations(state, JSON.parse(options.body).p_operations);
+      return response([{ applied: true, outcome: "applied", current_versions: {} }]);
+    }
+    throw new Error(`Unexpected external action: ${href}`);
+  };
+  const res = mockResponse();
+  await stopCompletionHandler({ method: "POST", headers: { authorization: "Bearer field-token" }, body: {
+    mode: "complete", clientId: "c1", sid: stop.sid, idempotencyKey: "estimate-review-completion", entry: { invoice: "$9999" },
+  } }, res);
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.billingReviewOutcome.billingReviewId, "iv_est_e1");
+  assert.equal(res.body.billingReview, undefined, "field completion receipts do not expose owner billing lines or costs");
+  assert.equal(state.sps_billing_reviews.value[0].number, "");
+  assert.equal(state.sps_billing_reviews.value[0].lineItems[0].unitPrice, "500");
+  assert.deepEqual(state.sps_invoices.value, []);
+  assert.equal(state.sps_clients.value[0].balance, "$20");
+  assert.equal(state.sps_schedule.value[0].stops[0].linkedBillingReviewId, "iv_est_e1");
+  assert.equal(state.sps_schedule.value[0].stops[0].linkedInvoiceId, undefined);
+  assert.equal(requests.some(url => /quickbooks|send-|messages/.test(url)), false);
+});
+
+test("a lost completion response recovers an owner-prepared estimate review without replacing edited pricing", async () => {
+  const team = [{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }];
+  const stop = { sid: "estimate-prepared-stop", clientId: "c1", source: "estimate", sourceEstimateId: "e1", linkedBillingReviewId: "iv_est_e1", plannedMaterials: [],
+    estimateItems: [{ id: "line-1", description: "Approved project", quantity: "1", unitPrice: "500", taxable: false, kind: "custom" }],
+    estimateFulfillment: { state: "scheduled", completionReceiptId: null, billingDisposition: "billing-review" } };
+  const state = {
+    sps_clients: { version: 1, value: [{ id: "c1", name: "Client", balance: "$20", history: [] }] },
+    sps_catalog: { version: 1, value: { locations: [], products: [], parts: [], treatments: [] } },
+    sps_completed: { version: 1, value: {} }, sps_schedule: { version: 1, value: [{ date: "10/05/2026", stops: [stop] }] },
+    sps_invoices: { version: 1, value: [] },
+    sps_billing_reviews: { version: 1, value: [{ id: "iv_est_e1", clientId: "c1", sourceEstimateId: "e1", recordType: "billing-review", status: "Review", reviewState: "pending", reviewRevision: 2, number: "", lineItems: [{ id: "edited", desc: "Owner corrected price", qty: "1", unitPrice: "450", taxable: false }] }] },
+  };
+  let writes = 0;
+  globalThis.fetch = async (url, options = {}) => {
+    const href = String(url);
+    if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
+    if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
+    if (href.includes("/rest/v1/app_state?")) return response(stateRows(href, state));
+    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+      writes += 1;
+      applyBatchOperations(state, JSON.parse(options.body).p_operations);
+      throw new TypeError("fetch failed after commit");
+    }
+    throw new Error(`Unexpected external action: ${href}`);
+  };
+  const res = mockResponse();
+  await stopCompletionHandler({ method: "POST", headers: { authorization: "Bearer field-token" }, body: {
+    mode: "complete", clientId: "c1", sid: stop.sid, idempotencyKey: "estimate-prepared-completion", entry: { invoice: "$9999" },
+  } }, res);
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.confirmedAfterUncertainWrite, true);
+  assert.equal(writes, 1);
+  assert.equal(state.sps_billing_reviews.value[0].lineItems[0].unitPrice, "450");
+  assert.equal(state.sps_billing_reviews.value[0].sourceCompletionReceiptId, res.body.receiptId);
+  assert.equal(state.sps_clients.value[0].balance, "$20");
+  assert.deepEqual(state.sps_invoices.value, []);
+});
+
+test("estimate completion recovers an exact invoice confirmed after scheduling without issuing again", async () => {
+  const team = [{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }];
+  const stop = { sid: "estimate-already-billed", clientId: "c1", source: "estimate", sourceEstimateId: "e1", plannedMaterials: [],
+    estimateItems: [{ id: "line-1", description: "Approved project", quantity: "1", unitPrice: "500", taxable: false, kind: "custom" }],
+    estimateFulfillment: { state: "scheduled", completionReceiptId: null, billingDisposition: "billing-review" } };
+  const invoice = { id: "iv_est_e1", clientId: "c1", sourceEstimateId: "e1", number: "INV-1001", qbId: "qb-1", status: "Draft", lineItems: [{ id: "billed", desc: "Already confirmed", qty: "1", unitPrice: "500" }] };
+  const state = {
+    sps_clients: { version: 1, value: [{ id: "c1", name: "Client", balance: "$20", history: [] }] },
+    sps_catalog: { version: 1, value: { locations: [], products: [], parts: [], treatments: [] } },
+    sps_completed: { version: 1, value: {} }, sps_schedule: { version: 1, value: [{ date: "10/05/2026", stops: [stop] }] },
+    sps_invoices: { version: 1, value: [invoice] },
+  };
+  globalThis.fetch = async (url, options = {}) => {
+    const href = String(url);
+    if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
+    if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
+    if (href.includes("/rest/v1/app_state?")) return response(stateRows(href, state));
+    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+      applyBatchOperations(state, JSON.parse(options.body).p_operations);
+      return response([{ applied: true, outcome: "applied", current_versions: {} }]);
+    }
+    throw new Error(`Unexpected external action: ${href}`);
+  };
+  const res = mockResponse();
+  await stopCompletionHandler({ method: "POST", headers: { authorization: "Bearer field-token" }, body: {
+    mode: "complete", clientId: "c1", sid: stop.sid, idempotencyKey: "estimate-after-confirmation", entry: { invoice: "$9999" },
+  } }, res);
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.deepEqual(state.sps_invoices.value, [invoice]);
+  assert.deepEqual(state.sps_billing_reviews.value, []);
+  assert.equal(state.sps_schedule.value[0].stops[0].linkedInvoiceId, invoice.id);
+  assert.equal(state.sps_clients.value[0].history[0].billingDisposition, "linked-invoice");
+  assert.equal(state.sps_clients.value[0].balance, "$20");
 });
 
 test("server rejects completing a cancelled scheduled stop before any batch write", async () => {
@@ -1521,7 +1638,7 @@ test("same completion key is idempotent, a competing key conflicts, and requeste
   assert.equal(first.statusCode, 200);
   assert.equal(first.body.applied, true);
   assert.equal(first.body.invoiceOutcome.status, "created");
-  assert.deepEqual(firstBatchKeys, ["sps_catalog", "sps_clients", "sps_completed", "sps_invoices", "sps_maintenance_billing", "sps_schedule"], "the draft invoice, billing policy fence, and requested inventory fence commit with the stop");
+  assert.deepEqual(firstBatchKeys, ["sps_billing_reviews", "sps_catalog", "sps_clients", "sps_completed", "sps_invoices", "sps_maintenance_billing", "sps_schedule"], "the draft invoice, billing policy fence, and requested inventory fence commit with the stop");
 
   const retry = await invoke("attempt-device-one");
   assert.equal(retry.statusCode, 200);

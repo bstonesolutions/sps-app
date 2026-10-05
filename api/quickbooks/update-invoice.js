@@ -16,6 +16,7 @@ import { buildUsTxnTaxDetail } from "./qb-tax.js";
 import { requireUser } from "../_auth.js";
 import { quickBooksMaintenanceGuard } from "./maintenance-guard.js";
 import { invoiceServiceDescriptionIssue, formatInvoiceServiceLineDescription } from "../../invoiceServiceDescription.js";
+import { reserveDirectInvoiceAccountingClaim } from "../_billing-review-claims.js";
 
 export default async function handler(req, res) {
   setCors(res);
@@ -247,6 +248,7 @@ export default async function handler(req, res) {
       };
     }
 
+    await reserveDirectInvoiceAccountingClaim({ ...invoice, number: invoice.number || existing.DocNumber }, { requestKey: `update:${invoice.qbId}`, mode: "update" });
     const updRes = await fetch(`${base}/invoice?minorversion=65`, {
       method: "POST",
       headers,

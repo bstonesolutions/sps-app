@@ -57,7 +57,7 @@ test("staff portal previews and accounting review do not expose invoice data wit
   assert.match(invoices, /if \(!canReviewAccounting\) return/);
   assert.match(invoices, /canReviewAccounting && localReviewInvoices\.length > 0/);
   assert.doesNotMatch(invoices, /data-invoice-review-balance/);
-  assert.match(invoices, /\{\(perms\.seeTotalSales \|\| perms\.isAdmin\) && <button[\s\S]*?data-invoice-summary-rail/);
+  assert.match(invoices, /\{!billingReviewSelected && \(perms\.seeTotalSales \|\| perms\.isAdmin\) && <button[\s\S]*?data-invoice-summary-rail/);
   assert.doesNotMatch(invoices, /data-invoice-summary-rail[\s\S]{0,500}disabled=\{!\(perms\.seeTotalSales/);
 });
 

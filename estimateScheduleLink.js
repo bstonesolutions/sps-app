@@ -345,11 +345,15 @@ export function scheduleApprovedEstimate(estimate, schedule, {
       throw new Error("This estimate and its scheduled stop are linked to different invoices. Review the links before continuing.");
     }
     const linkedInvoiceId = estimateInvoiceId || stopInvoiceId;
+    const estimateReviewId = text(estimate?.linkedBillingReviewId);
+    const stopReviewId = text(existing.stop?.linkedBillingReviewId);
+    if (estimateReviewId && stopReviewId && estimateReviewId !== stopReviewId) throw new Error("This estimate and scheduled stop have different billing reviews.");
+    const linkedBillingReviewId = estimateReviewId || stopReviewId;
     const sourceEstimateStatus = text(estimate?.status) || text(existing.stop?.sourceEstimateStatus);
     const fulfillment = existing.stop?.estimateFulfillment || {};
     const billingDisposition = linkedInvoiceId
       ? "linked-invoice"
-      : (text(fulfillment.billingDisposition) || "convert-estimate-once");
+      : "billing-review";
     const estimateTaxEnabled = estimate?.taxEnabled === true;
     const estimateTaxRate = text(estimate?.taxRate);
     const estimateTaxModel = text(estimate?.taxModel);
@@ -368,6 +372,7 @@ export function scheduleApprovedEstimate(estimate, schedule, {
     );
     const stopNeedsUpdate = (
       (linkedInvoiceId && stopInvoiceId !== linkedInvoiceId)
+      || (linkedBillingReviewId && stopReviewId !== linkedBillingReviewId)
       || text(existing.stop?.sourceEstimateStatus) !== sourceEstimateStatus
       || existing.stop?.estimateTaxEnabled !== estimateTaxEnabled
       || text(existing.stop?.estimateTaxRate) !== estimateTaxRate
@@ -383,6 +388,7 @@ export function scheduleApprovedEstimate(estimate, schedule, {
         ...existing.stop,
         sourceEstimateStatus,
         ...(linkedInvoiceId ? { linkedInvoiceId } : {}),
+        ...(linkedBillingReviewId ? { linkedBillingReviewId } : {}),
         estimateTaxEnabled,
         estimateTaxRate,
         estimateTaxModel,
@@ -411,6 +417,7 @@ export function scheduleApprovedEstimate(estimate, schedule, {
     const estimateNeedsUpdate = (
       text(estimate.linkedScheduledStopId) !== text(nextStop.sid)
       || (!estimateInvoiceId && !!linkedInvoiceId)
+      || (!estimateReviewId && !!linkedBillingReviewId)
     );
     return {
       estimate: estimateNeedsUpdate
@@ -418,6 +425,7 @@ export function scheduleApprovedEstimate(estimate, schedule, {
           ...estimate,
           linkedScheduledStopId: nextStop.sid,
           ...(linkedInvoiceId ? { linkedInvoiceId } : {}),
+          ...(linkedBillingReviewId ? { linkedBillingReviewId } : {}),
         }
         : estimate,
       schedule: nextSchedule,
@@ -436,6 +444,7 @@ export function scheduleApprovedEstimate(estimate, schedule, {
   const estimateItems = rawLines.map((line, index) => estimateLineSnapshot(line, index, estimate));
   const plannedMaterials = plannedMaterialsFromLines(estimateItems);
   const linkedInvoiceId = text(estimate?.linkedInvoiceId);
+  const linkedBillingReviewId = text(estimate?.linkedBillingReviewId);
   const sid = estimateScheduledStopId(estimate);
   const timestamp = new Date(createdAt).toISOString();
   const stop = {
@@ -454,6 +463,7 @@ export function scheduleApprovedEstimate(estimate, schedule, {
     sourceEstimateTitle: estimate.title || "",
     sourceEstimateStatus: estimate.status,
     ...(linkedInvoiceId ? { linkedInvoiceId } : {}),
+    ...(linkedBillingReviewId ? { linkedBillingReviewId } : {}),
     estimateTaxEnabled: estimate?.taxEnabled === true,
     estimateTaxRate: text(estimate?.taxRate),
     estimateTaxModel: text(estimate?.taxModel),
@@ -482,7 +492,7 @@ export function scheduleApprovedEstimate(estimate, schedule, {
       state: "scheduled",
       scheduledAt: timestamp,
       inventoryDisposition: "consume-on-completion",
-      billingDisposition: linkedInvoiceId ? "linked-invoice" : "convert-estimate-once",
+      billingDisposition: linkedInvoiceId ? "linked-invoice" : "billing-review",
       completionReceiptId: null,
       completedAt: null,
     },
@@ -513,6 +523,7 @@ export function claimScheduledEstimateCompletion(stop, {
   completionReceiptId,
   completedAt = new Date().toISOString(),
   linkedInvoiceId,
+  linkedBillingReviewId,
 } = {}) {
   if (!stop || text(stop.source) !== "estimate" || !text(stop.sourceEstimateId)) {
     throw new Error("This stop is not linked to an estimate.");
@@ -536,18 +547,20 @@ export function claimScheduledEstimateCompletion(stop, {
   }
 
   const invoiceId = text(linkedInvoiceId || stop.linkedInvoiceId);
+  const reviewId = text(linkedBillingReviewId || stop.linkedBillingReviewId);
   const inventoryUsage = (Array.isArray(stop.plannedMaterials) ? stop.plannedMaterials : [])
     .map((material) => copy(material));
   const nextStop = {
     ...stop,
     ...(invoiceId ? { linkedInvoiceId: invoiceId } : {}),
+    ...(reviewId ? { linkedBillingReviewId: reviewId } : {}),
     estimateFulfillment: {
       ...fulfillment,
       version: ESTIMATE_SCHEDULE_LINK_VERSION,
       state: "completed",
       completionReceiptId: receiptId,
       completedAt,
-      billingDisposition: invoiceId ? "linked-invoice" : "convert-estimate-once",
+      billingDisposition: invoiceId ? "linked-invoice" : "billing-review",
     },
   };
 
@@ -556,7 +569,8 @@ export function claimScheduledEstimateCompletion(stop, {
     alreadyClaimed: false,
     inventoryUsage,
     shouldPostInventory: inventoryUsage.length > 0,
-    shouldCreateInvoice: !invoiceId,
+    shouldCreateInvoice: false,
+    shouldCreateBillingReview: !invoiceId && !reviewId,
     // Revenue belongs to the one linked/converted invoice. Completion records actual costs and
     // usage, but must never post a second sale for the same approved estimate.
     shouldPostRevenue: false,

@@ -27,11 +27,24 @@ const qbInvoice = (id = "qb-draft") => ({
 
 function install({ clients = [client], invoices = [sourceInvoice], billing = ledger(), schedule = [], existing = qbInvoice(), stateFailure = false } = {}) {
   const calls = [];
+  let reviewClaims = [];
+  let reviewVersion = 1;
   globalThis.fetch = async (url, options = {}) => {
     const href = String(url);
     calls.push({ href, method: options.method || "GET", body: options.body });
     if (href.endsWith("/auth/v1/user")) return response({ id: "owner", email: "owner@example.test" });
+    if (href.endsWith("/rpc/sps_app_state_batch_cas")) {
+      const operation = JSON.parse(options.body).p_operations.find(row => row.key === "sps_billing_reviews");
+      if (operation.expected_version !== reviewVersion) return response([{ applied: false, outcome: "conflict" }]);
+      reviewClaims = JSON.parse(operation.value); reviewVersion += 1;
+      return response([{ applied: true, outcome: "applied", current_versions: { sps_billing_reviews: reviewVersion, sps_invoices: 1 } }]);
+    }
     if (href.includes("/rest/v1/app_state?")) {
+      // Review authorization is a separate narrow lookup from maintenance coverage.
+      if (href.includes("key=in.(sps_billing_reviews,sps_invoices)")) return response([
+        { key: "sps_billing_reviews", value: JSON.stringify(reviewClaims), version: reviewVersion },
+        { key: "sps_invoices", value: JSON.stringify(invoices), version: 1 },
+      ]);
       if (stateFailure) return response({ error: "unavailable" }, 503);
       return response(Object.entries({ sps_clients: clients, sps_invoices: invoices, sps_maintenance_billing: billing, sps_schedule: schedule })
         .filter(([, value]) => value !== undefined)
@@ -236,7 +249,7 @@ test("explicit repair-only charges do not depend on coverage availability, while
     await createInvoice(request(buildQuickBooksInvoicePayload({ ...draft(), lineItems: [{ ...serviceLine, desc: description }] }, client, {})), result);
     assert.equal(result.statusCode, 200, description);
     assert.equal(qbWrites(calls).length, 1);
-    assert.equal(calls.some(call => call.href.includes("/rest/v1/app_state?")), false);
+    assert.equal(calls.some(call => call.href.includes("/rest/v1/app_state?") && !call.href.includes("key=in.(sps_billing_reviews,sps_invoices)")), false);
   }
   for (const line of [{ ...serviceLine, desc: "Services" }, { ...serviceLine, desc: "Services", sourceStopId: "stop-a" }, { ...serviceLine, desc: "Services", billingMode: "one-off" }]) {
     const calls = install({ stateFailure: true });

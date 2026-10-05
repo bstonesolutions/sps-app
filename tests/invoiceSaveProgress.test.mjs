@@ -70,7 +70,7 @@ test("completed-visit reservation advances the recovery baseline before QuickBoo
 test("invoice editor presents a restrained SPS checkpoint before the QuickBooks action", async () => {
   const app = await readApp();
   const start = app.indexOf("data-invoice-save-actions");
-  const end = app.indexOf("{!qbConnected &&", start);
+  const end = app.indexOf("{!billingReview && !qbConnected &&", start);
   const actions = app.slice(start, end);
 
   assert.ok(start > 0 && end > start);
@@ -145,7 +145,10 @@ test("every invoice editor entry point receives the progress persistence callbac
   assert.match(app, /function EstimatesScreen\([\s\S]*?onPersistInvoiceProgress/);
   const editorTags = app.match(/<InvoiceEditor\b[\s\S]*?\/>/g) || [];
   assert.ok(editorTags.length >= 5);
-  editorTags.forEach((tag) => assert.match(tag, /onPersistProgress=/));
+  editorTags.forEach((tag) => {
+    if (/\bbillingReview(?:\s|[=>])/.test(tag)) assert.match(tag, /onSaveReview=/);
+    else assert.match(tag, /onPersistProgress=/);
+  });
   assert.match(app, /onPersistProgress=\{onPersistInvoiceProgress\}/);
   assert.match(app, /onPersistInvoiceProgress=\{handlePersistInvoiceProgress\}/);
   assert.match(app, /onPersistProgress=\{handlePersistInvoiceProgress\}/);

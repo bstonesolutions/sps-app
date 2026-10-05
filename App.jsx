@@ -21,7 +21,7 @@ import { inventoryAdjustmentInputIsValid, inventoryAdjustmentResult, inventoryTr
 import { inventoryPackageCost } from "./inventoryPricing";
 import { stableKeyboardInset } from "./keyboardViewport";
 import { ESTIMATE_CHARGE_TYPES, estimateChargeBreakdown, estimateLineChargeLabel, estimateLineChargeType } from "./estimateBreakdown";
-import { completeEstimateWithInvoice, estimateTaxMigrationImpact, estimateToDraftInvoice, findInvoiceForEstimate, normalizeEstimateTaxForInvoice } from "./estimateInvoiceConversion";
+import { completeEstimateWithInvoice, estimateTaxMigrationImpact, findInvoiceForEstimate, normalizeEstimateTaxForInvoice } from "./estimateInvoiceConversion";
 import { findScheduledStopForEstimate, scheduleApprovedEstimate } from "./estimateScheduleLink";
 import { findInvoiceDeletionReferences, invoiceDeletionBlockedMessage, unlinkInvoiceDeletionReferences } from "./invoiceDeletionGuard";
 import { applySafeBulkInvoiceEdits, invoiceSelectionForVisible, pruneInvoiceSelection, summarizeSelectedInvoices } from "./invoiceBulkActions";
@@ -32,6 +32,7 @@ import { assertInvoiceDeliveryCoverage, invoiceDeliveryIdentity, invoiceDelivery
 import { deleteSelectedInvoiceDrafts, invoiceBulkDeleteEligibility, invoiceDeletionReviewMatches, partitionInvoiceBulkDeletion, unlinkUnpaidInvoiceCoverage } from "./invoiceBulkDeletion";
 import { emptyMaintenancePaymentLedger, normalizeMaintenancePaymentLedger } from "./maintenancePaymentLedger";
 import InvoiceClientPicker from "./InvoiceClientPicker";
+import BillingReviewQueue from "./BillingReviewQueue.jsx";
 import InvoiceDeletionReview, { InvoiceDeletionConflicts } from "./InvoiceDeletionReview.jsx";
 import { initialInvoiceClientId, invoiceClientSnapshot, resolveInvoiceClient } from "./invoiceClientSelection";
 import { invoiceMaintenanceCoverageIssue, withMatchedMaintenanceServiceMonths } from "./maintenanceInvoiceCoverage";
@@ -10993,9 +10994,6 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
     setSaveError("");
     try {
       if (!savedInvoice) throw new Error("Enter a valid nonnegative visit amount before saving.");
-      if (stop.sourceEstimateId && !stop.linkedInvoiceId) {
-        throw new Error("This estimate-linked stop needs its draft invoice first. Open the estimate, choose Create draft invoice, then reopen this stop.");
-      }
       const completionEntry = buildEntry();
       const fingerprint = JSON.stringify(completionEntry);
       // An exact manual retry reuses its key after a lost response. If the tech edits the draft
@@ -11008,7 +11006,7 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
       // close this sheet immediately while the same idempotency key is retried in the background.
       const result = await onComplete(client?.id ?? stop.clientId ?? stop.id, completionEntry, stop.sid, completionAttempt.current.key, buildDeliveryIntent());
       if (result && result.ok === false) throw new Error(result.error || "The completed stop was not saved.");
-      setInvoiceOutcome(result?.invoiceOutcome || null);
+      setInvoiceOutcome(result?.billingReviewOutcome || result?.invoiceOutcome || null);
       if (result?.receiptId) ctx.reportId = result.receiptId;
       if (result?.confirmed) {
         completionFinished.current = true;
@@ -11073,7 +11071,7 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
       const activeKey = completionAttempt.current.key;
       if (activeKey && String(item.idempotencyKey) !== String(activeKey)) return;
       setCompletionSync({ id: item.id, state: item.state, error: item.lastError || "", retryAt: item.retryAt || 0 });
-      if (item.invoiceOutcome) setInvoiceOutcome(item.invoiceOutcome);
+      if (item.billingReviewOutcome || item.invoiceOutcome) setInvoiceOutcome(item.billingReviewOutcome || item.invoiceOutcome);
       if (item.state === "saved") {
         completionFinished.current = true;
         const delivery = item.delivery || {};
@@ -11243,7 +11241,9 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
           )}
           {completionConfirmed && canManageInvoiceAccounting(perms) && invoiceOutcome?.status === "created" && (
             <div style={{ maxWidth: 420, margin: "0 auto 12px", padding: "10px 12px", borderRadius: 11, background: hexA("#16a34a", 0.08), color: "#15803d", fontSize: 12, fontWeight: 750, lineHeight: 1.4 }}>
-              {invoiceOutcome.kind === "monthly" ? `Monthly draft created from ${invoiceOutcome.visitCount || "the completed"} visits.` : "Draft invoice created for office review."}
+              {invoiceOutcome.billingReviewId
+                ? invoiceOutcome.kind === "monthly" ? `Billing review prepared from ${invoiceOutcome.visitCount || "the completed"} visits.` : "Billing review ready in Invoices."
+                : "Billing record saved."}
             </div>
           )}
           {completionConfirmed && canManageInvoiceAccounting(perms) && invoiceOutcome?.maintenanceChargeHeld && (
@@ -18859,7 +18859,27 @@ function InvoiceServiceMonth({ invoice, onChange, T }) {
   );
 }
 
-function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCatalog, presetClientId, maintenanceLedger: providedMaintenanceLedger = null, schedule = [], onSave, onPersistProgress, onResolveReview, onClose, onDelete }) {
+async function requestBillingReview(payload = null) {
+  const response = await fetch(`${PROD_URL}/api/billing-review`, {
+    method: payload ? "POST" : "GET",
+    headers: await authHeaders(payload ? { "Content-Type": "application/json" } : {}),
+    cache: "no-store",
+    ...(payload ? { body: JSON.stringify(payload) } : {}),
+  });
+  const data = await response.json().catch(() => ({}));
+  if ((!response.ok || !data.ok) && !data.pending) {
+    throw Object.assign(new Error(data.error || "Billing review could not be confirmed. Refresh and try again."), { data });
+  }
+  return data;
+}
+
+async function refreshBillingInvoiceState() {
+  const result = await store.refreshChanged(["sps_invoices", "sps_estimates", "sps_schedule"], { reconcileUnchanged: true });
+  if (!result?.ok) throw new Error("Billing was saved, but this device could not refresh the invoice list. Refresh before making another change.");
+  return result;
+}
+
+function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCatalog, presetClientId, maintenanceLedger: providedMaintenanceLedger = null, schedule = [], onSave, onPersistProgress, onResolveReview, onClose, onDelete, billingReview = false, onSaveReview, onConfirmReview, onDiscardReview, onLoadInvoiceNumbers }) {
   const { T, perms } = useApp();
   const canSeeLineCost = !!(perms.isAdmin || perms.seeProfit || perms.seeInventoryCost);
   const invoiceVp = useViewport();
@@ -18871,7 +18891,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
 
   const fresh = () => ({
     id: `iv${Date.now()}`,
-    number: `${(invoicing && invoicing.numberPrefix != null) ? invoicing.numberPrefix : "INV-"}${nextInvoiceNumber(invoices, invoicing)}`,
+    number: billingReview ? "" : `${(invoicing && invoicing.numberPrefix != null) ? invoicing.numberPrefix : "INV-"}${nextInvoiceNumber(invoices, invoicing)}`,
     clientId: initialInvoiceClientId(clients, presetClientId),
     date: todayMDY(),
     dueDate: addDaysMDY(todayMDY(), invoicing.dueDays),
@@ -18898,6 +18918,36 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   const [qbReviewError, setQbReviewError] = useState("");
   const [qbState, setQbState] = useState("idle"); // idle | sending | done | error
   const [qbMsg, setQbMsg] = useState("");
+  const [reviewBusy, setReviewBusy] = useState("");
+  const [reviewMessage, setReviewMessage] = useState("");
+  const [reviewError, setReviewError] = useState(false);
+  const [discardReviewPrompt, setDiscardReviewPrompt] = useState(false);
+  const reviewBusyRef = useRef(false);
+  const reviewLocked = billingReview && (inv.reviewState === "approving" || (!!inv.approval && inv.approval.state !== "rejected"));
+  // A number choice is only an intent for confirmation. It never becomes part of
+  // the saved review or changes the sequence before the server claims it.
+  const reviewNumberId = useId();
+  const [reviewNumberMode, setReviewNumberMode] = useState("automatic");
+  const [reviewInvoiceNumber, setReviewInvoiceNumber] = useState("");
+  const [reviewAvailableNumbers, setReviewAvailableNumbers] = useState([]);
+  const [reviewNextNumber, setReviewNextNumber] = useState("");
+  const [reviewNumbersLoading, setReviewNumbersLoading] = useState(false);
+  const [reviewNumbersError, setReviewNumbersError] = useState("");
+  const loadReviewInvoiceNumbers = async () => {
+    if (reviewLocked || reviewBusyRef.current || reviewNumbersLoading || typeof onLoadInvoiceNumbers !== "function") return;
+    setReviewNumbersLoading(true);
+    setReviewNumbersError("");
+    try {
+      const result = await onLoadInvoiceNumbers();
+      if (!Array.isArray(result?.availableNumbers)) throw new Error("Available invoice numbers could not be loaded. Try again or enter a number.");
+      setReviewAvailableNumbers([...new Set(result.availableNumbers.map(value => String(value || "").trim()).filter(Boolean))]);
+      setReviewNextNumber(String(result.nextNumber || "").trim());
+    } catch (error) {
+      setReviewNumbersError(error?.message || "Available invoice numbers could not be loaded.");
+    } finally {
+      setReviewNumbersLoading(false);
+    }
+  };
   const clearSaveError = () => {
     editRevisionRef.current += 1;
     setSendStep(null);
@@ -18907,6 +18957,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     setQbMsg("");
   };
   const withLocalInvoiceEdit = (current, patch, { replace = false } = {}) => {
+    if (billingReview && (reviewBusyRef.current || current.reviewState === "approving" || (current.approval && current.approval.state !== "rejected"))) return current;
     // A reconciliation choice is applied to the latest confirmed SPS record. Do not let
     // an editable-looking draft collect changes that would be discarded by that choice.
     // Choosing the SPS version below clears this lock and makes the form editable again.
@@ -19288,6 +19339,59 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     return { ok: false, error: "Invoices changed repeatedly on another device. Refresh and try again." };
   };
 
+  const performReviewAction = async (action) => {
+    if (reviewBusyRef.current) return;
+    const requestedNumber = !reviewLocked && reviewNumberMode !== "automatic" ? reviewInvoiceNumber.trim() : "";
+    if (action === "confirm" && !reviewLocked && reviewNumberMode !== "automatic" && !requestedNumber) {
+      setReviewError(true);
+      setReviewMessage(reviewNumberMode === "available" ? "Choose an available invoice number, or use Automatic." : "Enter an invoice number, or use Automatic.");
+      return;
+    }
+    const candidate = action === "discard" || reviewLocked ? inv : selectedClientSnapshot();
+    if (!candidate) return;
+    reviewBusyRef.current = true;
+    setReviewBusy(action);
+    setReviewMessage("");
+    setReviewError(false);
+    try {
+      if (action === "discard") {
+        const result = await onDiscardReview(candidate);
+        if (!result?.ok) throw new Error("The review was not removed. Try again.");
+        onClose();
+        return;
+      }
+      let saved = candidate;
+      if (!reviewLocked) {
+        const receipt = await onSaveReview(candidate);
+        saved = receipt?.review;
+        if (!saved || saved.id !== candidate.id) throw new Error("The review could not be verified in SPS.");
+        setInv(saved);
+      }
+      if (action === "save") {
+        setReviewMessage("Review saved.");
+        return;
+      }
+      // Freeze this editor during confirmation, including an unknown network outcome.
+      // Only the server can release the lock after checking the saved attempt.
+      setInv({ ...saved, reviewState: "approving" });
+      const result = await onConfirmReview(saved, { retry: reviewLocked, ...(requestedNumber ? { invoiceNumber: requestedNumber } : {}) });
+      if (result?.review) setInv(result.review);
+      if (result?.pending) {
+        setReviewMessage(result.error || "Sync is still being confirmed. Use Retry sync to check this same invoice.");
+        return;
+      }
+      if (!result?.invoice?.qbId) throw new Error("QuickBooks has not confirmed this invoice yet. Retry sync to check it.");
+      onClose();
+    } catch (error) {
+      if (error?.data?.review) setInv(error.data.review);
+      setReviewError(true);
+      setReviewMessage(error?.message || "This billing change could not be confirmed. Try again.");
+    } finally {
+      reviewBusyRef.current = false;
+      setReviewBusy("");
+    }
+  };
+
   // Save a confirmed SPS checkpoint without entering any QuickBooks or client-delivery path.
   // The root callback performs the completed-visit validation and atomic shared-state write.
   const saveProgress = async () => {
@@ -19600,12 +19704,13 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   const sendClient = sendStep ? resolveInvoiceClient(clients, sendStep.clientId) : null;
   // Coverage is checked before saving. The successful result opens optional
   // delivery controls; showing this step never sends a customer message.
-  if (sendStep && sendClient) return <InvoiceSendStep invoice={sendStep} client={sendClient} onSent={onSave} onClose={onClose} />;
+  if (!billingReview && sendStep && sendClient) return <InvoiceSendStep invoice={sendStep} client={sendClient} onSent={onSave} onClose={onClose} />;
 
   return (
-    <Modal title={isPersisted || invoice ? `Edit ${inv.number}` : "New Invoice"} onClose={onClose}>
+    <Modal title={billingReview ? "Billing review" : isPersisted || invoice ? `Edit ${inv.number}` : "New Invoice"} onClose={() => { if (!reviewBusyRef.current) onClose(); }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-        {editorNeedsReview && (
+        {billingReview && <p style={{ margin: 0, paddingLeft: 12, borderLeft: `3px solid ${T.primary}`, color: T.textMuted, fontSize: 13, lineHeight: 1.5 }}>{reviewLocked ? "This confirmation is being checked. Retry sync to finish the same invoice." : "Edit the work and charges, then confirm to create the invoice in QuickBooks. No invoice number is assigned yet."}</p>}
+        {!billingReview && editorNeedsReview && (
           <div style={{ background: hexA("#D97706", 0.08), border: `1px solid ${hexA("#D97706", 0.3)}`, borderRadius: 13, padding: 13 }}>
             <div style={{ color: "#B45309", fontSize: 13.5, fontWeight: 800 }}>
               {editorReviewIssue?.title || "Invoice needs reconciliation review"}
@@ -19663,10 +19768,9 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
             </div>}
           </div>
         )}
-        <div
-          aria-disabled={canCompareQuickBooksVersions || undefined}
-          inert={canCompareQuickBooksVersions ? "" : undefined}
-          style={{ display: "flex", flexDirection: "column", gap: 18, opacity: canCompareQuickBooksVersions ? 0.58 : 1 }}
+        <fieldset
+          disabled={canCompareQuickBooksVersions || (billingReview && (reviewLocked || !!reviewBusy))}
+          style={{ display: "flex", flexDirection: "column", gap: 18, border: 0, padding: 0, margin: 0, minWidth: 0, opacity: canCompareQuickBooksVersions || reviewLocked ? 0.58 : 1 }}
         >
         <div style={{ display: "flex", flexDirection: narrowInvoice ? "column" : "row", gap: 10 }}>
           <div style={{ flex: 2 }}>
@@ -19676,19 +19780,56 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
               clients={clients}
               value={inv.clientId}
               T={T}
-              disabled={clientLockedByImportedVisits || progressState === "saving" || qbState === "sending"}
+              disabled={billingReview || clientLockedByImportedVisits || progressState === "saving" || qbState === "sending"}
               describedBy={clientLockedByImportedVisits ? "invoice-visit-client-lock" : undefined}
               fallbackName={inv.clientName || ""}
               error={clientSelectionError}
               onChange={clientId => { setClientSelectionError(""); set("clientId", clientId); }}
             />
-            {clientLockedByImportedVisits && <div id="invoice-visit-client-lock" style={{ marginTop: 5, fontSize: 11, lineHeight: 1.4, color: T.textMuted }}>Client is locked because completed visits are attached. Remove those visit lines before changing the client.</div>}
+            {billingReview && <div style={{ marginTop: 5, fontSize: 11, color: T.textMuted }}>Client linked to this work.</div>}
+            {!billingReview && clientLockedByImportedVisits && <div id="invoice-visit-client-lock" style={{ marginTop: 5, fontSize: 11, lineHeight: 1.4, color: T.textMuted }}>Client is locked because completed visits are attached. Remove those visit lines before changing the client.</div>}
           </div>
-          <div style={{ flex: 1 }}>
+          {!billingReview && <div style={{ flex: 1 }}>
             <label style={label}>Invoice #</label>
             <input type="text" style={field} value={inv.number} onChange={e => set("number", e.target.value)} />
-          </div>
+          </div>}
         </div>
+
+        {billingReview && <div data-billing-review-number>
+          <label htmlFor={reviewNumberId} style={label}>Invoice number</label>
+          {reviewLocked ? <>
+            <input id={reviewNumberId} type="text" style={field} value={inv.approval?.number || "Confirmation in progress"} readOnly disabled />
+            <p style={{ margin: "6px 0 0", fontSize: 11.5, lineHeight: 1.45, color: T.textMuted }}>Retry sync keeps this same number.</p>
+          </> : <>
+            <select id={reviewNumberId} style={field} value={reviewNumberMode} onChange={event => {
+              const mode = event.target.value;
+              setReviewNumberMode(mode);
+              setReviewInvoiceNumber("");
+              setReviewNumbersError("");
+              if (mode === "available") void loadReviewInvoiceNumbers();
+            }}>
+              <option value="automatic">Automatic: next available number</option>
+              <option value="custom">Enter a number</option>
+              <option value="available" disabled={typeof onLoadInvoiceNumbers !== "function"}>Choose an available number</option>
+            </select>
+            {reviewNumberMode === "custom" && <div style={{ marginTop: 10 }}>
+              <label htmlFor={`${reviewNumberId}-custom`} style={label}>Number to use</label>
+              <input id={`${reviewNumberId}-custom`} type="text" style={field} value={reviewInvoiceNumber} maxLength={21} placeholder={`${invoicing?.numberPrefix ?? "INV-"}1001`} autoComplete="off" spellCheck={false} onChange={event => setReviewInvoiceNumber(event.target.value)} />
+            </div>}
+            {reviewNumberMode === "available" && <div style={{ marginTop: 10 }}>
+              <label htmlFor={`${reviewNumberId}-available`} style={label}>Available numbers</label>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <select id={`${reviewNumberId}-available`} style={{ ...field, flex: 1, minWidth: 0 }} value={reviewInvoiceNumber} disabled={reviewNumbersLoading} onChange={event => setReviewInvoiceNumber(event.target.value)}>
+                  <option value="">{reviewNumbersLoading ? "Checking availability…" : reviewAvailableNumbers.length ? "Choose a number" : "No available numbers loaded"}</option>
+                  {reviewAvailableNumbers.map(number => <option key={number} value={number}>{number}</option>)}
+                </select>
+                <button type="button" onClick={loadReviewInvoiceNumbers} disabled={reviewNumbersLoading} style={{ minHeight: 44, border: 0, background: "transparent", color: T.primary, fontFamily: "inherit", fontSize: 12, fontWeight: 750, padding: "8px 4px", cursor: reviewNumbersLoading ? "default" : "pointer" }}>Refresh</button>
+              </div>
+            </div>}
+            <p style={{ margin: "6px 0 0", fontSize: 11.5, lineHeight: 1.45, color: T.textMuted }}>{reviewNumberMode === "automatic" ? (reviewNextNumber ? `Next available: ${reviewNextNumber}. ` : "") + "Assigned when you confirm." : "Reserved only when you confirm. Availability is checked again then."}</p>
+            {reviewNumbersError && <p role="alert" style={{ margin: "6px 0 0", fontSize: 12, lineHeight: 1.45, color: T.primary }}>{reviewNumbersError}</p>}
+          </>}
+        </div>}
 
         {needsCoverageCheck && !String(coverageIssue?.code || "").startsWith("maintenance-service-month-") && (coverageLoading || coverageIssue || coverageError) && (
           <div data-invoice-maintenance-coverage role="status" style={{ borderLeft: `3px solid ${T.primary}`, background: T.surfaceAlt, borderRadius: 9, padding: "11px 13px" }}>
@@ -19714,25 +19855,25 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         </div>
 
         <div style={{ display: "flex", flexDirection: narrowInvoice ? "column" : "row", gap: 10 }}>
-          <div style={{ flex: 1 }}><label style={label}>Issued</label><input type="date" style={field} value={toISO(inv.date)} onChange={e => { const newDate = fromISO(e.target.value); set("date", newDate); if (inv.termsDays != null) set("dueDate", addDaysMDY(newDate, inv.termsDays)); }} /></div>
+          <div style={{ flex: 1 }}><label style={label}>{billingReview ? "Invoice date on confirmation" : "Issued"}</label><input type="date" style={field} value={toISO(inv.date)} onChange={e => { const newDate = fromISO(e.target.value); set("date", newDate); if (inv.termsDays != null) set("dueDate", addDaysMDY(newDate, inv.termsDays)); }} /></div>
           <div style={{ flex: 1 }}><label style={label}>Due</label><input type="date" style={field} value={toISO(inv.dueDate)} onChange={e => set("dueDate", fromISO(e.target.value))} /></div>
         </div>
 
         <InvoiceServiceMonth invoice={inv} onChange={(month) => set("serviceMonth", month)} T={T} />
 
-        <div>
+        {!billingReview && <div>
           <label style={label}>Status</label>
           <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 12, padding: 4, gap: 4 }}>
             {["Draft", "Sent", "Paid"].map(s => (
               <button key={s} onClick={() => set("status", s)} style={{ flex: 1, minHeight: 44, padding: "9px 6px", border: "none", borderRadius: 9, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 600, background: inv.status === s ? T.surface : "transparent", color: inv.status === s ? invStatusColor(s, T) : T.textMuted, boxShadow: inv.status === s ? T.shadow : "none" }}>{s}</button>
             ))}
           </div>
-        </div>
+        </div>}
 
         <div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
             <label style={{ ...label, marginBottom: 0 }}>Line Items</label>
-            {completedHistory.length > 0 && <button data-invoice-add-visits onClick={() => setVisitPick(true)} style={{ minHeight: 38, background: hexA(T.primary, 0.07), border: `1px solid ${hexA(T.primary, 0.2)}`, borderRadius: 10, padding: "8px 11px", color: T.primary, fontWeight: 800, fontSize: 12, cursor: "pointer", fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="plus" size={13} /> Add completed visits</button>}
+            {!billingReview && completedHistory.length > 0 && <button data-invoice-add-visits onClick={() => setVisitPick(true)} style={{ minHeight: 38, background: hexA(T.primary, 0.07), border: `1px solid ${hexA(T.primary, 0.2)}`, borderRadius: 10, padding: "8px 11px", color: T.primary, fontWeight: 800, fontSize: 12, cursor: "pointer", fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="plus" size={13} /> Add completed visits</button>}
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {inv.lineItems.length === 0 && (
@@ -19865,7 +20006,22 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           <textarea rows={2} style={{ ...field, resize: "vertical" }} value={inv.notes} onChange={e => set("notes", e.target.value)} />
         </div>
 
-        {qbConnected && typeof onPersistProgress === "function" ? (
+        </fieldset>
+        <div inert={canCompareQuickBooksVersions ? "" : undefined} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {billingReview ? <div data-billing-review-actions>
+          <div style={{ display: "grid", gridTemplateColumns: stackInvoiceSaveActions || reviewLocked ? "1fr" : "1fr 1.35fr", gap: 9 }}>
+            {!reviewLocked && <Btn variant="ghost" disabled={!!reviewBusy} onClick={() => performReviewAction("save")} style={{ minHeight: 48 }}>{reviewBusy === "save" ? "Saving…" : "Save review"}</Btn>}
+            <Btn disabled={!!reviewBusy} onClick={() => performReviewAction("confirm")} style={{ minHeight: 48 }}>{reviewBusy === "confirm" ? "Confirming with QuickBooks…" : reviewLocked ? "Retry sync" : "Confirm & sync"}</Btn>
+          </div>
+          <p style={{ margin: "8px 0 0", fontSize: 11.5, lineHeight: 1.45, color: T.textMuted }}>Confirmation creates the invoice in QuickBooks. Nothing is sent to the client.</p>
+          {reviewMessage && <p role={reviewError ? "alert" : "status"} style={{ margin: "10px 0 0", color: reviewError ? T.primary : T.text, fontSize: 12.5, lineHeight: 1.5 }}>{reviewMessage}</p>}
+          {!reviewLocked && onDiscardReview && <div style={{ marginTop: 18, paddingTop: 12, borderTop: `1px solid ${T.border}` }}>
+            {discardReviewPrompt ? <div>
+              <p style={{ fontSize: 12.5, lineHeight: 1.5, margin: "0 0 8px", color: T.text }}>Remove this review? QuickBooks will not change.</p>
+              <div style={{ display: "flex", gap: 10 }}><Btn sm disabled={!!reviewBusy} onClick={() => performReviewAction("discard")}>{reviewBusy === "discard" ? "Removing…" : "Remove review"}</Btn><Btn sm variant="ghost" disabled={!!reviewBusy} onClick={() => setDiscardReviewPrompt(false)}>Keep review</Btn></div>
+            </div> : <button type="button" disabled={!!reviewBusy} onClick={() => setDiscardReviewPrompt(true)} style={{ minHeight: 36, border: 0, background: "transparent", color: T.textMuted, padding: 0, fontFamily: "inherit", fontSize: 12.5, cursor: "pointer" }}>Discard review</button>}
+          </div>}
+        </div> : qbConnected && typeof onPersistProgress === "function" ? (
           <div
             data-invoice-save-actions
             role="group"
@@ -19911,14 +20067,14 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           </Btn>
         )}
 
-        {!qbConnected && (
+        {!billingReview && !qbConnected && (
           <div style={{ fontSize: 12, color: T.textMuted, textAlign: "center", lineHeight: 1.5 }}>
             Connect QuickBooks under Customize to auto-sync invoices with an online payment link.
           </div>
         )}
 
         {/* Payment link (once the invoice has been synced) */}
-        {inv.paymentLink && (
+        {!billingReview && inv.paymentLink && (
           <div style={{ background: hexA("#16a34a", 0.07), border: `1px solid ${hexA("#16a34a", 0.25)}`, borderRadius: 12, padding: "12px 14px" }}>
             <div style={{ fontSize: 12, fontWeight: 700, color: "#16a34a", marginBottom: 8 }}>Payment link ready</div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -19939,13 +20095,14 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         )}
         </div>
 
-        {invoice && onDelete && perms.invoiceDelete && <InvoiceDeletionReview invoice={invoice} onDelete={onDelete} onClose={onClose} T={T} store={store} totalOf={entry => invoiceTotals(entry).total} clientNameOf={entry => clients.find(client => invoiceMatchesClient(entry, client))?.name || entry.clientName || ""} />}
+        {!billingReview && invoice && onDelete && perms.invoiceDelete && <InvoiceDeletionReview invoice={invoice} onDelete={onDelete} onClose={onClose} T={T} store={store} totalOf={entry => invoiceTotals(entry).total} clientNameOf={entry => clients.find(client => invoiceMatchesClient(entry, client))?.name || entry.clientName || ""} />}
       </div>
 
       {/* Catalog item picker sheet */}
       {picker && (
         <CatalogPickerSheet
           catalog={catalog}
+          title={billingReview ? "Add to billing review" : "Add to invoice"}
           onClose={() => { setPicker(false); setBundleMode(null); }}
           onAddCatalog={addCatalogLine}
           onAddBundle={addBundledParts}
@@ -21575,6 +21732,19 @@ const canManageEstimates = (perms = {}) => !!(
   || (perms.tabAccess ? perms.tabAccess.estimates === "edit" : perms.canInvoice)
 );
 
+// These links are written by confirmed billing actions. Editing quote details must
+// retain the latest links, including an intentional removal after review migration.
+const ESTIMATE_BILLING_LINK_FIELDS = ["linkedInvoiceId", "linkedInvoiceNumber", "linkedBillingReviewId", "billingDisposition"];
+function retainEstimateBillingLinks(edited, canonical) {
+  if (!canonical) return edited;
+  const next = { ...edited };
+  for (const key of ESTIMATE_BILLING_LINK_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(canonical, key)) next[key] = canonical[key];
+    else delete next[key];
+  }
+  return next;
+}
+
 function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoicing, T, estimates: estimatesProp, setEstimates: setEstimatesProp, invoices = [], schedule = [], onSaveInvoice, onPersistInvoiceProgress, onConvertEstimate, onCompleteEstimate, onScheduleEstimate }) {
   const { perms = {} } = useApp();
   const vp = useViewport();
@@ -21603,7 +21773,7 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
     if (!canManage) return;
     setEstimates(prev => {
       const exists = (prev||[]).some(e => e.id === est.id);
-      return exists ? prev.map(e => e.id === est.id ? est : e) : [est, ...(prev||[])];
+      return exists ? prev.map(e => e.id === est.id ? retainEstimateBillingLinks(est, e) : e) : [est, ...(prev||[])];
     });
     setSelected(est);
   };
@@ -21614,7 +21784,7 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
     const target = (estimates || []).find((entry) => String(entry?.id || "") === String(id || ""));
     if (target) {
       const linkedInvoice = findInvoiceForEstimate(invoices, target);
-      if (target.linkedScheduledStopId || target.linkedInvoiceId || linkedInvoice) {
+      if (target.linkedScheduledStopId || target.linkedInvoiceId || target.linkedBillingReviewId || linkedInvoice) {
         window.alert("This estimate is linked to scheduled work or billing. Keep it as the job record, or complete it and link the final invoice instead of deleting it.");
         return;
       }
@@ -21633,19 +21803,67 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
     setView("list");
   };
 
+  // Server confirmations can change a link while the estimate form stays open.
+  useEffect(() => {
+    setSelected(current => {
+      if (!current) return current;
+      const canonical = (estimates || []).find(entry => String(entry.id) === String(current.id));
+      return canonical ? retainEstimateBillingLinks(current, canonical) : current;
+    });
+  }, [estimates]);
+
   const linkedInvoiceForEstimate = (estimate) => findInvoiceForEstimate(invoices, estimate);
 
   const convertEstimateToInvoice = async (estimate, options = {}) => {
     if (typeof onConvertEstimate !== "function") {
-      return { ok: false, error: "Invoice conversion is unavailable. Refresh SPS Way and try again." };
+      return { ok: false, error: "Billing review is unavailable. Refresh SPS Way and try again." };
     }
-    const result = await onConvertEstimate(estimate, options);
-    if (!result?.ok) {
-      return { ok: false, error: result?.error || "The draft invoice was not confirmed by the database." };
+    let savedEstimate = estimate;
+    if (!options.existingInvoiceId) {
+      // React's autosave effect may not have queued this click's edits yet. Save
+      // this quote explicitly and wait for its exact receipt before the API reads it.
+      const baseline = Array.isArray(estimates) ? estimates : [];
+      const current = baseline.find(entry => String(entry.id) === String(estimate.id));
+      const candidate = retainEstimateBillingLinks(estimate, current);
+      const next = current ? baseline.map(entry => String(entry.id) === String(candidate.id) ? candidate : entry) : [candidate, ...baseline];
+      const receipt = await store.set("sps_estimates", JSON.stringify(next), { baseValue: JSON.stringify(baseline) });
+      const issue = storeReceiptIssue(receipt, "Saving estimate changes");
+      if (issue) return { ok: false, error: issue };
+      const confirmed = JSON.parse(receipt.value || "null");
+      savedEstimate = Array.isArray(confirmed) && confirmed.find(entry => String(entry.id) === String(candidate.id));
+      if (!savedEstimate) return { ok: false, error: "The saved estimate could not be verified. Refresh before preparing billing." };
+      setEstimates(confirmed);
+      setSelected(savedEstimate);
     }
-    const saved = result.invoice;
-    setInvoiceEditor(saved);
-    return { ok: true, invoice: saved, existing: !!result.existing };
+    const result = await onConvertEstimate(savedEstimate, options);
+    if (!result?.ok || (!result.review && !result.invoice)) {
+      return { ok: false, error: result?.error || "The billing review was not confirmed by the database." };
+    }
+    setInvoiceEditor(result.review || result.invoice);
+    return { ...result, estimate: savedEstimate };
+  };
+
+  const mutateEstimateBillingReview = async (action, review, options = {}) => {
+    try {
+      const result = await requestBillingReview({
+        action, reviewId: review.id, expectedRevision: review.reviewRevision,
+        ...(action === "save" ? { review } : {}),
+        ...(action === "confirm" && options.invoiceNumber ? { invoiceNumber: options.invoiceNumber } : {}),
+      });
+      if (result.review) setInvoiceEditor(result.review);
+      if (result.invoice || action === "discard") await refreshBillingInvoiceState();
+      return result;
+    } catch (error) {
+      // An interrupted confirmation may already own an invoice number. Reopen its
+      // canonical state so the next action retries the same approval. A save
+      // conflict keeps the editor's typed changes intact.
+      try {
+        const latest = await requestBillingReview();
+        const canonical = latest.reviews?.find(entry => entry.id === review.id);
+        if (canonical && ["confirm", "retry"].includes(action)) error.data = { ...error.data, review: canonical };
+      } catch (_) {}
+      throw error;
+    }
   };
 
   const saveConvertedInvoice = (invoice) => {
@@ -21686,6 +21904,11 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
           invoicing={invoicing}
           catalog={catalog}
           setCatalog={setCatalog}
+          billingReview={!!invoiceEditor.reviewState}
+          onSaveReview={review => mutateEstimateBillingReview("save", review)}
+          onLoadInvoiceNumbers={() => requestBillingReview({ action: "available-numbers" })}
+          onConfirmReview={(review, { retry, invoiceNumber } = {}) => mutateEstimateBillingReview(retry ? "retry" : "confirm", review, { invoiceNumber })}
+          onDiscardReview={review => mutateEstimateBillingReview("discard", review)}
           onSave={saveConvertedInvoice}
           onPersistProgress={onPersistInvoiceProgress}
           onClose={() => setInvoiceEditor(null)}
@@ -21904,6 +22127,9 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
   const [completionBusy, setCompletionBusy] = useState(false);
   const [completionMsg, setCompletionMsg] = useState("");
   const [dirty, setDirty] = useState(false);
+  useEffect(() => {
+    if (estimate) setForm(current => retainEstimateBillingLinks(current, estimate));
+  }, [estimate?.linkedInvoiceId, estimate?.linkedInvoiceNumber, estimate?.linkedBillingReviewId, estimate?.billingDisposition]);
   const shareBusyRef = useRef(false);
   const pendingLineRef = useRef("");
   const [picker, setPicker] = useState(false);
@@ -21916,6 +22142,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
   // Keep the UI aligned so a staff member never sees an action that the server must reject.
   const canTextEstimate = canEmailEstimate && perms.sendTexts !== false;
   const canCreateInvoice = canManage && !!(perms.isAdmin || perms.invoiceCreate);
+  const canReviewBilling = canManage && !!perms.isAdmin;
   const selectedClient = useMemo(
     () => (clients || []).find((entry) => String(entry.id) === String(form.clientId)),
     [clients, form.clientId],
@@ -22260,13 +22487,13 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
     onSave(withEstimateTotals(form, defaultTaxRate));
   };
   const convertToInvoice = async () => {
-    if (!canCreateInvoice || conversionBusy || typeof onConvertToInvoice !== "function") return;
+    if (!(linkedInvoice ? canCreateInvoice : canReviewBilling) || conversionBusy || typeof onConvertToInvoice !== "function") return;
     if (!linkedInvoice) {
       const client = (clients || []).find(entry => String(entry.id) === String(form.clientId));
       const validation = validateForSend(client);
       if (validation) { setFormError(validation); setConversionMsg(validation); return; }
       if (String(form.status || "").toLowerCase() === "declined") {
-        const message = "Change this estimate from Declined before creating an invoice.";
+        const message = "Change this estimate from Declined before preparing billing.";
         setFormError(message); setConversionMsg(message); return;
       }
     }
@@ -22280,29 +22507,29 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
         !linkedInvoice
         && taxMigration.requiresConfirmation
         && !window.confirm(
-          `This older estimate taxes service labor. Current invoice rules make services non-taxable, changing the total from ${formatEstimateMoney(taxMigration.priorTotal)} to ${formatEstimateMoney(taxMigration.normalizedTotal)}. Create the draft with the corrected total?`,
+          `This older estimate taxes service labor. Current invoice rules make services non-taxable, changing the total from ${formatEstimateMoney(taxMigration.priorTotal)} to ${formatEstimateMoney(taxMigration.normalizedTotal)}. Prepare billing with the corrected total?`,
         )
       ) {
         return;
       }
-      if (!linkedInvoice && onPersist) {
-        onPersist(current);
-        setForm(current);
-        setDirty(false);
-      }
       const result = await onConvertToInvoice(current, {
         taxMigrationConfirmed: taxMigration.requiresConfirmation,
+        ...(linkedInvoice ? { existingInvoiceId: linkedInvoice.id } : {}),
       });
       if (!result?.ok) {
-        setConversionMsg(result?.error || "The draft invoice was not confirmed. Try again.");
+        setConversionMsg(result?.error || "The billing review was not confirmed. Try again.");
         return;
       }
-      const taxNote = result.invoice?.sourceEstimateTaxMigration
+      if (!linkedInvoice) {
+        setForm(result.estimate || current);
+        setDirty(false);
+      }
+      const taxNote = (result.review || result.invoice)?.sourceEstimateTaxMigration
         ? " Service labor was set to non-taxable; review the taxable item switches before sending."
         : "";
-      setConversionMsg((result.existing
-        ? `Opened invoice ${result.invoice?.number || ""}.`
-        : `Draft invoice ${result.invoice?.number || ""} created and opened for review.`) + taxNote);
+      setConversionMsg((result.invoice
+        ? `Opened invoice ${result.invoice.number || ""}.`
+        : "Billing review opened. Confirm it when the charges are ready.") + taxNote);
     } catch (error) {
       setConversionMsg(error?.message || "The estimate could not be converted.");
     } finally {
@@ -22583,7 +22810,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
                     <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2, lineHeight: 1.45 }}>
                       {linkedScheduledStop
                         ? `${linkedScheduledStop.day?.date || form.scheduledDate || "Scheduled"} · products and services remain linked to this estimate.`
-                        : "Choose the date and technician next. SPS creates or reuses one draft invoice, carries the quoted items into the stop, and waits until completion to deduct inventory."}
+                        : "Choose the date and technician next. Quoted items stay with the stop, and inventory is deducted on completion. Review billing before creating an invoice."}
                     </div>
                   </div>
                 </div>
@@ -22627,13 +22854,13 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
               {completionMsg && !completionOpen && <div role="status" style={{ fontSize: 11.5, color: T.textMuted, textAlign: "center", lineHeight: 1.45 }}>{completionMsg}</div>}
             </div>}
 
-            {canCreateInvoice && <div data-estimate-invoice-conversion style={{ ...card, display: "flex", flexDirection: "column", gap: 9 }}>
+            {(canReviewBilling || (linkedInvoice && canCreateInvoice)) && <div data-estimate-invoice-conversion style={{ ...card, display: "flex", flexDirection: "column", gap: 9 }}>
               <div>
-                <div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>{linkedInvoice ? "Linked invoice" : "Ready to bill?"}</div>
+                <div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>{linkedInvoice ? "Linked invoice" : "Review the charges"}</div>
                 <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2, lineHeight: 1.45 }}>
                   {linkedInvoice
                     ? `This estimate is linked to invoice ${linkedInvoice.number || ""}. Open it without creating a duplicate.`
-                    : "Create one local draft with this client, pricing, costs, notes, and tax. You can review it before sending or syncing to QuickBooks."}
+                    : "Review this client, pricing, costs, notes, and tax. An invoice number is assigned only when you confirm and sync to QuickBooks."}
                 </div>
               </div>
               <Btn
@@ -22644,10 +22871,10 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
                 style={{ gap: 7 }}
               >
                 <Icon name="invoice" size={15} />
-                {conversionBusy ? "Confirming…" : linkedInvoice ? `Open invoice ${linkedInvoice.number || ""}` : "Create draft invoice"}
+                {conversionBusy ? "Opening…" : linkedInvoice ? `Open invoice ${linkedInvoice.number || ""}` : "Review billing"}
               </Btn>
-              {!linkedInvoice && String(form.status || "").toLowerCase() === "declined" && <div style={{ fontSize: 11, color: T.warning, lineHeight: 1.4 }}>Change the estimate from Declined before invoicing it.</div>}
-              {conversionMsg && <div role="status" style={{ fontSize: 11.5, color: T.textMuted, textAlign: "center", lineHeight: 1.45 }}>{conversionMsg}</div>}
+              {!linkedInvoice && String(form.status || "").toLowerCase() === "declined" && <div style={{ fontSize: 11, color: T.warning, lineHeight: 1.4 }}>Change the estimate from Declined before preparing billing.</div>}
+              {conversionMsg && !linkedInvoice && <div role="status" style={{ fontSize: 11.5, color: T.textMuted, textAlign: "center", lineHeight: 1.45 }}>{conversionMsg}</div>}
             </div>}
 
             <div data-estimate-actions style={{ ...card, display: "flex", flexDirection: "column", gap: 8 }}>
@@ -23973,7 +24200,7 @@ const maintenanceQuickBooksSnapshotIssue = (data) => {
   return "";
 };
 
-function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding, catalog, setCatalog, qbAccounting = null, currentUserId = "", onSave, onPersistInvoice, onPersistProgress, onResolveReview, onDelete, onSyncData, initialFilter = "All", vp = {} }) {
+function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding, catalog, setCatalog, qbAccounting = null, currentUserId = "", onSave, onPersistInvoice, onPersistProgress, onResolveReview, onDelete, onSyncData, onRefreshBillingState = refreshBillingInvoiceState, initialFilter = "All", vp = {} }) {
   const { T, perms } = useApp();
   const canReviewAccounting = canManageInvoiceAccounting(perms);
   const canSelectInvoices = !!(perms.invoiceCreate || perms.invoiceSend || perms.invoiceDelete);
@@ -24011,6 +24238,68 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
 
   // ── Filter / sort state ──
   const [filter,     setFilter]     = useState(initialFilter);
+  const billingReviewSelected = filter === "Billing review" && !!perms.isAdmin;
+  const [billingReviews, setBillingReviews] = useState([]);
+  const [billingReviewsLoading, setBillingReviewsLoading] = useState(false);
+  const [billingReviewsError, setBillingReviewsError] = useState("");
+  const [billingReviewEditing, setBillingReviewEditing] = useState(null);
+  const [billingMigrationBusy, setBillingMigrationBusy] = useState(false);
+  const [billingMigrationSummary, setBillingMigrationSummary] = useState(null);
+  const [billingReceipt, setBillingReceipt] = useState("");
+  const billingLoadRef = useRef(0);
+  const loadBillingReviews = useCallback(async () => {
+    const requestId = ++billingLoadRef.current;
+    setBillingReviewsLoading(true);
+    setBillingReviewsError("");
+    try {
+      const data = await requestBillingReview();
+      if (!Array.isArray(data.reviews)) throw new Error("The shared billing review list could not be read.");
+      if (requestId === billingLoadRef.current) setBillingReviews(data.reviews);
+      return data.reviews;
+    } catch (error) {
+      if (requestId === billingLoadRef.current) setBillingReviewsError(error.message);
+      throw error;
+    } finally {
+      if (requestId === billingLoadRef.current) setBillingReviewsLoading(false);
+    }
+  }, []);
+  useEffect(() => {
+    if (billingReviewSelected) void loadBillingReviews().catch(() => {});
+  }, [billingReviewSelected, loadBillingReviews]);
+  const mutateBillingReview = async (action, review, options = {}) => {
+    try {
+      const data = await requestBillingReview({ action, reviewId: review.id, expectedRevision: review.reviewRevision, ...(action === "save" ? { review } : {}), ...(action === "confirm" && options.invoiceNumber ? { invoiceNumber: options.invoiceNumber } : {}) });
+      if (data.review) setBillingReviews(rows => [...rows.filter(row => row.id !== data.review.id), data.review]);
+      if (data.invoice) {
+        setBillingReceipt(`Invoice ${data.invoice.number} is confirmed in QuickBooks. Nothing was sent to the client.`);
+        try { await onRefreshBillingState(); }
+        catch (error) { setBillingReviewsError(error.message); }
+      }
+      return data;
+    } catch (error) {
+      // Re-read the server after any uncertain response. A claimed confirmation remains
+      // locked and retries the same request, instead of issuing a second invoice.
+      try {
+        const latest = await loadBillingReviews();
+        const canonical = latest.find(row => row.id === review.id);
+        if (canonical && ["confirm", "retry"].includes(action)) error.data = { ...error.data, review: canonical };
+      } catch (_) {}
+      throw error;
+    }
+  };
+  const migrateBillingReviews = async () => {
+    if (billingMigrationBusy) return;
+    setBillingMigrationBusy(true);
+    setBillingMigrationSummary(null);
+    setBillingReviewsError("");
+    try {
+      const data = await requestBillingReview({ action: "migrate" });
+      setBillingMigrationSummary(data);
+      await onRefreshBillingState();
+      await loadBillingReviews();
+    } catch (error) { setBillingReviewsError(error.message); }
+    finally { setBillingMigrationBusy(false); }
+  };
   const [search,     setSearch]     = useState("");
   const [sortBy,     setSortBy]     = useState("number_desc");
   const [clientFilter, setClientFilter] = useState("all");     // "all" or client id
@@ -24482,7 +24771,7 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", width: vp.isPhone ? "100%" : "auto" }}>
           {/* Always visible so a manual sync is available "either way" — when QB is disconnected the
               handler shows a "Connect QuickBooks under Customize first" hint (idle button stays neutral). */}
-          {canReviewAccounting && (() => {
+          {!billingReviewSelected && canReviewAccounting && (() => {
             const QB_GREEN = "#2CA01C";
             const active = qbSyncing || qbSynced;
             return (
@@ -24497,13 +24786,13 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
             </button>
             );
           })()}
-          <button onClick={() => setShowFilters(f => !f)}
+          {!billingReviewSelected && <button onClick={() => setShowFilters(f => !f)}
             style={{ minHeight: 40, display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 12, border: `1.5px solid ${activeFilterCount > 0 ? T.primary : T.border}`, background: activeFilterCount > 0 ? hexA(T.primary, 0.08) : T.surface, color: activeFilterCount > 0 ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
             <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M3 6h18M7 12h10M11 18h2"/></svg>
             Filter{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
-          </button>
-          {perms.invoiceCreate && <Btn sm variant="ghost" onClick={() => setBatching(true)} style={{ minHeight: 40 }}>Create multiple</Btn>}
-          {perms.invoiceCreate && <Btn sm onClick={() => setCreating(true)} style={{ minHeight: 40 }}>+ New</Btn>}
+          </button>}
+          {!billingReviewSelected && perms.invoiceCreate && <Btn sm variant="ghost" onClick={() => setBatching(true)} style={{ minHeight: 40 }}>Create multiple</Btn>}
+          {!billingReviewSelected && perms.invoiceCreate && <Btn sm onClick={() => setCreating(true)} style={{ minHeight: 40 }}>+ New</Btn>}
         </div>
       </div>
 
@@ -24515,7 +24804,7 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
           {qbSyncMsg}
         </div>
       )}
-      {canReviewAccounting && localReviewInvoices.length > 0 && (
+      {!billingReviewSelected && canReviewAccounting && localReviewInvoices.length > 0 && (
         <button
           type="button"
           aria-label={`Review ${localReviewInvoices.length} SPS invoice record${localReviewInvoices.length === 1 ? "" : "s"}`}
@@ -24536,7 +24825,7 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
       {/* Aggregate sales are a separate financial capability from viewing an
           individual invoice. Do not render the amounts at all for staff who
           lack seeTotalSales; disabling a visible button still leaks them. */}
-      {(perms.seeTotalSales || perms.isAdmin) && <button
+      {!billingReviewSelected && (perms.seeTotalSales || perms.isAdmin) && <button
         type="button"
         data-invoice-summary-rail
         onClick={() => setShowSales(true)}
@@ -24567,30 +24856,34 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
       </button>}
 
       {/* Search includes the full invoice contents, even when the row preview is shortened. */}
-      <div style={{ display: "grid", gridTemplateColumns: vp.isPhone ? "1fr" : "minmax(200px, 1fr) 220px", alignItems: "end", gap: 12, marginBottom: 14 }}>
+      <div style={{ display: "grid", gridTemplateColumns: vp.isPhone || billingReviewSelected ? "1fr" : "minmax(200px, 1fr) 220px", alignItems: "end", gap: 12, marginBottom: 14 }}>
         <label style={{ display: "grid", gap: 6, color: T.textMuted, fontSize: 11.5, fontWeight: 650 }}>
-          Find an invoice
+          {billingReviewSelected ? "Find work to review" : "Find an invoice"}
           <span style={{ position: "relative" }}>
             <span style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", color: T.textMuted, pointerEvents: "none" }}><Icon name="search" size={15}/></span>
-            <input type="search" aria-label="Search invoices" placeholder="Number, client, or description" value={search} onChange={e => setSearch(e.target.value)}
+            <input type="search" aria-label={billingReviewSelected ? "Search billing reviews" : "Search invoices"} placeholder={billingReviewSelected ? "Client or work description" : "Number, client, or description"} value={search} onChange={e => setSearch(e.target.value)}
               style={{ width: "100%", height: 42, padding: "0 14px 0 38px", border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 13.5, boxSizing: "border-box", fontFamily: "inherit", color: T.text, background: T.surface }} />
           </span>
         </label>
-        <label style={{ display: "grid", gap: 6, color: T.textMuted, fontSize: 11.5, fontWeight: 650 }}>
+        {!billingReviewSelected && <label style={{ display: "grid", gap: 6, color: T.textMuted, fontSize: 11.5, fontWeight: 650 }}>
           Sort by
           <select aria-label="Sort invoices" value={sortBy} onChange={(event) => setSortBy(event.target.value)} style={{ width: "100%", height: 42, minWidth: 0, border: `1px solid ${T.border}`, borderRadius: 8, padding: "0 10px", fontFamily: "inherit", color: T.text, background: T.surface, fontSize: 12.5 }}>
             {INVOICE_LIST_SORT_OPTIONS.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
           </select>
-        </label>
+        </label>}
       </div>
 
       {/* Status filter pills */}
-      <div style={{ display: "flex", gap: 7, marginBottom: showFilters ? 12 : 16, overflowX: "auto", paddingBottom: 4, WebkitOverflowScrolling: "touch" }}>
-        {["All", ...INVOICE_STATUSES].map(s => (
-          <button key={s} onClick={() => setFilter(s)} style={{ flexShrink: 0, padding: "7px 14px", borderRadius: 100, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, fontWeight: 600, background: filter === s ? T.primary : T.surfaceAlt, color: filter === s ? "#fff" : T.textMuted }}>{s}</button>
+      <div data-invoice-status-tabs style={{ display: vp.isPhone ? "grid" : "flex", gridTemplateColumns: vp.isPhone ? "repeat(3, minmax(0, 1fr))" : undefined, gap: 7, marginBottom: showFilters ? 12 : 16, overflowX: "auto", paddingBottom: 4, WebkitOverflowScrolling: "touch" }}>
+        {["All", ...INVOICE_STATUSES, ...(perms.isAdmin ? ["Billing review"] : [])].map(s => (
+          <button key={s} aria-pressed={filter === s} onClick={() => setFilter(s)} style={{ flexShrink: 0, minHeight: vp.isPhone ? 40 : 34, padding: vp.isPhone ? "7px 8px" : "7px 14px", borderRadius: vp.isPhone ? 8 : 100, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, fontWeight: 600, background: filter === s ? T.primary : T.surfaceAlt, color: filter === s ? "#fff" : T.textMuted }}>{s}</button>
         ))}
       </div>
 
+      {billingReviewSelected ? <div style={{ minHeight: 0, overflowY: vp.isDesktop ? "auto" : "visible", paddingBottom: 24 }}>
+        {billingReceipt && <p role="status" style={{ margin: "0 0 16px", fontSize: 13, color: T.text }}>{billingReceipt}</p>}
+        <BillingReviewQueue reviews={billingReviews.map(review => ({ ...review, _client: resolveInvoiceClient(clients, review.clientId) }))} loading={billingReviewsLoading} error={billingReviewsError} T={T} vp={vp} onEdit={setBillingReviewEditing} onRefresh={() => void loadBillingReviews().catch(() => {})} onMigrate={migrateBillingReviews} migrationBusy={billingMigrationBusy} migrationSummary={billingMigrationSummary} search={search} totalOf={invoiceTotals} />
+      </div> : <>
       {/* Expanded filter panel */}
       {showFilters && (
         <div style={{ background: T.surfaceAlt, borderRadius: 16, padding: "16px 16px", marginBottom: 16, display: "flex", flexDirection: "column", gap: 14 }}>
@@ -24749,6 +25042,14 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
         );
       })()}
 
+      </>}
+
+      {billingReviewEditing && <InvoiceEditor key={billingReviewEditing.id} invoice={billingReviewEditing} billingReview clients={clients} invoices={invoices} maintenanceLedger={maintenanceLedger} schedule={schedule} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog}
+        onSaveReview={review => mutateBillingReview("save", review)}
+        onLoadInvoiceNumbers={() => requestBillingReview({ action: "available-numbers" })}
+        onConfirmReview={(review, { retry, invoiceNumber } = {}) => mutateBillingReview(retry ? "retry" : "confirm", review, { invoiceNumber })}
+        onDiscardReview={review => mutateBillingReview("discard", review)}
+        onClose={() => { setBillingReviewEditing(null); void loadBillingReviews().catch(() => {}); }} />}
       {canReviewAccounting && reviewingReconciliation && (
         <InvoiceReconciliationReviewQueue
           invoices={localReviewInvoices}
@@ -42309,9 +42610,8 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
         if (!current) return { ok: false, error: "This estimate no longer exists." };
         const client = (clients || []).find((entry) => String(entry?.id || "") === String(current.clientId || estimate.clientId));
         if (!client) return { ok: false, error: "The estimate's client no longer exists." };
-        // Scheduling is the point where approved scope becomes planned work. Make the one
-        // deterministic draft invoice in the same CAS transaction, so completion can never count
-        // the quoted sale twice or leave the finished stop with no billing record.
+        // Scheduling carries the approved scope into the stop. Accounting records are
+        // created only after the owner confirms the separate billing review.
         const taxMigration = estimateTaxMigrationImpact(current, invoicing?.taxRate);
         if (taxMigration.requiresConfirmation && options.taxMigrationConfirmed !== true) {
           return {
@@ -42328,29 +42628,15 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
             taxMigrationCorrectedTotal: taxMigration.normalizedTotal,
           }
           : taxMigration.normalizedEstimate;
-        let linkedInvoice = findInvoiceForEstimate(latestInvoices, billingEstimate);
-        let nextInvoices = latestInvoices;
-        let createdInvoice = null;
-        if (!linkedInvoice) {
-          const dueDays = Number.parseInt(invoicing?.dueDays, 10);
-          const safeDueDays = Number.isFinite(dueDays) && dueDays >= 0 ? dueDays : 15;
-          createdInvoice = estimateToDraftInvoice(billingEstimate, {
-            client,
-            number: `${invoicing?.numberPrefix != null ? invoicing.numberPrefix : "INV-"}${nextInvoiceNumber(latestInvoices, invoicing)}`,
-            issueDate: todayMDY(),
-            dueDate: addDaysMDY(todayMDY(), safeDueDays),
-            dueDays: safeDueDays,
-            defaultTaxRate: invoicing?.taxRate,
-            paymentTerms: invoicing?.terms,
-          });
-          linkedInvoice = createdInvoice;
-          nextInvoices = [createdInvoice, ...latestInvoices];
+        const linkedInvoice = findInvoiceForEstimate(latestInvoices, billingEstimate);
+        if (billingEstimate.linkedInvoiceId && !linkedInvoice) {
+          return { ok: false, error: "The linked invoice could not be found. Refresh billing before scheduling this estimate." };
         }
-        const source = {
+        const source = linkedInvoice ? {
           ...billingEstimate,
           linkedInvoiceId: linkedInvoice.id,
           linkedInvoiceNumber: linkedInvoice.number || "",
-        };
+        } : billingEstimate;
         let result;
         try {
           result = scheduleApprovedEstimate(source, latestSchedule, { client, ...options });
@@ -42361,9 +42647,9 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
         const operations = [
           { key: "sps_estimates", value: JSON.stringify(nextEstimates), expectedVersion: Number(estimateRead.version) || 0 },
           { key: "sps_schedule", value: JSON.stringify(result.schedule), expectedVersion: Number(scheduleRead.version) || 0 },
-          // This is both the new-draft write and the version fence for an existing link. A
-          // concurrent invoice delete must conflict instead of leaving an orphaned stop.
-          { key: "sps_invoices", value: JSON.stringify(nextInvoices), expectedVersion: Number(invoiceRead.version) || 0 },
+          // Preserve the invoice version fence without creating or numbering an invoice.
+          // Concurrent confirmation or deletion must retry with the latest billing link.
+          { key: "sps_invoices", value: JSON.stringify(latestInvoices), expectedVersion: Number(invoiceRead.version) || 0 },
         ];
         const saved = await store.replaceMany(operations);
         if (!saved?.ok) {
@@ -42372,10 +42658,10 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
         }
         setEstimatesRaw(nextEstimates);
         setSchedule(result.schedule);
-        setInvoices(nextInvoices);
+        setInvoices(latestInvoices);
         setScheduleEstimateSeed(null);
         setScheduleFocus({ sid: result.stop.sid, date: options.date || result.estimate.scheduledDate });
-        return { ok: true, ...result, invoice: linkedInvoice, invoiceCreated: !!createdInvoice };
+        return { ok: true, ...result, invoice: linkedInvoice, invoiceCreated: false };
       }
     } catch (error) {
       return { ok: false, error: error?.message || "The estimate could not be scheduled." };
@@ -43007,93 +43293,52 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     }
   };
   const handleConvertEstimateToInvoice = async (estimate, options = {}) => {
+    // Existing real invoices keep their normal editor and permissions. Opening one
+    // must not enter the owner-only review creation endpoint or change quote tax.
+    if (options.existingInvoiceId) {
+      try {
+        const flushed = await store.flushKey("sps_invoices");
+        const issue = storeReceiptIssue(flushed, "Saving invoice changes");
+        if (issue) return { ok: false, error: issue };
+        const read = await store.refresh("sps_invoices");
+        if (!read?.ok) return { ok: false, error: read?.error?.message || "The linked invoice could not be loaded." };
+        const list = read.exists ? JSON.parse(read.value || "[]") : [];
+        const linked = findInvoiceForEstimate(list, estimate);
+        if (!linked || String(linked.id) !== String(options.existingInvoiceId) || String(linked.clientId) !== String(estimate?.clientId)) {
+          return { ok: false, error: "This estimate's invoice link changed. Refresh before opening it." };
+        }
+        setInvoices(list);
+        return { ok: true, invoice: linked, existing: true };
+      } catch (error) {
+        return { ok: false, error: error?.message || "The linked invoice could not be opened." };
+      }
+    }
     if (!estimate || String(estimate.status || "").toLowerCase() === "declined") {
-      return { ok: false, error: "A declined estimate cannot be converted to an invoice." };
+      return { ok: false, error: "A declined estimate cannot be prepared for billing." };
     }
     const client = (clients || []).find(entry => String(entry.id) === String(estimate.clientId));
-    if (!client) return { ok: false, error: "Choose a client before converting this estimate." };
+    if (!client) return { ok: false, error: "Choose a client before preparing this estimate for billing." };
     const taxMigration = estimateTaxMigrationImpact(estimate, invoicing?.taxRate);
     if (taxMigration.requiresConfirmation && options.taxMigrationConfirmed !== true) {
-      return {
-        ok: false,
-        error: "Review and confirm the corrected service-tax total before creating this invoice.",
-      };
+      return { ok: false, error: "Review and confirm the corrected service-tax total before preparing this billing review." };
     }
 
     try {
-      const flushed = await store.flush();
-      if (!flushed?.ok && !flushed?.empty) {
-        return { ok: false, error: "Another invoice change is still waiting to sync. Check the connection, then try again." };
+      const flushed = await store.flushKey("sps_estimates");
+      const issue = storeReceiptIssue(flushed, "Saving estimate changes");
+      if (issue) return { ok: false, error: issue };
+      const result = await requestBillingReview({
+        action: "from-estimate", estimateId: estimate.id,
+        taxMigrationConfirmed: options.taxMigrationConfirmed === true,
+      });
+      if (!result.invoice && !result.review) {
+        return { ok: false, error: "The server did not return a saved billing review. Refresh and try again." };
       }
-
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        const refreshed = await store.refresh("sps_invoices");
-        if (!refreshed?.ok) {
-          return { ok: false, error: refreshed?.error?.message || "The latest invoices could not be loaded. Nothing was created." };
-        }
-        const list = refreshed.exists ? JSON.parse(refreshed.value || "[]") : [];
-        if (!Array.isArray(list)) {
-          return { ok: false, error: "The shared invoice list could not be read. Nothing was created." };
-        }
-
-        const linked = findInvoiceForEstimate(list, estimate);
-        if (linked) {
-          setInvoices(list);
-          return { ok: true, invoice: linked, existing: true };
-        }
-
-        const dueDays = Number.parseInt(invoicing?.dueDays, 10);
-        const safeDueDays = Number.isFinite(dueDays) && dueDays >= 0 ? dueDays : 15;
-        const converted = estimateToDraftInvoice(
-          taxMigration.requiresConfirmation
-            ? {
-              ...taxMigration.normalizedEstimate,
-              taxMigrationConfirmedAt: new Date().toISOString(),
-              taxMigrationSource: "invoice-conversion",
-              taxMigrationPriorTotal: taxMigration.priorTotal,
-              taxMigrationCorrectedTotal: taxMigration.normalizedTotal,
-            }
-            : taxMigration.normalizedEstimate,
-          {
-          client,
-          number: `${invoicing?.numberPrefix != null ? invoicing.numberPrefix : "INV-"}${nextInvoiceNumber(list, invoicing)}`,
-          issueDate: todayMDY(),
-          dueDate: addDaysMDY(todayMDY(), safeDueDays),
-          dueDays: safeDueDays,
-          defaultTaxRate: invoicing?.taxRate,
-          paymentTerms: invoicing?.terms,
-          },
-        );
-        const next = [converted, ...list];
-        const saved = await store.replaceMany([{
-          key: "sps_invoices",
-          value: JSON.stringify(next),
-          expectedVersion: Number(refreshed.version) || 0,
-        }]);
-        if (!saved?.ok) {
-          if (saved?.conflict && attempt < 2) continue;
-          return {
-            ok: false,
-            error: saved?.conflict
-              ? "Another device changed invoices at the same time. Refresh and try again."
-              : (saved?.error?.message || "The server did not confirm the draft invoice. Nothing was reported as created."),
-          };
-        }
-
-        const confirmedSnapshot = await store.get("sps_invoices");
-        const confirmedList = confirmedSnapshot?.value ? JSON.parse(confirmedSnapshot.value) : next;
-        const confirmed = findInvoiceForEstimate(confirmedList, estimate);
-        if (!confirmed) {
-          return { ok: false, error: "The server confirmed the save, but the draft could not be reopened. Refresh before trying again." };
-        }
-        setInvoices(confirmedList);
-        return { ok: true, invoice: confirmed, existing: false };
-      }
+      await refreshBillingInvoiceState();
+      return { ...result, existing: !!result.invoice };
     } catch (error) {
-      return { ok: false, error: error?.message || "The draft invoice could not be created." };
+      return { ok: false, error: error?.message || "The billing review could not be opened." };
     }
-
-    return { ok: false, error: "Invoices changed repeatedly on another device. Refresh and try again." };
   };
   const handleCompleteEstimate = async (estimateId, invoiceId, expectedLinkedInvoiceId = "") => {
     const targetEstimateId = String(estimateId || "").trim();
@@ -43672,7 +43917,8 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
             retryAt: 0,
             lastError: "",
             receiptId: saved.receiptId || item.receiptId || null,
-            invoiceOutcome: saved.invoiceOutcome || null,
+            invoiceOutcome: saved.billingReviewOutcome || saved.invoiceOutcome || null,
+            billingReviewOutcome: saved.billingReviewOutcome || null,
             applied: !!saved.applied,
             alreadyCompleted: !!saved.alreadyCompleted,
             lastRequestId: requestResult.requestId,

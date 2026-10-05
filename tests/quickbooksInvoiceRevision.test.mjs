@@ -220,15 +220,23 @@ test("update endpoint requires a synced base before it can replace invoice lines
 test("update endpoint proceeds when the current QuickBooks content still matches the synced base", async () => {
   const existing = baseInvoice();
   let updateBody = null;
+  let reviewClaims = [];
+  let reviewVersion = 1;
   globalThis.fetch = async (url, options = {}) => {
     const href = String(url);
     if (href.includes("/auth/v1/user")) return jsonResponse({ id: "owner-1" });
     if (href.includes("/rest/v1/app_state?")) {
       return jsonResponse(Object.entries({
         sps_clients: [{ id: "client-42", qbId: existing.CustomerRef.value, name: "Generic Client" }],
-        sps_invoices: [], sps_schedule: [],
+        sps_invoices: [], sps_schedule: [], sps_billing_reviews: reviewClaims,
         sps_maintenance_billing: { version: 2, policies: {}, allocations: {} },
-      }).map(([key, value]) => ({ key, value: JSON.stringify(value), version: 1 })));
+      }).map(([key, value]) => ({ key, value: JSON.stringify(value), version: key === "sps_billing_reviews" ? reviewVersion : 1 })));
+    }
+    if (href.endsWith("/rpc/sps_app_state_batch_cas")) {
+      const claim = JSON.parse(options.body).p_operations.find(row => row.key === "sps_billing_reviews");
+      assert.equal(claim.expected_version, reviewVersion);
+      reviewClaims = JSON.parse(claim.value); reviewVersion += 1;
+      return jsonResponse([{ applied: true, current_versions: { sps_billing_reviews: reviewVersion, sps_invoices: 1 } }]);
     }
     if (href.includes("/rest/v1/qb_tokens")) {
       return jsonResponse([{
@@ -278,4 +286,5 @@ test("update endpoint proceeds when the current QuickBooks content still matches
   assert.equal(updateBody.SyncToken, "7");
   assert.equal(updateBody.Line[0].Description, "Updated maintenance - July 2026");
   assert.equal(updateBody.Line[0].Amount, 125);
+  assert.equal(reviewClaims[0].approval.number, "1964");
 });

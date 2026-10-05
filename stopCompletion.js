@@ -348,7 +348,7 @@ function compactActiveLedger(completed, ledger) {
   return { ok: true, ledger: compacted };
 }
 
-export function applyStopCompletion({ clients, catalog, completed, clientId, entry, sid, receiptId, idempotencyKey, completedAt }) {
+export function applyStopCompletion({ clients, catalog, completed, clientId, entry, sid, receiptId, idempotencyKey, completedAt, postBalance = true }) {
   if (sid == null || String(sid).trim() === "") return { ok: false, code: "missing-stop-id" };
   if (!receiptId || typeof receiptId !== "string") return { ok: false, code: "missing-receipt-id" };
   if (typeof idempotencyKey !== "string" || idempotencyKey.length < 8 || idempotencyKey.length > 240) return { ok: false, code: "missing-idempotency-key" };
@@ -396,7 +396,9 @@ export function applyStopCompletion({ clients, catalog, completed, clientId, ent
 
   const storedEntry = { ...(entry || {}), sid, completionReceiptId: receiptId };
   const priorHistory = asArray(currentClient.history);
-  const changesBalance = !!(storedEntry.invoice && storedEntry.invoice !== "$0");
+  // New completion requests retain the quoted amount as work history, not customer debt.
+  // Keep legacy balance receipts reversible without changing their historical interpretation.
+  const changesBalance = postBalance && !!(storedEntry.invoice && storedEntry.invoice !== "$0");
   const ownerResolution = changesBalance ? validBalanceOwner(currentClient, currentCompleted, ledger) : { ok: true, ownerId: null };
   if (!ownerResolution.ok) return ownerResolution;
   const priorOwnerId = ownerResolution.ownerId;

@@ -183,7 +183,7 @@ test("a schedule created before invoice conversion atomically backfills the invo
     createdAt: 1,
   });
   assert.equal(scheduled.stop.linkedInvoiceId, undefined);
-  assert.equal(scheduled.stop.estimateFulfillment.billingDisposition, "convert-estimate-once");
+  assert.equal(scheduled.stop.estimateFulfillment.billingDisposition, "billing-review");
 
   const afterConversion = {
     ...scheduled.estimate,
@@ -204,7 +204,7 @@ test("a schedule created before invoice conversion atomically backfills the invo
   assert.equal(linked.stop.estimateFulfillment.billingDisposition, "linked-invoice");
   assert.equal(scheduled.stop.linkedInvoiceId, undefined);
   assert.equal(scheduled.stop.sourceEstimateStatus, "approved");
-  assert.equal(scheduled.stop.estimateFulfillment.billingDisposition, "convert-estimate-once");
+  assert.equal(scheduled.stop.estimateFulfillment.billingDisposition, "billing-review");
   assert.equal(linked.schedule.flatMap((day) => day.stops).length, 1);
 
   const repeat = scheduleApprovedEstimate(afterConversion, linked.schedule, {
@@ -364,7 +364,7 @@ test("completion claims planned materials and invoice conversion only once", () 
   );
 });
 
-test("an unconverted estimate requests one draft invoice at first completion but never posts revenue directly", () => {
+test("an unconverted estimate requests a billing review at completion without creating an invoice or revenue", () => {
   const source = estimate();
   delete source.linkedInvoiceId;
   const scheduled = scheduleApprovedEstimate(source, [], {
@@ -377,9 +377,23 @@ test("an unconverted estimate requests one draft invoice at first completion but
     completionReceiptId: "receipt-no-invoice",
   });
 
-  assert.equal(claimed.shouldCreateInvoice, true);
+  assert.equal(claimed.shouldCreateInvoice, false);
+  assert.equal(claimed.shouldCreateBillingReview, true);
   assert.equal(claimed.shouldPostRevenue, false);
-  assert.equal(claimed.stop.estimateFulfillment.billingDisposition, "convert-estimate-once");
+  assert.equal(claimed.stop.estimateFulfillment.billingDisposition, "billing-review");
+});
+
+test("review-linked scheduling and completion retain the review without requesting a preliminary invoice", () => {
+  const source = estimate();
+  delete source.linkedInvoiceId;
+  source.linkedBillingReviewId = "review-estimate-1";
+  const scheduled = scheduleApprovedEstimate(source, [], { client, date: "08/03/2026", createdAt: 1 });
+  assert.equal(scheduled.stop.linkedBillingReviewId, source.linkedBillingReviewId);
+  const claimed = claimScheduledEstimateCompletion(scheduled.stop, { completionReceiptId: "review-receipt" });
+  assert.equal(claimed.shouldCreateInvoice, false);
+  assert.equal(claimed.shouldCreateBillingReview, false);
+  assert.equal(claimed.stop.estimateFulfillment.billingDisposition, "billing-review");
+  assert.equal(claimed.stop.linkedInvoiceId, undefined);
 });
 
 test("scheduled stop identity is deterministic and does not accept a blank estimate", () => {
