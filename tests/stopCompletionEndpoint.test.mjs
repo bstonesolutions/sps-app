@@ -264,7 +264,7 @@ test("field completion is validated server-side and committed through one servic
       if (href.includes("key=in.(")) baselineReads += 1;
       return response(stateRows(href, state));
     }
-    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+    if (href.endsWith("/rest/v1/rpc/sps_stop_completion_batch_cas")) {
       batchBody = JSON.parse(options.body);
       applyBatchOperations(state, batchBody.p_operations);
       return response([{
@@ -356,7 +356,7 @@ test("a lost batch response is confirmed from authoritative state and returned a
       stateReadKeySets.push(requestedStateKeys(href).sort());
       return response(stateRows(href, state));
     }
-    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+    if (href.endsWith("/rest/v1/rpc/sps_stop_completion_batch_cas")) {
       batchWrites += 1;
       const operations = JSON.parse(options.body).p_operations;
       applyBatchOperations(state, operations);
@@ -421,7 +421,7 @@ test("a pre-commit batch timeout returns an unconfirmed retryable result without
       stateReadKeySets.push(requestedStateKeys(href).sort());
       return response(stateRows(href, state));
     }
-    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+    if (href.endsWith("/rest/v1/rpc/sps_stop_completion_batch_cas")) {
       batchWrites += 1;
       return new Promise((resolve, reject) => {
         options.signal.addEventListener("abort", () => {
@@ -492,7 +492,7 @@ test("repeated fence conflicts leave every stop mutation untouched and use one r
       if (href.includes("key=in.(")) baselineReads += 1;
       return response(stateRows(href, state));
     }
-    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+    if (href.endsWith("/rest/v1/rpc/sps_stop_completion_batch_cas")) {
       const operations = JSON.parse(options.body).p_operations;
       batches.push(operations);
       return response([{
@@ -580,7 +580,7 @@ test("server-enforced prepaid maintenance preserves quoted value without changin
     if (href.includes("/rest/v1/app_state?")) {
       return response(stateRows(href, state));
     }
-    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+    if (href.endsWith("/rest/v1/rpc/sps_stop_completion_batch_cas")) {
       writtenOperations = JSON.parse(options.body).p_operations;
       return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
     }
@@ -669,7 +669,7 @@ test("paid maintenance month allocations suppress duplicate drafts and fence the
     if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
     if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify([{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }]) }]);
     if (href.includes("/rest/v1/app_state?")) return response(stateRows(href, state));
-    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+    if (href.endsWith("/rest/v1/rpc/sps_stop_completion_batch_cas")) {
       const operations = JSON.parse(options.body).p_operations;
       writes.push(operations);
       applyBatchOperations(state, operations);
@@ -725,7 +725,7 @@ test("partial or mismatched maintenance payments save the crew report while hold
       if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
       if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify([{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }]) }]);
       if (href.includes("/rest/v1/app_state?")) return response(stateRows(href, state));
-      if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+      if (href.endsWith("/rest/v1/rpc/sps_stop_completion_batch_cas")) {
         writes++;
         const operations = JSON.parse(options.body).p_operations;
         assert.equal(operations.some(operation => operation.key === "sps_invoices" && !operation.check_only), false);
@@ -781,7 +781,7 @@ test("a prepaid mirror on the client cannot suppress billing without protected s
     if (href.includes("/rest/v1/app_state?")) {
       return response(stateRows(href, state));
     }
-    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+    if (href.endsWith("/rest/v1/rpc/sps_stop_completion_batch_cas")) {
       batchWrites += 1;
       return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
     }
@@ -823,7 +823,7 @@ test("ordinary completion rejects insufficient tracked stock before any shared s
     if (href.includes("/rest/v1/app_state?")) {
       return response(stateRows(href, state));
     }
-    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+    if (href.endsWith("/rest/v1/rpc/sps_stop_completion_batch_cas")) {
       batchWrites += 1;
       return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
     }
@@ -869,7 +869,7 @@ test("ordinary completion accepts a legacy untracked product without fabricating
     if (href.includes("/rest/v1/app_state?")) {
       return response(stateRows(href, state));
     }
-    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+    if (href.endsWith("/rest/v1/rpc/sps_stop_completion_batch_cas")) {
       writtenOperations = JSON.parse(options.body).p_operations;
       return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
     }
@@ -945,7 +945,7 @@ test("the final weekly maintenance visit atomically creates one monthly draft", 
     if (href.includes("/rest/v1/app_state?")) {
       return response(stateRows(href, state));
     }
-    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+    if (href.endsWith("/rest/v1/rpc/sps_stop_completion_batch_cas")) {
       writtenOperations = JSON.parse(options.body).p_operations;
       applyBatchOperations(state, writtenOperations);
       return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
@@ -1009,7 +1009,7 @@ test("reopening discards an untouched review but preserves an approving review",
       if (href.includes("/rest/v1/app_state?")) {
         return response(stateRows(href, state));
       }
-      if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+      if (href.endsWith("/rest/v1/rpc/sps_stop_completion_batch_cas")) {
         const operations = JSON.parse(options.body).p_operations;
         batches.push(operations);
         applyBatchOperations(state, operations);
@@ -1115,7 +1115,7 @@ test("estimate-linked completion and reopening advance the same fulfillment rece
     if (href.includes("/rest/v1/app_state?")) {
       return response(stateRows(href, state));
     }
-    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+    if (href.endsWith("/rest/v1/rpc/sps_stop_completion_batch_cas")) {
       const operations = JSON.parse(options.body).p_operations;
       batchWrites.push(operations);
       applyBatchOperations(state, operations);
@@ -1254,7 +1254,7 @@ test("estimate completion fails closed when a planned catalog item is missing or
       if (href.includes("/rest/v1/app_state?")) {
         return response(stateRows(href, state));
       }
-      if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+      if (href.endsWith("/rest/v1/rpc/sps_stop_completion_batch_cas")) {
         batchWrites += 1;
         throw new Error("No shared state may be written when planned inventory cannot be applied");
       }
@@ -1324,7 +1324,7 @@ test("estimate completion validates the linked invoice's client and source estim
       if (href.includes("/rest/v1/app_state?")) {
         return response(stateRows(href, state));
       }
-      if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+      if (href.endsWith("/rest/v1/rpc/sps_stop_completion_batch_cas")) {
         batchWrites += 1;
         throw new Error("No shared state may be written with a mismatched invoice link");
       }
@@ -1381,7 +1381,7 @@ test("estimate completion without an invoice or frozen quote scope fails before 
     if (href.includes("/rest/v1/app_state?")) {
       return response(stateRows(href, state));
     }
-    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+    if (href.endsWith("/rest/v1/rpc/sps_stop_completion_batch_cas")) {
       batchWrites += 1;
       throw new Error("The endpoint must not write without a linked invoice");
     }
@@ -1431,7 +1431,7 @@ test("estimate completion creates an unnumbered review from frozen scope without
     if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
     if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
     if (href.includes("/rest/v1/app_state?")) return response(stateRows(href, state));
-    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+    if (href.endsWith("/rest/v1/rpc/sps_stop_completion_batch_cas")) {
       applyBatchOperations(state, JSON.parse(options.body).p_operations);
       return response([{ applied: true, outcome: "applied", current_versions: {} }]);
     }
@@ -1471,7 +1471,7 @@ test("a lost completion response recovers an owner-prepared estimate review with
     if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
     if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
     if (href.includes("/rest/v1/app_state?")) return response(stateRows(href, state));
-    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+    if (href.endsWith("/rest/v1/rpc/sps_stop_completion_batch_cas")) {
       writes += 1;
       applyBatchOperations(state, JSON.parse(options.body).p_operations);
       throw new TypeError("fetch failed after commit");
@@ -1508,7 +1508,7 @@ test("estimate completion recovers an exact invoice confirmed after scheduling w
     if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
     if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
     if (href.includes("/rest/v1/app_state?")) return response(stateRows(href, state));
-    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+    if (href.endsWith("/rest/v1/rpc/sps_stop_completion_batch_cas")) {
       applyBatchOperations(state, JSON.parse(options.body).p_operations);
       return response([{ applied: true, outcome: "applied", current_versions: {} }]);
     }
@@ -1542,7 +1542,7 @@ test("server rejects completing a cancelled scheduled stop before any batch writ
     if (href.includes("/rest/v1/app_state?")) {
       return response(stateRows(href, state));
     }
-    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) { batchWrites += 1; return response([]); }
+    if (href.endsWith("/rest/v1/rpc/sps_stop_completion_batch_cas")) { batchWrites += 1; return response([]); }
     throw new Error(`Unexpected fetch: ${href}`);
   };
 
@@ -1574,7 +1574,7 @@ test("server rejects duplicate scheduled stop IDs instead of mutating the first 
     if (href.includes("/rest/v1/app_state?")) {
       return response(stateRows(href, state));
     }
-    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) { batchWrites += 1; return response([]); }
+    if (href.endsWith("/rest/v1/rpc/sps_stop_completion_batch_cas")) { batchWrites += 1; return response([]); }
     throw new Error(`Unexpected fetch: ${href}`);
   };
 
@@ -1608,7 +1608,7 @@ test("same completion key is idempotent, a competing key conflicts, and requeste
     if (href.includes("/rest/v1/app_state?")) {
       return response(stateRows(href, state));
     }
-    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+    if (href.endsWith("/rest/v1/rpc/sps_stop_completion_batch_cas")) {
       batchWrites += 1;
       const operations = JSON.parse(options.body).p_operations;
       if (batchWrites === 1) firstBatchKeys = operations.map((operation) => operation.key).sort();
@@ -1644,6 +1644,8 @@ test("same completion key is idempotent, a competing key conflicts, and requeste
   assert.equal(retry.statusCode, 200);
   assert.equal(retry.body.applied, false);
   assert.equal(retry.body.sameRequest, true);
+  assert.ok(first.body.receiptId);
+  assert.equal(retry.body.receiptId, first.body.receiptId, "a recovered completion keeps the original report identifier");
   assert.equal(retry.body.invoiceOutcome.status, "existing");
   assert.equal(retry.body.invoiceOutcome.invoiceId, "iv_stop_s1");
   assert.equal(batchWrites, 1);
@@ -1653,4 +1655,112 @@ test("same completion key is idempotent, a competing key conflicts, and requeste
   assert.equal(competitor.body.code, "completion-already-owned");
   assert.match(competitor.body.error, /draft was kept/i);
   assert.equal(batchWrites, 1);
+
+  // Schedule maintenance after a committed report cannot make a lost completion reply uncertain.
+  const originalSchedule = structuredClone(state.sps_schedule);
+  for (const scheduleValue of [[], [{ date: "07/12/2026", stops: [{ sid: "s1", clientId: "c1", cancelled: true }] }], [{ date: "07/12/2026", stops: [{ sid: "s1", clientId: "different-client" }] }], null]) {
+    if (scheduleValue === null) delete state.sps_schedule;
+    else state.sps_schedule = { value: scheduleValue, version: 20 };
+    const recovered = await invoke("attempt-device-one");
+    assert.equal(recovered.statusCode, 200, JSON.stringify(recovered.body));
+    assert.equal(recovered.body.receiptId, first.body.receiptId);
+    assert.equal(recovered.body.invoiceOutcome.invoiceId, "iv_stop_s1");
+    assert.equal(batchWrites, 1);
+  }
+  state.sps_schedule = originalSchedule;
+  const reverse = mockResponse();
+  await stopCompletionHandler({ method: "POST", headers: { authorization: "Bearer field-token" }, body: { mode: "reverse", clientId: "c1", sid: "s1" } }, reverse);
+  assert.equal(reverse.statusCode, 200, JSON.stringify(reverse.body));
+  assert.equal(batchWrites, 2);
+  assert.equal(state.sps_completed.value.__stopReversedRequests[first.body.receiptId].idempotencyKey, "attempt-device-one");
+  assert.equal(state.sps_catalog.value.treatments[0].stockByLoc.truck, 2);
+  const obsolete = await invoke("attempt-device-one");
+  assert.equal(obsolete.statusCode, 409);
+  assert.equal(obsolete.body.code, "completion-reversed");
+  assert.equal(batchWrites, 2);
+  assert.equal(state.sps_clients.value[0].history.length, 0);
+  const fresh = await invoke("attempt-new-after-reopen");
+  assert.equal(fresh.statusCode, 200, JSON.stringify(fresh.body));
+  assert.notEqual(fresh.body.receiptId, first.body.receiptId);
+  assert.equal(batchWrites, 3);
+  assert.equal(state.sps_catalog.value.treatments[0].stockByLoc.truck, 0);
+});
+
+test("staff completion retries concurrent owner edits without losing either report or changing customer invoices", async () => {
+  const team = [{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }];
+  const previousReport = { sid: "earlier-stop", notes: "Earlier visit", photos: [{ src: "sps-storage://client-media/earlier.jpg" }] };
+  const state = {
+    sps_clients: { value: [{ id: "c1", name: "Client", officeNotes: "Old office note", history: [previousReport] }], version: 2 },
+    sps_catalog: { value: { locations: [{ id: "truck", name: "Truck" }], treatments: [{ id: "t1", name: "Treatment", stockByLoc: { truck: 9 }, inventoryOz: "9" }], parts: [], products: [] }, version: 5 },
+    sps_completed: { value: {}, version: 3 },
+    sps_schedule: { value: [{ date: "10/07/2026", stops: [{ sid: "s1", clientId: "c1", type: "Pond Netting", assigneeId: "e1" }] }], version: 7 },
+    sps_invoices: { value: [{ id: "owner-invoice", clientId: "c1", number: "1025", status: "Sent", notes: "Old invoice note", total: 99 }], version: 4 },
+    sps_invoicing: { value: { numberPrefix: "INV-", nextNumber: 1026 }, version: 2 },
+  };
+  const entry = {
+    invoice: "$175.00", date: "10/07/2026", type: "Pond Netting", notes: "Net secured and leaves removed",
+    photos: [{ src: "sps-storage://client-media/before.jpg", label: "Before" }, { src: "sps-storage://client-media/after.jpg", label: "After" }],
+    treatmentsUsed: [{ id: "t1", name: "Treatment", oz: 2, locId: "truck" }],
+  };
+  const requests = [];
+  let batchAttempts = 0;
+  let baselineReads = 0;
+  globalThis.fetch = async (url, options = {}) => {
+    const href = String(url);
+    requests.push(href);
+    if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
+    if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
+    if (href.includes("/rest/v1/app_state?")) {
+      baselineReads += 1;
+      return response(stateRows(href, state));
+    }
+    if (href.endsWith("/rest/v1/rpc/sps_stop_completion_batch_cas")) {
+      batchAttempts += 1;
+      const operations = JSON.parse(options.body).p_operations;
+      if (batchAttempts === 1) {
+        // Another device commits while the staff request holds an older baseline.
+        state.sps_clients.value[0].officeNotes = "Owner updated gate access";
+        state.sps_clients.version += 1;
+        state.sps_invoices.value[0].notes = "Owner corrected invoice description";
+        state.sps_invoices.version += 1;
+        return response([{ applied: false, outcome: "conflict", conflict_key: "sps_clients", current_versions: { sps_clients: 3, sps_invoices: 5 } }]);
+      }
+      applyBatchOperations(state, operations);
+      return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
+    }
+    throw new Error(`Unexpected fetch: ${href}`);
+  };
+  const invoke = async () => {
+    const res = mockResponse();
+    await stopCompletionHandler({
+      method: "POST", headers: { authorization: "Bearer field-token" },
+      body: { mode: "complete", clientId: "c1", sid: "s1", idempotencyKey: "attempt-concurrent-owner-edit", entry },
+    }, res);
+    return res;
+  };
+
+  const saved = await invoke();
+  assert.equal(saved.statusCode, 200);
+  assert.equal(saved.body.applied, true);
+  assert.equal(batchAttempts, 2);
+  assert.equal(baselineReads, 2);
+  assert.equal(state.sps_clients.value[0].officeNotes, "Owner updated gate access");
+  assert.equal(state.sps_clients.value[0].history.length, 2);
+  assert.deepEqual(state.sps_clients.value[0].history[1], previousReport);
+  assert.deepEqual(state.sps_clients.value[0].history[0].photos, entry.photos);
+  assert.equal(state.sps_clients.value[0].history[0].notes, entry.notes);
+  assert.equal(state.sps_clients.value[0].history[0].completionReceiptId, saved.body.receiptId);
+  assert.equal(state.sps_catalog.value.treatments[0].stockByLoc.truck, 7);
+  assert.deepEqual(state.sps_invoices, { value: [{ id: "owner-invoice", clientId: "c1", number: "1025", status: "Sent", notes: "Owner corrected invoice description", total: 99 }], version: 5 });
+  assert.equal(state.sps_billing_reviews.value.length, 1);
+  assert.equal(state.sps_billing_reviews.value[0].number, "");
+  const confirmedState = structuredClone(state);
+
+  const retry = await invoke();
+  assert.equal(retry.statusCode, 200);
+  assert.equal(retry.body.applied, false);
+  assert.equal(retry.body.receiptId, saved.body.receiptId);
+  assert.equal(batchAttempts, 2, "a repeat report cannot perform another write");
+  assert.deepEqual(state, confirmedState);
+  assert.equal(requests.some(url => /quickbooks|send-|messages/.test(url)), false);
 });

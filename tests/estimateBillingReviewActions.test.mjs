@@ -3,6 +3,7 @@ import fs from "node:fs";
 import test from "node:test";
 import { scheduleApprovedEstimate } from "../estimateScheduleLink.js";
 import { findInvoiceForEstimate } from "../estimateInvoiceConversion.js";
+import { billingReviewSaveReceiptMatches } from "../billingReviewReceipt.js";
 
 const app = fs.readFileSync(new URL("../App.jsx", import.meta.url), "utf8");
 function action(name, next, dependencies) {
@@ -182,9 +183,10 @@ test("a review save conflict preserves typed changes instead of replacing them w
   const failure = new Error("Review changed");
   const canonical = { id: "review-1", reviewState: "pending", reviewRevision: 9, lineItems: [{ desc: "Saved old text" }] };
   const handler = action("mutateEstimateBillingReview", "saveConvertedInvoice", {
+    billingReviewSaveReceiptMatches,
     requestBillingReview: async payload => { if (payload) throw failure; return { reviews: [canonical] }; },
     setInvoiceEditor() { throw new Error("A save conflict must keep the editor state"); },
-    refreshBillingInvoiceState() {},
+    setBillingRefreshWarning() {}, refreshBillingInvoiceState() {},
   });
   await assert.rejects(handler("save", { id: canonical.id, reviewRevision: 8, lineItems: [{ desc: "Owner typed work" }] }), error => {
     assert.equal(error, failure);
@@ -200,8 +202,9 @@ test("an interrupted confirmation reloads its approval while rejected approval r
   ]) {
     const failure = new Error("Confirmation interrupted");
     const handler = action("mutateEstimateBillingReview", "saveConvertedInvoice", {
+      billingReviewSaveReceiptMatches,
       requestBillingReview: async payload => { if (payload) throw failure; return { reviews: [canonical] }; },
-      setInvoiceEditor() {}, refreshBillingInvoiceState() {},
+      setInvoiceEditor() {}, setBillingRefreshWarning() {}, refreshBillingInvoiceState() {},
     });
     await assert.rejects(handler("confirm", { id: canonical.id, reviewRevision: 8 }), error => {
       assert.deepEqual(error.data.review, canonical);
@@ -214,8 +217,9 @@ test("both review entry points include the chosen number only on a fresh confirm
   for (const [name, next] of [["mutateEstimateBillingReview", "saveConvertedInvoice"], ["mutateBillingReview", "migrateBillingReviews"]]) {
     const requests = [];
     const handler = action(name, next, {
+      billingReviewSaveReceiptMatches,
       requestBillingReview: async payload => { requests.push(payload); return { ok: true }; },
-      setInvoiceEditor() {}, setBillingReviews() {}, setBillingReceipt() {}, setBillingReviewsError() {},
+      setInvoiceEditor() {}, setBillingRefreshWarning() {}, setBillingReviews() {}, setBillingReceipt() {}, setBillingReviewsError() {},
       refreshBillingInvoiceState: async () => {}, onRefreshBillingState: async () => {}, loadBillingReviews: async () => [],
     });
     const review = { id: "review-1", number: "", reviewRevision: 3 };

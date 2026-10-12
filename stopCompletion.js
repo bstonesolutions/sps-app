@@ -1,4 +1,5 @@
 export const STOP_REVERSAL_LEDGER_KEY = "__stopReversalReceipts";
+export const STOP_REVERSED_REQUESTS_KEY = "__stopReversedRequests";
 export const STOP_BALANCE_OWNER_KEY = "__spsCompletionBalanceReceipt";
 
 const RECEIPT_VERSION = 1;
@@ -335,7 +336,7 @@ function applyPriorBalance(client, receipt, resolvedBefore) {
 function compactActiveLedger(completed, ledger) {
   const compacted = {};
   for (const [sid, marker] of Object.entries(completed || {})) {
-    if (sid === STOP_REVERSAL_LEDGER_KEY || marker === true) continue;
+    if (sid === STOP_REVERSAL_LEDGER_KEY || sid === STOP_REVERSED_REQUESTS_KEY || marker === true) continue;
     if (!isModernCompletionMarker(marker)) return { ok: false, code: "reversal-ledger-invalid" };
     const active = ledger && ledger[marker.receiptId];
     if (!active || receiptSchemaError(active) || active.id !== marker.receiptId || !sameId(active.sid, sid) || active.completedAt !== marker.completedAt) return { ok: false, code: "reversal-ledger-invalid" };
@@ -352,7 +353,7 @@ export function applyStopCompletion({ clients, catalog, completed, clientId, ent
   if (sid == null || String(sid).trim() === "") return { ok: false, code: "missing-stop-id" };
   if (!receiptId || typeof receiptId !== "string") return { ok: false, code: "missing-receipt-id" };
   if (typeof idempotencyKey !== "string" || idempotencyKey.length < 8 || idempotencyKey.length > 240) return { ok: false, code: "missing-idempotency-key" };
-  if (String(sid) === STOP_REVERSAL_LEDGER_KEY) return { ok: false, code: "reserved-stop-id" };
+  if ([STOP_REVERSAL_LEDGER_KEY, STOP_REVERSED_REQUESTS_KEY].includes(String(sid))) return { ok: false, code: "reserved-stop-id" };
   if (!entry || !isNonnegativeMoneyString(entry.invoice)) return { ok: false, code: "invalid-invoice" };
 
   const currentCompleted = completed && typeof completed === "object" ? completed : {};

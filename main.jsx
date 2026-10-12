@@ -431,7 +431,7 @@ function Root() {
     }).catch(failBootstrap);
 
     try {
-      const { data: sub } = supabase.auth.onAuthStateChange(async (_e, s) => {
+      const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => {
         if (!active) return;
         const eventVersion = ++authEventVersion;
         // Clear the on-disk cache ONLY on a real sign-out (not TOKEN_REFRESHED/USER_UPDATED), so a shared
@@ -442,11 +442,15 @@ function Root() {
             alreadyCleaned = sessionStorage.getItem(SIGNOUT_CLEANUP_MARKER) === "1";
             sessionStorage.removeItem(SIGNOUT_CLEANUP_MARKER);
           } catch (_) {}
-          if (!alreadyCleaned) {
-            try { await cleanupNativeSessionAfterUnexpectedSignOut(); } catch (_) {}
-          }
-          try { await store.clearCache(); } catch (_) {}
-          if (!active || eventVersion !== authEventVersion) return;
+          // clearCache resets the in-memory identity synchronously before its first await.
+          // Do not return its promise to Supabase: auth listeners run under the session lock,
+          // and a stalled disk/native operation would otherwise block every later API call.
+          try { Promise.resolve(store.clearCache()).catch(() => {}); } catch (_) {}
+          if (!alreadyCleaned) setTimeout(() => {
+            // A newer sign-in owns the device now; do not clear its native state.
+            if (!active || eventVersion !== authEventVersion) return;
+            try { Promise.resolve(cleanupNativeSessionAfterUnexpectedSignOut()).catch(() => {}); } catch (_) {}
+          }, 0);
         } else if (s && s.user) {
           try { store.setUser(s.user.id); } catch (_) {}
         }

@@ -29,7 +29,7 @@ test("QuickBooks failures retain progress through the confirmed SPS checkpoint",
   const helperStart = app.indexOf("const persistRetainedEditorInvoice = async");
   const helperEnd = app.indexOf("const reserveVisitSourcesBeforeAccounting = async", helperStart);
   const helper = app.slice(helperStart, helperEnd);
-  const saveStart = app.indexOf("const save = async");
+  const saveStart = app.indexOf("const save = async", app.indexOf("function InvoiceEditor("));
   const saveEnd = app.indexOf("const field =", saveStart);
   const save = app.slice(saveStart, saveEnd);
 
@@ -54,7 +54,7 @@ test("QuickBooks failures retain progress through the confirmed SPS checkpoint",
 
 test("completed-visit reservation advances the recovery baseline before QuickBooks", async () => {
   const app = await readApp();
-  const saveStart = app.indexOf("const save = async");
+  const saveStart = app.indexOf("const save = async", app.indexOf("function InvoiceEditor("));
   const saveEnd = app.indexOf("const field =", saveStart);
   const save = app.slice(saveStart, saveEnd);
   const reservationAt = save.indexOf("await reserveVisitSourcesBeforeAccounting(baseInv)");
@@ -80,7 +80,7 @@ test("invoice editor presents a restrained SPS checkpoint before the QuickBooks 
   assert.match(actions, /gridTemplateColumns: stackInvoiceSaveActions \? "1fr" : "minmax\(0, 2fr\) minmax\(0, 3fr\)"/);
   assert.match(actions, /role="group"/);
   assert.match(actions, /aria-label="Invoice save actions"/);
-  assert.match(actions, /disabled=\{progressState === "saving" \|\| qbState === "sending"\}/);
+  assert.match(actions, /disabled=\{spsSavePending \|\| progressState === "saving" \|\| qbState === "sending"\}/);
   assert.match(actions, /disabled=\{qbState === "sending" \|\| progressState === "saving"\}/);
   assert.ok(actions.indexOf("Save progress") < actions.indexOf("sync to QuickBooks"));
   const progressButtonStart = actions.indexOf("<button");

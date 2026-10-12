@@ -46,7 +46,7 @@ test("unexpected auth sign-out clears native customer state", () => {
   assert.match(app, /export async function cleanupNativeSessionAfterUnexpectedSignOut/);
   assert.match(app, /clearNativeArrival\(\)/);
   assert.match(app, /unregisterNativeDevicePush\(\)/);
-  assert.match(main, /await cleanupNativeSessionAfterUnexpectedSignOut\(\)/);
+  assert.match(main, /Promise\.resolve\(cleanupNativeSessionAfterUnexpectedSignOut\(\)\)\.catch/);
   assert.match(main, /sessionStorage\.getItem\(SIGNOUT_CLEANUP_MARKER\)/);
 });
 

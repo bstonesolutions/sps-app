@@ -189,3 +189,74 @@ test("enqueue fails closed when durable storage silently drops the write", async
     /could not be saved safely on this device/i,
   );
 });
+
+test("a dropped report update cannot certify an old payload with the same identity", async () => {
+  const storage = new MemoryStorage();
+  await enqueueCompletionIntent(intent(), { storage, now: 1000 });
+  storage.set = async () => null;
+  await assert.rejects(enqueueCompletionIntent(intent({ entry: { ...intent().entry, notes: "New field notes" } }), { storage, now: 2000 }), /could not be saved safely/);
+  const [retained] = await readCompletionOutbox("user-1", { storage, now: 2000 });
+  assert.equal(retained.request.entry.notes, intent().entry.notes);
+});
+
+test("a dropped delivery-status update rejects before a caller can send", async () => {
+  const storage = new MemoryStorage();
+  const saved = await enqueueCompletionIntent(intent(), { storage });
+  storage.set = async () => null;
+  let sent = false;
+  await assert.rejects(async () => {
+    await updateCompletionIntent("user-1", saved.id, { delivery: { channels: { text: { status: "sending" } } } }, { storage });
+    sent = true;
+  }, /could not be saved safely/);
+  assert.equal(sent, false);
+});
+
+test("a failed outbox read cannot replace other reports with an empty queue", async () => {
+  const storage = new MemoryStorage();
+  const saved = await enqueueCompletionIntent(intent(), { storage });
+  const original = structuredClone([...storage.values.entries()]);
+  storage.getVerified = async () => { throw new Error("Device read timed out"); };
+  await assert.rejects(enqueueCompletionIntent(intent({ sid: "another-stop", idempotencyKey: "another-stop-key" }), { storage }), /Device read timed out/);
+  assert.deepEqual([...storage.values.entries()], original);
+  delete storage.getVerified;
+  assert.deepEqual((await readCompletionOutbox("user-1", { storage }))[0].request, saved.request);
+});
+
+test("malformed outbox data is preserved for recovery rather than overwritten", async () => {
+  const storage = new MemoryStorage();
+  const key = "sps-completion-outbox:v1:user-1";
+  await storage.set(key, { items: [{ notes: "Original field report" }] });
+  await assert.rejects(enqueueCompletionIntent(intent(), { storage }), /needs recovery/);
+  assert.deepEqual(await storage.get(key), { items: [{ notes: "Original field report" }] });
+});
+
+test("a dropped draft update does not return stale notes as a successful save", async () => {
+  const storage = new MemoryStorage();
+  await persistStopDraft("user-1", "stop-42", { notesOffice: "Original" }, { storage, now: 1000 });
+  storage.set = async () => null;
+  await assert.rejects(persistStopDraft("user-1", "stop-42", { notesOffice: "Revised" }, { storage, now: 2000 }), /could not be saved safely/);
+  assert.equal((await readStopDraft("user-1", "stop-42", { storage })).payload.notesOffice, "Original");
+});
+
+test("draft cleanup waits for in-flight autosaves so a deleted draft cannot reappear", async () => {
+  const storage = new MemoryStorage();
+  const save = storage.set.bind(storage);
+  let finishWrite;
+  storage.set = async (key, value) => { await new Promise(resolve => { finishWrite = resolve; }); return save(key, value); };
+  const pending = persistStopDraft("user-1", "stop-42", { notesOffice: "Finished" }, { storage });
+  await new Promise(resolve => setImmediate(resolve));
+  const cleanup = removeStopDraft("user-1", "stop-42", { storage });
+  finishWrite();
+  await pending;
+  await cleanup;
+  assert.equal(await readStopDraft("user-1", "stop-42", { storage }), null);
+});
+
+test("a malformed or unreadable saved draft must not be mistaken for a new blank stop", async () => {
+  const storage = new MemoryStorage();
+  await storage.set("sps-stop-draft:v1:user-1:stop-42", { v: 1, payload: { notes: "Keep this report" } });
+  await assert.rejects(readStopDraft("user-1", "stop-42", { storage }), /could not be read safely/);
+  storage.getVerified = async () => { throw new Error("Device read failed"); };
+  await assert.rejects(readStopDraft("user-1", "stop-42", { storage }), /Device read failed/);
+  assert.equal(storage.values.size, 1);
+});

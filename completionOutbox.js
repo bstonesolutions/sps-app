@@ -49,20 +49,34 @@ function retainItems(items, now = Date.now()) {
 }
 
 async function readItems(uid, storage) {
-  const snapshot = await storage.get(completionOutboxKey(uid));
+  const snapshot = await readVerified(storage, completionOutboxKey(uid));
+  // A failed or malformed read is not an empty queue. Never overwrite reports
+  // that could still be present on disk with a newly created snapshot.
+  if (snapshot != null && (!Array.isArray(snapshot?.items) && !Array.isArray(snapshot))) {
+    throw new Error("The saved reports could not be read safely on this device. Try again before saving another report.");
+  }
+  const rows = Array.isArray(snapshot) ? snapshot : snapshot?.items || [];
+  if (normalizeItems(snapshot).length !== rows.length) {
+    throw new Error("A saved report needs recovery on this device. The original reports have been kept.");
+  }
   return normalizeItems(snapshot);
+}
+
+function readVerified(storage, key) {
+  return typeof storage.getVerified === "function" ? storage.getVerified(key) : storage.get(key);
 }
 
 async function writeItems(uid, items, storage) {
   const key = completionOutboxKey(uid);
   const snapshot = { v: 1, uid: cleanPart(uid), updatedAt: Date.now(), items: clone(items) };
   await storage.set(key, snapshot);
-  const verified = await storage.get(key);
-  const confirmed = normalizeItems(verified);
-  if (confirmed.length !== items.length || items.some(item => !confirmed.some(saved => saved.id === item.id && saved.idempotencyKey === item.idempotencyKey))) {
+  const verified = await readVerified(storage, key);
+  // The same report ID can have a newer payload or delivery status. Checking
+  // identities alone could certify a dropped write and repeat a client send.
+  if (JSON.stringify(verified) !== JSON.stringify(snapshot)) {
     throw new Error("This report could not be saved safely on this device. Keep this screen open and try again.");
   }
-  return confirmed;
+  return normalizeItems(verified);
 }
 
 export async function readCompletionOutbox(uid, { storage = idb, now = Date.now() } = {}) {
@@ -246,20 +260,32 @@ export async function dismissCompletionIntent(uid, id, { storage = idb, now = Da
 export async function persistStopDraft(uid, sid, payload, { storage = idb, now = Date.now() } = {}) {
   const key = stopDraftKey(uid, sid);
   const value = { v: 1, uid: cleanPart(uid), sid: cleanPart(sid), updatedAt: now, payload: clone(payload) };
-  await storage.set(key, value);
-  const verified = await storage.get(key);
-  if (!verified || verified.v !== 1 || verified.uid !== value.uid || verified.sid !== value.sid || !verified.payload) {
-    throw new Error("This stop draft could not be saved safely on this device.");
-  }
-  return clone(verified);
+  return serialize(key, async () => {
+    await storage.set(key, value);
+    const verified = await readVerified(storage, key);
+    if (JSON.stringify(verified) !== JSON.stringify(value)) {
+      throw new Error("This stop draft could not be saved safely on this device.");
+    }
+    return clone(verified);
+  });
 }
 
 export async function readStopDraft(uid, sid, { storage = idb } = {}) {
-  const value = await storage.get(stopDraftKey(uid, sid));
-  if (!value || value.v !== 1 || !value.payload) return null;
-  return clone(value);
+  const key = stopDraftKey(uid, sid);
+  return serialize(key, async () => {
+    const value = await readVerified(storage, key);
+    if (value == null) return null;
+    if (value.v !== 1 || value.uid !== cleanPart(uid) || value.sid !== cleanPart(sid) || !value.payload) {
+      throw new Error("The saved stop draft could not be read safely on this device. The original draft has been kept.");
+    }
+    return clone(value);
+  });
 }
 
 export async function removeStopDraft(uid, sid, { storage = idb } = {}) {
-  await storage.del(stopDraftKey(uid, sid));
+  const key = stopDraftKey(uid, sid);
+  return serialize(key, async () => {
+    await storage.del(key);
+    if (await readVerified(storage, key) != null) throw new Error("The saved stop draft could not be cleared on this device.");
+  });
 }

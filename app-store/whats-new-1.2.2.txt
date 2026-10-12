@@ -1,0 +1,11 @@
+Billing is easier to review and finish.
+
+• Review, edit, or discard completed-job charges before creating an invoice.
+• Confirm and sync to QuickBooks with automatic numbering, a number you enter, or a choice from available numbers.
+• Improved prepaid maintenance coverage, service-month descriptions, invoice search, and draft cleanup.
+• More reliable saves for invoices, estimates, and client changes, with clearer confirmation when a connection is interrupted.
+• Improved sign-in recovery and app stability.
+• Fixed a crash when opening a scheduled stop with a saved service price.
+• Fixed an issue that prevented the app from opening on iOS 27.
+• Fixed report sync being blocked by unrelated changes and improved recovery of saved stop drafts after connection or device-storage interruptions.
+• Protected saved reports from stale device changes and added confirmed report editing.

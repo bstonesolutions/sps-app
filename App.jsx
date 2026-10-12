@@ -33,6 +33,7 @@ import { deleteSelectedInvoiceDrafts, invoiceBulkDeleteEligibility, invoiceDelet
 import { emptyMaintenancePaymentLedger, normalizeMaintenancePaymentLedger } from "./maintenancePaymentLedger";
 import InvoiceClientPicker from "./InvoiceClientPicker";
 import BillingReviewQueue from "./BillingReviewQueue.jsx";
+import { billingReviewSaveReceiptMatches } from "./billingReviewReceipt";
 import InvoiceDeletionReview, { InvoiceDeletionConflicts } from "./InvoiceDeletionReview.jsx";
 import { initialInvoiceClientId, invoiceClientSnapshot, resolveInvoiceClient } from "./invoiceClientSelection";
 import { invoiceMaintenanceCoverageIssue, withMatchedMaintenanceServiceMonths } from "./maintenanceInvoiceCoverage";
@@ -92,6 +93,7 @@ import {
   updateCompletionIntent,
 } from "./completionOutbox";
 import { requestCompletedStop } from "./completionRequest";
+import { buildReportEditRequest, requestStopReportEdit } from "./stopReport";
 import {
   DASHBOARD_WIDGETS,
   canEditDashboardTarget,
@@ -104,6 +106,7 @@ import {
 import { formatAccountingCurrency, resolveInvoiceAccountingSummary } from "./invoiceAccountingSummary";
 import { selectActionableCommsRows, summarizeActionableCommsRows, commsNavigationCount, initialCommsSection, primaryCommsSections } from "./commsPriority";
 import { currentSharedConflict, sharedConflictReview } from "./sharedConflictNotice";
+import { mergeStoredState } from "./stateMerge";
 
 // Manual/foreground refreshes compare these small version counters first and download only the
 // shared slices that changed. Keeping this list explicit prevents a Sync tap from tearing down the
@@ -525,6 +528,11 @@ function reloadAfterDrain(delay = 0) {
 // Shared-state operations return receipts rather than throwing for several important failure modes
 // (deferred offline writes, an initialization failure, an active drain, or a merge conflict). UI
 // callers must inspect those receipts before claiming that a sync completed.
+function matchesPendingEditorCreation(current, attempted) {
+  if (!current || !attempted || current.createdAt == null || attempted.createdAt == null) return false;
+  return ["id", "createdAt", "clientId", "number", "qbId"].every(key => String(current[key] ?? "") === String(attempted[key] ?? ""));
+}
+
 function storeReceiptIssue(receipt, label = "Sync") {
   if (receipt && receipt.ok === true) return "";
   if (!receipt) return `${label} did not receive server confirmation.`;
@@ -1718,6 +1726,11 @@ function useStoredState(key, initial) {
   // `initial` and matches `lastPersisted`, so the save effect skips — a blank/stale remount
   // can never overwrite good saved data (the same bug family as the team clobber in Item 1).
   const lastPersisted = useRef(JSON.stringify(initial));
+  const projectedBase = useRef(null);
+  const saveOptions = baseValue => ({
+    baseValue,
+    ...(projectedBase.current !== null ? { projectedBaseValue: projectedBase.current } : {}),
+  });
   // load once on mount
   useEffect(() => {
     let alive = true;
@@ -1745,13 +1758,14 @@ function useStoredState(key, initial) {
     let cancelled = false;
     (async () => {
       const submittedBase = lastPersisted.current;
-      const res = await store.set(key, json, { baseValue: submittedBase });
+      const res = await store.set(key, json, saveOptions(submittedBase));
       if (cancelled) return;
       if (res && res.ok) {
         // Bug #2 — advance the fence ONLY after a CONFIRMED save. On failure the value is queued for
         // durable retry and lastPersisted stays put, so the next edit (or a reconnect flush) re-sends it.
         const savedJson = typeof res.value === "string" ? res.value : json;
         lastPersisted.current = savedJson;
+        projectedBase.current = null;
         // A compare-and-swap retry may have safely merged another employee's independent changes.
         // Adopt that exact confirmed value now, otherwise the next local edit could remove the merge.
         if (savedJson !== json) {
@@ -1778,6 +1792,7 @@ function useStoredState(key, initial) {
       // the storage cache contains the exact CAS-confirmed merge, so reflect it in React as well.
       if (detail.key === key && detail.forceRemote) {
         const res = await store.get(key);
+        projectedBase.current = null;
         if (res && res.value != null) {
           try { const parsed = JSON.parse(res.value); lastPersisted.current = res.value; setValue(parsed); } catch (_) {}
         } else {
@@ -1788,10 +1803,11 @@ function useStoredState(key, initial) {
         return;
       }
       if (localJson !== lastPersisted.current) {
-        const r = await store.set(key, localJson, { baseValue: lastPersisted.current }); // merge the in-flight local edit
+        const r = await store.set(key, localJson, saveOptions(lastPersisted.current)); // merge the in-flight local edit
         if (r && r.ok) {
           const savedJson = typeof r.value === "string" ? r.value : localJson;
           lastPersisted.current = savedJson;
+          projectedBase.current = null;
           if (savedJson !== localJson) { try { setValue(JSON.parse(savedJson)); } catch (_) {} }
         }
         return;
@@ -1829,20 +1845,34 @@ function useStoredState(key, initial) {
     }
     if (typeof window.__onSpsSyncStart === "function") window.__onSpsSyncStart();
     const submittedBase = lastPersisted.current;
-    const receipt = await store.set(key, json, { baseValue: submittedBase });
+    const receipt = await store.set(key, json, saveOptions(submittedBase));
     if (!receipt?.ok) {
       if (typeof window.__onSpsSyncFail === "function") window.__onSpsSyncFail();
       return receipt || { ok: false, error: new Error(`${key} was not saved.`) };
     }
     const savedJson = typeof receipt.value === "string" ? receipt.value : json;
     lastPersisted.current = savedJson;
+    projectedBase.current = null;
     let parsedValue = nextValue;
     try { parsedValue = JSON.parse(savedJson); } catch (_) {}
     setValue(parsedValue);
     if (typeof window.__onSpsSync === "function") window.__onSpsSync();
     return { ...receipt, ok: true, value: savedJson, parsedValue };
   }, [key, loaded]);
-  return [value, setValue, loaded, persistExact];
+  // A server-confirmed stop refresh can coexist with unresolved edits in this section. Adopt its
+  // display projection without autosaving it as a new whole-section edit. The functional update
+  // preserves React changes that have not reached their save effect yet.
+  const adoptStoredDisplay = useCallback((nextValue) => {
+    const projection = JSON.stringify(nextValue);
+    const priorDisplayBase = lastPersisted.current;
+    lastPersisted.current = projection;
+    projectedBase.current = projection;
+    setValue(current => {
+      const merged = mergeStoredState(key, priorDisplayBase, JSON.stringify(current), projection, { prefer: "local" });
+      return merged.value === undefined ? current : JSON.parse(store.projectDisplay(key, merged.value, projection));
+    });
+  }, [key]);
+  return [value, setValue, loaded, persistExact, adoptStoredDisplay];
 }
 // Debounced auto-save for a Customize section. Edits update a local draft
 // immediately (responsive UI) and commit to the real setter ~500ms after the
@@ -9220,8 +9250,11 @@ function ClientEquipment({ client, invoices, onChange }) {
   );
 }
 
-function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
-  const { T, perms } = useApp();
+function HistoryEditModal({ entry: initialEntry, clientId, catalog, team, onSave, onClose }) {
+  const { T, perms, saveStopReport } = useApp();
+  // Keep the editing baseline stable if another device refreshes this client's history.
+  const entry = useRef(initialEntry).current;
+  const saveInFlight = useRef(false);
   const vp = useViewport();
   const wide = vp.isDesktop || vp.isTablet; // desktop/iPad → two-column layout
   const isRecovery = !!entry.__recoveryDraft;
@@ -9245,8 +9278,10 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
   // Service type, tech, services performed, products used — to mirror the full stop view
   const [type, setType] = useState(entry.type || "");
   const [tech, setTech] = useState(entry.tech || "");
-  const [svcList, setSvcList] = useState((entry.services || []).map(s => typeof s === "string" ? { name: s, price: "" } : { name: s.name, price: s.price || "" }));
-  const [prodList, setProdList] = useState((entry.products || []).map(p => typeof p === "string" ? p : p.name));
+  const originalServices = (entry.services || []).map(s => typeof s === "string" ? { name: s, price: "" } : { ...s, name: s.name, price: s.price ?? "" });
+  const originalProducts = (entry.products || []).map(p => typeof p === "string" ? p : p.name);
+  const [svcList, setSvcList] = useState(originalServices);
+  const [prodList, setProdList] = useState(originalProducts);
   const [productsOpen, setProductsOpen] = useState(false); // collapsed by default, like the live picker
   const [productSearch, setProductSearch] = useState("");
   const [revenue, setRevenue] = useState(String(b.revenue ?? (entry.invoice || "").replace(/[^\d.]/g, "")));
@@ -9275,7 +9310,8 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
     setBusy(false);
   };
 
-  const save = () => {
+  const save = async () => {
+    if (busy || saveInFlight.current) return;
     if (isRecovery) {
       const hasReading = Object.values(readings || {}).some(value => value !== "" && value != null && value !== "—");
       const hasActualVisitDetail = notes.trim() || hasReading || photos.length > 0;
@@ -9288,7 +9324,8 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
     const updated = {
       ...entry,
       type: type || entry.type, tech,
-      services: svcList.filter(s => s.name), products: prodList,
+      ...(JSON.stringify(svcList) === JSON.stringify(originalServices) ? {} : { services: svcList.filter(s => s.name) }),
+      ...(JSON.stringify(prodList) === JSON.stringify(originalProducts) ? {} : { products: prodList }),
       notes, officeNotes, readings, readingStatus, photos,
       ph: readings["pH"] || "—", ammonia: readings["Ammonia"] || "—", nitrite: readings["Nitrite"] || "—", temp: readings["Temperature"] || "—",
     };
@@ -9299,13 +9336,32 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
     }
     // Staff who can edit visit notes but cannot see profit must not be able to
     // reveal or silently recalculate the saved financial snapshot.
-    if (canEditFinancials) {
+    const financialsChanged = [
+      [revenue, b.revenue ?? (entry.invoice || "").replace(/[^\d.]/g, "")],
+      [labor, b.labor], [treatment, b.treatment], [partsCost, b.parts], [product, b.product],
+      [gas, b.gas], [insurance, b.insurance], [equipment, b.equipment], [overhead, b.overhead],
+    ].some(([current, original]) => num(current) !== num(original));
+    if (canEditFinancials && financialsChanged) {
       updated.invoice = revenue ? `$${revenue}` : "$0";
       updated.quoted_price = num(revenue);
       updated.breakdown = { ...b, revenue: num(revenue), effectiveRevenue, labor: num(labor), treatment: num(treatment), parts: num(partsCost), product: num(product), gas: num(gas), insurance: num(insurance), equipment: num(equipment), overhead: num(overhead), total, profit, margin };
     }
-    onSave(updated);
-    onClose();
+    saveInFlight.current = true;
+    setBusy(true);
+    try {
+      if (entry.completionReceiptId) {
+        if (!saveStopReport) throw new Error("Report saving is unavailable. Keep your edits open and try again.");
+        await saveStopReport({ clientId, entry: isRecovery ? null : entry, updated });
+      } else {
+        await onSave(updated);
+      }
+      onClose();
+    } catch (error) {
+      setSaveError(error?.message || "The report could not be saved. Your edits are still here.");
+    } finally {
+      saveInFlight.current = false;
+      setBusy(false);
+    }
   };
 
   const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 };
@@ -9487,13 +9543,14 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
 
   const saveBtn = (
     <div>
-      {saveError && <div role="alert" style={{ marginBottom: 8, borderRadius: 10, padding: "9px 11px", background: hexA("#B45309", 0.08), color: "#92400E", fontSize: 12, fontWeight: 700, lineHeight: 1.4 }}>{saveError}</div>}
-      <Btn onClick={save} style={{ width: "100%", padding: "12px", borderRadius: 12 }}>{isRecovery ? "Save rebuilt report" : "Save Changes"}</Btn>
+      {saveError && <div role="alert" style={{ marginBottom: 12, borderLeft: `3px solid ${T.primary}`, padding: "4px 0 4px 12px", color: T.text, fontSize: 13, fontWeight: 650, lineHeight: 1.5 }}>{saveError}</div>}
+      <Btn onClick={save} disabled={busy} style={{ width: "100%", padding: "14px", borderRadius: 10 }}>{busy ? "Saving report…" : isRecovery ? "Save rebuilt report" : "Save report"}</Btn>
     </div>
   );
 
   return (
-    <Modal title={`${isRecovery ? "Rebuild report" : "Edit Service"} — ${entry.date}`} onClose={onClose} maxWidth={wide ? 940 : 600}>
+    <Modal title={isRecovery ? "Rebuild report" : "Edit report"} onClose={busy ? () => {} : onClose} maxWidth={wide ? 940 : 600}>
+      <div style={{ color: T.textMuted, fontSize: 13, marginBottom: 18 }}>{entry.date} · {entry.type || "Service visit"}</div>
       {isRecovery && (
         <div style={{ display: "flex", alignItems: "flex-start", gap: 9, background: hexA("#B45309", 0.08), border: `1px solid ${hexA("#B45309", 0.22)}`, borderRadius: 12, padding: "10px 11px", marginBottom: 15 }}>
           <Icon name="warning" size={15} style={{ color: "#B45309", flexShrink: 0, marginTop: 1 }} />
@@ -9898,7 +9955,7 @@ function ClientHistory({ client, catalog, team, onChange }) {
       })}
 
       {editIdx !== null && (
-        <HistoryEditModal entry={history[editIdx]} catalog={catalog} team={team} onSave={u => saveEntry(editIdx, u)} onClose={() => setEditIdx(null)} />
+        <HistoryEditModal entry={history[editIdx]} clientId={client.id} catalog={catalog} team={team} onSave={u => saveEntry(editIdx, u)} onClose={() => setEditIdx(null)} />
       )}
     </div>
   );
@@ -10716,12 +10773,23 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
   // IndexedDB copy (the durable field fallback when the network/app_state write is unavailable).
   // Wait for the shared draft to hydrate, then restore the newer copy exactly once.
   const draftRestored = useRef(false);
+  const [draftLoadAttempt, setDraftLoadAttempt] = useState(0);
+  const [draftLoadState, setDraftLoadState] = useState("loading");
   useEffect(() => {
     if (!draftReady || draftRestored.current) return;
     let alive = true;
+    setDraftLoadState("loading");
     (async () => {
       let local = null;
-      try { if (draftScope && stop.sid) local = await readStopDraft(draftScope, stop.sid); } catch (_) {}
+      try {
+        if (draftScope && stop.sid) local = await readStopDraft(draftScope, stop.sid);
+      } catch (error) {
+        // A failed read must never unlock blank defaults for autosave or completion. The device
+        // may hold a newer report with photos that the shared draft has not received yet.
+        if (alive) setDraftLoadState("error");
+        console.warn("stop draft restore failed:", error?.message || error);
+        return;
+      }
       if (!alive || draftRestored.current) return;
       const shared = draft && typeof draft === "object" ? draft : null;
       const sharedAt = Number(shared?.__draftSavedAt || 0);
@@ -10752,9 +10820,10 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
         if (d.overhead != null) setOverhead(d.overhead);
       }
       draftRestored.current = true;
+      setDraftLoadState("ready");
     })();
     return () => { alive = false; };
-  }, [draftReady, draftScope, stop.sid]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [draftReady, draftScope, stop.sid, draftLoadAttempt]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const draftSnapshot = {
     checklist, readings, readingStatus, tx, partsUsed, partBill, productsQty, productBill,
@@ -10831,7 +10900,8 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
   const effectiveRevenue = num(revenue) + partsBilledRetail + productsBilledRetail;
   const profit = effectiveRevenue - totalCost;
   const margin = effectiveRevenue > 0 ? (profit / effectiveRevenue) * 100 : 0;
-  const money = (n) => `$${n.toFixed(2)}`;
+  // Service prices remain strings in editable fields and restored stop drafts.
+  const money = formatAccountingCurrency;
 
   const addPhotos = async (e, defaultLabel = "General") => {
     const files = Array.from(e.target.files || []);
@@ -10989,6 +11059,10 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
 
   const finish = async () => {
     if (finishInFlight.current || busy) return;
+    if (!draftRestored.current) {
+      setSaveError("Load the saved draft before completing this stop.");
+      return;
+    }
     finishInFlight.current = true;
     setSaveBusy(true);
     setSaveError("");
@@ -11217,6 +11291,21 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
   const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
   const smallInput = { width: "100%", padding: "9px 10px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "center" };
   const sectionGap = { marginBottom: 18 };
+
+  if (draftLoadState !== "ready") {
+    const failed = draftLoadState === "error";
+    return (
+      <Modal title={client?.name || "Service"} onClose={onClose}>
+        <div role={failed ? "alert" : "status"} style={{ borderLeft: `3px solid ${T.primary}`, padding: "2px 0 2px 14px" }}>
+          <div style={{ fontSize: 19, fontWeight: 800, color: T.text, lineHeight: 1.25 }}>{failed ? "Your draft could not be opened" : "Loading your saved report"}</div>
+          <p style={{ fontSize: 14, color: T.textMuted, lineHeight: 1.5, margin: "10px 0 0" }}>
+            {failed ? "Try loading it again before editing this stop. Its saved copy has not been replaced." : "Checking this device for the latest notes and photos before you edit this stop."}
+          </p>
+        </div>
+        {failed && <div style={{ marginTop: 20 }}><Btn onClick={() => setDraftLoadAttempt(attempt => attempt + 1)} style={{ boxShadow: "none", borderRadius: 8 }}>Try loading draft again</Btn></div>}
+      </Modal>
+    );
+  }
 
   if (done) {
     const completionNeedsReview = completionSync?.state === "needs_review";
@@ -15413,6 +15502,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
       {historyEdit && (
         <HistoryEditModal
           entry={historyEdit.entry}
+          clientId={historyEdit.clientId}
           catalog={catalog}
           team={team}
           onSave={(upd) => {
@@ -18908,6 +18998,9 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   const [coverageLoading, setCoverageLoading] = useState(false);
   const [coverageError, setCoverageError] = useState("");
   const progressBaselineRef = useRef(invoice ? JSON.stringify(invoice) : "");
+  const invoiceSaveBusyRef = useRef(false);
+  const pendingSpsSaveRef = useRef(null);
+  const [spsSavePending, setSpsSavePending] = useState(false);
   const editRevisionRef = useRef(0);
   const [progressState, setProgressState] = useState("idle"); // idle | saving | saved | changed | error
   const [progressMsg, setProgressMsg] = useState("");
@@ -19235,17 +19328,33 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   // Save the invoice. If QuickBooks is connected, sync automatically (no extra button).
   // B9-2: persist, then stay in-flow and offer the client-notification step (when
   // there's a client + line items); otherwise just close.
-  const finishSave = (finalInv) => {
-    onSave(finalInv);
-    // A successful QuickBooks response may normalize the invoice's lines. Keep
-    // the editor on that result so an older coverage check cannot leave it busy.
-    setInv(finalInv);
-    setIsPersisted(true);
-    setQbState("done");
-    setQbMsg("");
-    setCoverageError("");
-    if (client && (finalInv.lineItems || []).length) setSendStep(finalInv);
-    else onClose();
+  const finishSave = async (finalInv) => {
+    // Keep a confirmed accounting identity even if the separate SPS save fails.
+    // Retrying this editor must update that invoice, never create another one.
+    if (finalInv.qbId) setInv(finalInv);
+    const attemptedInvoice = pendingSpsSaveRef.current;
+    if (!attemptedInvoice) pendingSpsSaveRef.current = finalInv;
+    try {
+      const result = await onSave(finalInv, { confirmedSave: true, baselineJson: progressBaselineRef.current, ...(attemptedInvoice ? { attemptedInvoice } : {}) });
+      const confirmed = result?.invoice || result;
+      if (!confirmed || confirmed.id !== finalInv.id || result?.ok === false) throw new Error(result?.error || "The invoice save was not confirmed.");
+      progressBaselineRef.current = JSON.stringify(confirmed);
+      pendingSpsSaveRef.current = null;
+      setSpsSavePending(false);
+      setInv(confirmed);
+      setIsPersisted(true);
+      setQbState("done");
+      setQbMsg("");
+      setCoverageError("");
+      if (client && (confirmed.lineItems || []).length) setSendStep(confirmed);
+      else onClose();
+      return { ok: true, invoice: confirmed };
+    } catch (error) {
+      setSpsSavePending(true);
+      setQbState("error");
+      setQbMsg(`${finalInv.qbId ? "QuickBooks saved this invoice, but SPS could not confirm its saved copy. " : "SPS could not confirm this invoice save. "}${error?.message || "Try again."} Your changes are still here. Retry Save to finish.`);
+      return { ok: false, error };
+    }
   };
 
   // QuickBooks errors keep the editor open. Persist that recovery state through the
@@ -19395,7 +19504,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   // Save a confirmed SPS checkpoint without entering any QuickBooks or client-delivery path.
   // The root callback performs the completed-visit validation and atomic shared-state write.
   const saveProgress = async () => {
-    if (typeof onPersistProgress !== "function" || progressState === "saving" || qbState === "sending") return;
+    if (spsSavePending || invoiceSaveBusyRef.current || typeof onPersistProgress !== "function" || progressState === "saving" || qbState === "sending") return;
     const candidate = selectedClientSnapshot();
     if (!candidate) return;
     const revisionAtStart = editRevisionRef.current;
@@ -19426,9 +19535,18 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   };
 
   const save = async () => {
-    if (progressState === "saving" || qbState === "sending") return;
-    let baseInv = selectedClientSnapshot();
+    if (invoiceSaveBusyRef.current || progressState === "saving" || qbState === "sending") return;
+    let baseInv = pendingSpsSaveRef.current || selectedClientSnapshot();
     if (!baseInv) return;
+    invoiceSaveBusyRef.current = true;
+    setQbState("sending");
+    setQbMsg("");
+    try {
+    // Finish the exact prior SPS checkpoint before starting another accounting write.
+    if (pendingSpsSaveRef.current) {
+      await finishSave(pendingSpsSaveRef.current);
+      return;
+    }
     const revisionAtSaveStart = editRevisionRef.current;
     // Persist the client link + a name snapshot on the record (Bug 1) — never rely on
     // a transient field. clientId resolves the live client; clientName is the fallback.
@@ -19486,7 +19604,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     // Not connected to QB or no line items — just save locally.
     // (QuickBooks requires at least one line, so an empty invoice can't sync.)
     if (!qbIsConnected() || !(inv.lineItems || []).length) {
-      finishSave(baseInv);
+      await finishSave(baseInv);
       return;
     }
 
@@ -19531,7 +19649,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         && originalCreateIntent !== currentCreateIntent
       );
       if (!changedAfterUnknownCreate) {
-        finishSave(applyQuickBooksInvoiceSaveResult(baseInv, result));
+        await finishSave(applyQuickBooksInvoiceSaveResult(baseInv, result));
         return;
       }
 
@@ -19675,7 +19793,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         return;
       }
       if (createAttempted) await acceptCreateResult(data);
-      else finishSave(applyQuickBooksInvoiceSaveResult(baseInv, {
+      else await finishSave(applyQuickBooksInvoiceSaveResult(baseInv, {
           ...data,
           qbId: data.qbId || inv.qbId,
           paymentLink: data.paymentLink || inv.paymentLink,
@@ -19694,6 +19812,12 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           : `QuickBooks could not be reached, and SPS could not confirm this progress. Keep this editor open. ${persisted.error?.message || "Try saving progress again."}`);
       }
     }
+    } catch (error) {
+      setQbState("error");
+      setQbMsg(error?.message || "This invoice could not be saved. Your changes are still here.");
+    } finally {
+      invoiceSaveBusyRef.current = false;
+    }
   };
 
   const field = { width: "100%", padding: "11px 13px", border: `1px solid ${T.border}`, borderRadius: 11, fontSize: 15, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
@@ -19707,7 +19831,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   if (!billingReview && sendStep && sendClient) return <InvoiceSendStep invoice={sendStep} client={sendClient} onSent={onSave} onClose={onClose} />;
 
   return (
-    <Modal title={billingReview ? "Billing review" : isPersisted || invoice ? `Edit ${inv.number}` : "New Invoice"} onClose={() => { if (!reviewBusyRef.current) onClose(); }}>
+    <Modal title={billingReview ? "Billing review" : isPersisted || invoice ? `Edit ${inv.number}` : "New Invoice"} onClose={() => { if (!reviewBusyRef.current && !invoiceSaveBusyRef.current) onClose(); }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
         {billingReview && <p style={{ margin: 0, paddingLeft: 12, borderLeft: `3px solid ${T.primary}`, color: T.textMuted, fontSize: 13, lineHeight: 1.5 }}>{reviewLocked ? "This confirmation is being checked. Retry sync to finish the same invoice." : "Edit the work and charges, then confirm to create the invoice in QuickBooks. No invoice number is assigned yet."}</p>}
         {!billingReview && editorNeedsReview && (
@@ -19769,7 +19893,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           </div>
         )}
         <fieldset
-          disabled={canCompareQuickBooksVersions || (billingReview && (reviewLocked || !!reviewBusy))}
+          disabled={canCompareQuickBooksVersions || spsSavePending || progressState === "saving" || qbState === "sending" || (billingReview && (reviewLocked || !!reviewBusy))}
           style={{ display: "flex", flexDirection: "column", gap: 18, border: 0, padding: 0, margin: 0, minWidth: 0, opacity: canCompareQuickBooksVersions || reviewLocked ? 0.58 : 1 }}
         >
         <div style={{ display: "flex", flexDirection: narrowInvoice ? "column" : "row", gap: 10 }}>
@@ -20033,7 +20157,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
                 type="button"
                 data-invoice-save-progress
                 onClick={saveProgress}
-                disabled={progressState === "saving" || qbState === "sending"}
+                disabled={spsSavePending || progressState === "saving" || qbState === "sending"}
                 aria-describedby="invoice-progress-save-help"
                 aria-busy={progressState === "saving" || undefined}
                 style={{ minHeight: 48, padding: "12px 15px", borderRadius: 11, border: `1.5px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 13.5, fontWeight: 800, fontFamily: "inherit", cursor: progressState === "saving" || qbState === "sending" ? "default" : "pointer", opacity: progressState === "saving" || qbState === "sending" ? 0.62 : 1 }}
@@ -20042,8 +20166,8 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
               </button>
               <Btn onClick={save} disabled={qbState === "sending" || progressState === "saving"} style={{ width: "100%", minHeight: 48, padding: "12px 15px", borderRadius: 11, display: "flex", alignItems: "center", justifyContent: "center", gap: 9 }}>
                 {qbState === "sending"
-                  ? <><div style={{ width: 16, height: 16, border: "2px solid rgba(255,255,255,0.4)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} /> Saving &amp; syncing…</>
-                  : `${isPersisted || invoice ? "Save" : "Create"} & sync to QuickBooks`}
+                  ? <><div style={{ width: 16, height: 16, border: "2px solid rgba(255,255,255,0.4)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} /> {spsSavePending ? "Saving in SPS…" : "Saving & syncing…"}</>
+                  : spsSavePending ? "Retry SPS save" : `${isPersisted || invoice ? "Save" : "Create"} & sync to QuickBooks`}
               </Btn>
             </div>
             <div id="invoice-progress-save-help" style={{ marginTop: 7, fontSize: 11.5, lineHeight: 1.45, color: T.textMuted }}>
@@ -20063,7 +20187,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           <Btn onClick={save} disabled={qbState === "sending"} style={{ width: "100%", padding: "13px", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", gap: 9 }}>
             {qbState === "sending"
               ? <><div style={{ width: 16, height: 16, border: "2px solid rgba(255,255,255,0.4)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} /> Saving &amp; syncing…</>
-              : (invoice ? "Save Invoice" : "Create Invoice") + (qbConnected ? " & Sync to QuickBooks" : "")}
+              : spsSavePending ? "Retry SPS save" : (invoice ? "Save Invoice" : "Create Invoice") + (qbConnected ? " & Sync to QuickBooks" : "")}
           </Btn>
         )}
 
@@ -21758,6 +21882,7 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("active");
   const [invoiceEditor, setInvoiceEditor] = useState(null);
+  const [billingRefreshWarning, setBillingRefreshWarning] = useState("");
   const screenRef = useRef(null);
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
@@ -21767,17 +21892,39 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
     return () => cancelAnimationFrame(frame);
   }, [view, selected && selected.id]);
 
-  // Persist without leaving the editor — used by "Download PDF" so exporting saves your edits but
-  // doesn't kick you back to the list (that close was the reported bug).
-  const persistEstimate = (est) => {
-    if (!canManage) return;
-    setEstimates(prev => {
-      const exists = (prev||[]).some(e => e.id === est.id);
-      return exists ? prev.map(e => e.id === est.id ? retainEstimateBillingLinks(est, e) : e) : [est, ...(prev||[])];
-    });
-    setSelected(est);
+  // Every save waits for this edit's receipt. The form's original record remains
+  // the merge baseline even if another device updates the list while it is open.
+  const persistEstimate = async (est, options = {}) => {
+    if (!canManage) throw new Error("You do not have permission to save estimates.");
+    const rows = Array.isArray(estimates) ? estimates : [];
+    const matches = rows.filter(entry => String(entry.id) === String(est.id));
+    if (matches.length > 1) throw new Error("This estimate has duplicate records. Reopen it before saving.");
+    const current = matches[0];
+    let original = Object.prototype.hasOwnProperty.call(options, "baselineEstimate") ? options.baselineEstimate : current;
+    if (!original && current) {
+      if (!matchesPendingEditorCreation(current, options.attemptedEstimate)) throw new Error("This estimate already exists with different details. Your changes are still here; reopen it to review the saved version.");
+      original = options.attemptedEstimate;
+    }
+    if (original && !current) throw new Error("This estimate was removed on another device. Your changes are still here.");
+    const baseline = current ? rows.map(entry => String(entry.id) === String(est.id) ? (original || current) : entry) : rows;
+    const candidate = retainEstimateBillingLinks(est, current);
+    const next = current ? rows.map(entry => String(entry.id) === String(est.id) ? candidate : entry) : [candidate, ...rows];
+    const receipt = await store.set("sps_estimates", JSON.stringify(next), { baseValue: JSON.stringify(baseline) });
+    const issue = storeReceiptIssue(receipt, "Saving estimate changes");
+    if (issue) throw new Error(issue);
+    let confirmed;
+    try { confirmed = JSON.parse(receipt.value || "null"); } catch (_) {}
+    const saved = Array.isArray(confirmed) && confirmed.find(entry => String(entry.id) === String(est.id));
+    if (!saved) throw new Error("The saved estimate could not be verified. Your changes are still here; try Save again.");
+    setEstimates(confirmed);
+    setSelected(saved);
+    return saved;
   };
-  const saveEstimate = (est) => { persistEstimate(est); setView("list"); };
+  const saveEstimate = async (est, options) => {
+    const saved = await persistEstimate(est, options);
+    setView("list");
+    return saved;
+  };
 
   const deleteEstimate = (id) => {
     if (!canManage) return;
@@ -21822,10 +21969,17 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
     if (!options.existingInvoiceId) {
       // React's autosave effect may not have queued this click's edits yet. Save
       // this quote explicitly and wait for its exact receipt before the API reads it.
-      const baseline = Array.isArray(estimates) ? estimates : [];
-      const current = baseline.find(entry => String(entry.id) === String(estimate.id));
+      const rows = Array.isArray(estimates) ? estimates : [];
+      const current = rows.find(entry => String(entry.id) === String(estimate.id));
+      let original = Object.prototype.hasOwnProperty.call(options, "baselineEstimate") ? options.baselineEstimate : current;
+      if (!original && current) {
+        if (!matchesPendingEditorCreation(current, options.attemptedEstimate)) return { ok: false, error: "This estimate already exists with different details. Reopen it to review the saved version." };
+        original = options.attemptedEstimate;
+      }
+      if (original && !current) return { ok: false, error: "This estimate was removed on another device. Your changes are still here." };
+      const baseline = current ? rows.map(entry => String(entry.id) === String(estimate.id) ? original : entry) : rows;
       const candidate = retainEstimateBillingLinks(estimate, current);
-      const next = current ? baseline.map(entry => String(entry.id) === String(candidate.id) ? candidate : entry) : [candidate, ...baseline];
+      const next = current ? rows.map(entry => String(entry.id) === String(candidate.id) ? candidate : entry) : [candidate, ...rows];
       const receipt = await store.set("sps_estimates", JSON.stringify(next), { baseValue: JSON.stringify(baseline) });
       const issue = storeReceiptIssue(receipt, "Saving estimate changes");
       if (issue) return { ok: false, error: issue };
@@ -21835,7 +21989,8 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
       setEstimates(confirmed);
       setSelected(savedEstimate);
     }
-    const result = await onConvertEstimate(savedEstimate, options);
+    const { baselineEstimate: _baselineEstimate, attemptedEstimate: _attemptedEstimate, ...billingOptions } = options;
+    const result = await onConvertEstimate(savedEstimate, billingOptions);
     if (!result?.ok || (!result.review && !result.invoice)) {
       return { ok: false, error: result?.error || "The billing review was not confirmed by the database." };
     }
@@ -21844,6 +21999,7 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
   };
 
   const mutateEstimateBillingReview = async (action, review, options = {}) => {
+    setBillingRefreshWarning("");
     try {
       const result = await requestBillingReview({
         action, reviewId: review.id, expectedRevision: review.reviewRevision,
@@ -21851,7 +22007,12 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
         ...(action === "confirm" && options.invoiceNumber ? { invoiceNumber: options.invoiceNumber } : {}),
       });
       if (result.review) setInvoiceEditor(result.review);
-      if (result.invoice || action === "discard") await refreshBillingInvoiceState();
+      if (result.invoice || action === "discard") {
+        // The mutation receipt is authoritative. A stale screen must not turn a
+        // confirmed sync or deletion into an apparent failed billing action.
+        try { await refreshBillingInvoiceState(); }
+        catch (error) { setBillingRefreshWarning(error?.message || "Billing was saved. Refresh to load the updated list."); }
+      }
       return result;
     } catch (error) {
       // An interrupted confirmation may already own an invoice number. Reopen its
@@ -21860,21 +22021,34 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
       try {
         const latest = await requestBillingReview();
         const canonical = latest.reviews?.find(entry => entry.id === review.id);
+        if ((action === "save" && billingReviewSaveReceiptMatches(review, canonical))
+          || (action === "discard" && canonical?.reviewState === "discarded")) {
+          setInvoiceEditor(canonical);
+          if (action === "discard") {
+            try { await refreshBillingInvoiceState(); }
+            catch (refreshError) { setBillingRefreshWarning(refreshError?.message || "Billing was saved. Refresh to load the updated list."); }
+          }
+          return { ok: true, review: canonical, recovered: true };
+        }
         if (canonical && ["confirm", "retry"].includes(action)) error.data = { ...error.data, review: canonical };
       } catch (_) {}
       throw error;
     }
   };
 
-  const saveConvertedInvoice = (invoice) => {
-    if (typeof onSaveInvoice === "function") onSaveInvoice(invoice);
-    setInvoiceEditor(invoice);
-    return { ok: true, invoice };
+  const saveConvertedInvoice = async (invoice, options) => {
+    if (typeof onSaveInvoice !== "function") throw new Error("Invoice saving is unavailable. Keep this editor open and try again.");
+    const saved = await onSaveInvoice(invoice, options?.confirmedSave ? options : { confirmedSave: true, baselineJson: invoiceEditor ? JSON.stringify(invoiceEditor) : "" });
+    const confirmed = saved?.invoice || saved;
+    if (!confirmed || confirmed.id !== invoice.id || saved?.ok === false) throw new Error(saved?.error || "The invoice save was not confirmed.");
+    setInvoiceEditor(confirmed);
+    return { ok: true, invoice: confirmed };
   };
 
   if (view === "new" || (view === "detail" && selected)) {
     return (
       <>
+        {billingRefreshWarning && <div role="status" style={{ color: T.textMuted, fontSize: 12, lineHeight: 1.5, marginBottom: 12 }}>{billingRefreshWarning}</div>}
         <div ref={screenRef} data-estimates-editor-root style={{ minWidth: 0 }}><EstimateForm
           estimate={view === "detail" ? selected : null}
           clients={clients}
@@ -22116,6 +22290,8 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
     return withEstimateTotals(base, defaultTaxRate);
   });
   const [sending, setSending] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveFailed, setSaveFailed] = useState(false);
   const [smsSending, setSmsSending] = useState(false);
   const [sentMsg, setSentMsg] = useState("");
   const [formError, setFormError] = useState("");
@@ -22131,9 +22307,11 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
     if (estimate) setForm(current => retainEstimateBillingLinks(current, estimate));
   }, [estimate?.linkedInvoiceId, estimate?.linkedInvoiceNumber, estimate?.linkedBillingReviewId, estimate?.billingDisposition]);
   const shareBusyRef = useRef(false);
+  const savedEstimateRef = useRef(estimate || null);
+  const attemptedEstimateRef = useRef(null);
   const pendingLineRef = useRef("");
   const [picker, setPicker] = useState(false);
-  const shareBusy = sending || smsSending || pdfBusy || conversionBusy || completionBusy;
+  const shareBusy = saving || sending || smsSending || pdfBusy || conversionBusy || completionBusy;
   const totals = estimateTotals(form, defaultTaxRate);
   const financials = estimateProfitTotals(form);
   const chargeBreakdown = estimateChargeBreakdown(form);
@@ -22198,9 +22376,26 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
   // Warm the jsPDF chunk so the native share sheet opens inside the tap's user-gesture window
   // (iOS blocks navigator.share if an await stalls the gesture). Same trick the invoice export uses.
   useEffect(() => { loadJsPDF().catch(() => {}); }, []);
-  // Export a PDF of the CURRENT form. Deliberately does NOT call onSave() — that saves-and-closes the
-  // estimate, which is exactly the "export kicks me out of the estimate" bug. Generates from live form
-  // state, so the PDF reflects unsaved edits; use "Save Estimate" to persist.
+  const persistCurrent = async (current) => {
+    try {
+      if (typeof onPersist !== "function") throw new Error("Estimate saving is unavailable. Keep this editor open and try again.");
+      const attemptedEstimate = attemptedEstimateRef.current;
+      if (!attemptedEstimate) attemptedEstimateRef.current = current;
+      const saved = await onPersist(current, { baselineEstimate: savedEstimateRef.current, ...(attemptedEstimate ? { attemptedEstimate } : {}) });
+      if (!saved || saved.id !== current.id || saved.ok === false) throw new Error(saved?.error || "The estimate save was not confirmed.");
+      savedEstimateRef.current = saved;
+      attemptedEstimateRef.current = null;
+      setForm(saved);
+      setDirty(false);
+      setSaveFailed(false);
+      return saved;
+    } catch (error) {
+      setSaveFailed(true);
+      throw error;
+    }
+  };
+  // Export the current form without closing it. Open native sharing before the
+  // database await so an iOS tap remains a valid user gesture, then confirm edits.
   const downloadPdf = async () => {
     if (shareBusyRef.current) return;
     const lineValidation = validateEstimateLines();
@@ -22212,8 +22407,16 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
       const normalized = withEstimateTotals(form, defaultTaxRate);
       const client = (clients || []).find((entry) => String(entry.id) === String(normalized.clientId));
       setForm(normalized);
-      if (canManage && onPersist) { onPersist(normalized); setDirty(false); } // view-only exports must never write
       const r = await generateEstimatePDF(normalized, branding, invoicing, client);
+      if (canManage && onPersist) {
+        try { await persistCurrent(normalized); } // view-only exports must never write
+        catch (error) {
+          const warning = `The PDF was prepared, but the estimate changes were not confirmed in SPS. ${error?.message || "Use Save to retry."}`;
+          setFormError(warning);
+          setSentMsg(warning);
+          return;
+        }
+      }
       if (r === "downloaded") setSentMsg("Estimate PDF saved to your downloads.");
     } catch (e) {
       setSentMsg("Couldn't export the PDF: " + ((e && e.message) || "unknown error"));
@@ -22331,10 +22534,19 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
     if (!client) return "Choose a client before sending this estimate.";
     return validateEstimateLines();
   };
-  const markSent = (current) => {
+  const markSent = async (current) => {
     const sent = withEstimateTotals({ ...current, status: "sent", sentAt: new Date().toISOString() }, defaultTaxRate);
     setForm(sent);
-    if (onPersist) { onPersist(sent); setDirty(false); }
+    setDirty(true);
+    try {
+      await persistCurrent(sent);
+      return "";
+    } catch (error) {
+      // Customer delivery already succeeded. Retrying Save must never send it again.
+      const warning = `The estimate was sent, but its saved status could not be confirmed. ${error?.message || "Keep this editor open."} Use Save to retry saving without sending again.`;
+      setFormError(warning);
+      return warning;
+    }
   };
 
   // Build the estimate text for SMS
@@ -22387,7 +22599,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
       if (!r.ok) { setSentMsg(r.error || (r.missingEnv ? "Texting isn't set up on the server yet." : "Couldn't send the text — try again.")); }
       else if (r.held) { setSentMsg("Held by Test Mode — the estimate was not texted to the client."); }
       else if (r.redirected) { setSentMsg("Test sent to you — the estimate was not texted to the client."); }
-      else if (r.acceptedForClient) { markSent(current); setSentMsg("Estimate text accepted for sending from the SPS business number."); }
+      else if (r.acceptedForClient) { const warning = await markSent(current); setSentMsg(warning || "Estimate text accepted for sending from the SPS business number."); }
       else { setSentMsg("The estimate text was not sent to the client."); }
     } catch (_) {
       setSentMsg("Couldn't reach the texting server. Nothing was sent.");
@@ -22444,7 +22656,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
         }),
       });
       const d = await r.json().catch(() => ({}));
-      if (r.ok && d.sent) { markSent(current); setSentMsg(pdf ? "Estimate emailed to the client — with a PDF attached." : "Estimate emailed to the client."); }
+      if (r.ok && d.sent) { const warning = await markSent(current); setSentMsg(warning || (pdf ? "Estimate emailed to the client with a PDF attached." : "Estimate emailed to the client.")); }
       else if (r.ok && d.held) { setSentMsg("Held by Test Mode — not sent to the client."); }
       else { setSentMsg(d.error || "Email failed to send."); }
     } catch (_) { setSentMsg("Couldn't reach the server."); }
@@ -22475,7 +22687,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
     }
     set("status", nextStatus, false);
   };
-  const saveCurrent = () => {
+  const saveCurrent = async () => {
     if (!canManage || shareBusyRef.current) return;
     const settingsValidation = validateEstimateSettings();
     if (settingsValidation) { setFormError(settingsValidation); setSentMsg(settingsValidation); return; }
@@ -22483,11 +22695,30 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
       const lineValidation = validateEstimateLines();
       if (lineValidation) { setFormError(lineValidation); setSentMsg(lineValidation); return; }
     }
+    shareBusyRef.current = true;
+    setSaving(true);
+    setSaveFailed(false);
     setFormError("");
-    onSave(withEstimateTotals(form, defaultTaxRate));
+    try {
+      const current = withEstimateTotals(form, defaultTaxRate);
+      const attemptedEstimate = attemptedEstimateRef.current;
+      if (!attemptedEstimate) attemptedEstimateRef.current = current;
+      const saved = await onSave(current, { baselineEstimate: savedEstimateRef.current, ...(attemptedEstimate ? { attemptedEstimate } : {}) });
+      if (!saved || saved.id !== current.id || saved.ok === false) throw new Error(saved?.error || "The estimate save was not confirmed.");
+      savedEstimateRef.current = saved;
+      attemptedEstimateRef.current = null;
+      setForm(saved);
+      setDirty(false);
+    } catch (error) {
+      setSaveFailed(true);
+      setFormError(error?.message || "The estimate could not be saved. Your changes are still here.");
+    } finally {
+      shareBusyRef.current = false;
+      setSaving(false);
+    }
   };
   const convertToInvoice = async () => {
-    if (!(linkedInvoice ? canCreateInvoice : canReviewBilling) || conversionBusy || typeof onConvertToInvoice !== "function") return;
+    if (!(linkedInvoice ? canCreateInvoice : canReviewBilling) || shareBusyRef.current || conversionBusy || typeof onConvertToInvoice !== "function") return;
     if (!linkedInvoice) {
       const client = (clients || []).find(entry => String(entry.id) === String(form.clientId));
       const validation = validateForSend(client);
@@ -22499,6 +22730,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
     }
     setFormError("");
     setConversionMsg("");
+    shareBusyRef.current = true;
     setConversionBusy(true);
     try {
       const current = normalizedForSend();
@@ -22512,8 +22744,12 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
       ) {
         return;
       }
+      const attemptedEstimate = attemptedEstimateRef.current;
+      if (!attemptedEstimate && !linkedInvoice) attemptedEstimateRef.current = current;
       const result = await onConvertToInvoice(current, {
         taxMigrationConfirmed: taxMigration.requiresConfirmation,
+        baselineEstimate: savedEstimateRef.current,
+        ...(attemptedEstimate ? { attemptedEstimate } : {}),
         ...(linkedInvoice ? { existingInvoiceId: linkedInvoice.id } : {}),
       });
       if (!result?.ok) {
@@ -22521,6 +22757,8 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
         return;
       }
       if (!linkedInvoice) {
+        savedEstimateRef.current = result.estimate || current;
+        attemptedEstimateRef.current = null;
         setForm(result.estimate || current);
         setDirty(false);
       }
@@ -22533,6 +22771,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
     } catch (error) {
       setConversionMsg(error?.message || "The estimate could not be converted.");
     } finally {
+      shareBusyRef.current = false;
       setConversionBusy(false);
     }
   };
@@ -22569,6 +22808,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
         setCompletionMsg(result?.error || "The server did not confirm the completed estimate.");
         return;
       }
+      savedEstimateRef.current = result.estimate;
       setForm((current) => withEstimateTotals({
         ...current,
         status: result.estimate.status,
@@ -22612,15 +22852,15 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
             <div style={{ fontSize: 10.5, fontWeight: 750, color: statusTone, marginTop: 1 }}>{estimateStatusLabel(form.status)}</div>
           </div>
           {canManage
-            ? <Btn sm onClick={saveCurrent} style={{ minWidth: 66 }}>Save</Btn>
+            ? <Btn sm onClick={saveCurrent} style={{ minWidth: 66 }}>{saving ? "Saving…" : saveFailed ? "Retry save" : "Save"}</Btn>
             : <span style={{ minWidth: 66, textAlign: "right", color: T.textMuted, fontSize: 10.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.045em" }}>View only</span>}
         </div>
 
         {formError && <div role="alert" style={{ display: "flex", alignItems: "flex-start", gap: 7, marginTop: -5, padding: "9px 11px", borderRadius: 11, border: `1px solid ${hexA(T.warning, 0.28)}`, background: hexA(T.warning, 0.08), color: T.warning, fontSize: 11.5, fontWeight: 700, lineHeight: 1.45 }}><Icon name="info" size={13} style={{ flexShrink: 0, marginTop: 1 }} />{formError}</div>}
 
         {estimate && estimate.status !== "draft" && form.status === "draft" && (
-          <div style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: "10px 12px", background: hexA(T.primary, 0.07), border: `1px solid ${hexA(T.primary, 0.2)}`, borderRadius: 12, color: T.text, fontSize: 12, lineHeight: 1.45 }}>
-            <Icon name="info" size={14} style={{ color: T.primary, marginTop: 1, flexShrink: 0 }} />
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: "10px 12px", background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 12, color: T.text, fontSize: 12, lineHeight: 1.45 }}>
+            <Icon name="info" size={14} style={{ color: T.textMuted, marginTop: 1, flexShrink: 0 }} />
             Pricing or scope changed, so this estimate returned to Draft. Send it again when the revision is ready.
           </div>
         )}
@@ -22640,7 +22880,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
             <div style={{ ...card, display: "flex", flexDirection: "column", gap: 12 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
                 <div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>Estimate details</div>
-                <div style={{ fontSize: 11, color: T.textMuted }}>{form.number}</div>
+                <div role="status" style={{ fontSize: 11, color: T.textMuted }}>{saving ? "Saving…" : dirty || !savedEstimateRef.current ? "Unsaved changes" : "Saved"}</div>
               </div>
               <div>
                 <label style={label}>Client</label>
@@ -24282,6 +24522,10 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
       try {
         const latest = await loadBillingReviews();
         const canonical = latest.find(row => row.id === review.id);
+        if ((action === "save" && billingReviewSaveReceiptMatches(review, canonical))
+          || (action === "discard" && canonical?.reviewState === "discarded")) {
+          return { ok: true, review: canonical, recovered: true };
+        }
         if (canonical && ["confirm", "retry"].includes(action)) error.data = { ...error.data, review: canonical };
       } catch (_) {}
       throw error;
@@ -40038,7 +40282,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
   if (!portalDataFenceRef.current) portalDataFenceRef.current = createPortalDataFence();
 
   // Persistent data — survives reloads and app updates
-  const [clients, setClients, lc, persistClientsExact] = useStoredState("sps_clients", []);
+  const [clients, setClients, lc, persistClientsExact, adoptClientsDisplay] = useStoredState("sps_clients", []);
   const legacyMediaHealth = useMemo(() => inspectLegacyMediaHealth(clients), [clients]);
   // Live-sync a client's communication/notification preferences onto THIS device the moment they
   // change them in their portal — no manual reload. We subscribe to the shared sps_clients row and
@@ -40138,8 +40382,8 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
   const [commsSection, setCommsSection] = useState(null); // deep-link into Comms (e.g. Test badge → Settings)
   const [commsSectionNonce, setCommsSectionNonce] = useState(0); // makes re-tapping the same deep-link repeatable
   const [schedNonce, setSchedNonce] = useState(0); // bump to force-remount Schedule (re-tap reset)
-  const [schedule, setSchedule, ls] = useStoredState("sps_schedule", DEFAULT_SCHEDULE);
-  const [catalog, setCatalog, lcat] = useStoredState("sps_catalog", DEFAULT_CATALOG);
+  const [schedule, setSchedule, ls, , adoptScheduleDisplay] = useStoredState("sps_schedule", DEFAULT_SCHEDULE);
+  const [catalog, setCatalog, lcat, , adoptCatalogDisplay] = useStoredState("sps_catalog", DEFAULT_CATALOG);
   const [email, setEmail, lem] = useStoredState("sps_email", DEFAULT_EMAIL);
   // Keep the module-level sending identity current with saved Email settings, so every
   // server email/SMS call goes out from the configured from-address + texting number.
@@ -40176,7 +40420,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     return validateTeamWrite(next, prev);
   });
   const [session, setSession, lsesh] = useStoredState("sps_session", { userId: DEFAULT_OWNER_ID });
-  const [invoices, setInvoices, linv, persistInvoicesExact] = useStoredState("sps_invoices", DEMO_INVOICES);
+  const [invoices, setInvoices, linv, persistInvoicesExact, adoptInvoicesDisplay] = useStoredState("sps_invoices", DEMO_INVOICES);
   // QuickBooks refresh listeners are installed once after hydration. Keep the comparison
   // snapshot in a stable ref so those long-lived listeners never compare a fresh QB response
   // against the unpaid invoice array captured on the first render.
@@ -40193,7 +40437,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     } catch (_) { return null; }
   });
   const [invoicing, setInvoicing, linvc] = useStoredState("sps_invoicing", DEFAULT_INVOICING);
-  const [completedSids, setCompletedSids, lcomp] = useStoredState("sps_completed", {});
+  const [completedSids, setCompletedSids, lcomp, , adoptCompletedDisplay] = useStoredState("sps_completed", {});
   // Feature 3B: arrival timestamps per stop ({ [sid]: ISO }). Set when the tech taps
   // "I'm here"; the job clock runs from here until the stop is completed.
   const [arrivals, setArrivals, larr] = useStoredState("sps_arrivals", {});
@@ -43258,7 +43502,41 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     throw new Error("Invoices changed repeatedly on another device. Refresh and try again.");
   };
 
-  const handleSaveInvoice = (inv) => {
+  const handleSaveInvoice = (inv, options = {}) => {
+    if (options.confirmedSave) return (async () => {
+      // Source reservations can save immediately before this callback, before
+      // React rerenders. Read the store's current list rather than that old frame.
+      const latest = await store.get("sps_invoices");
+      let rows;
+      try { rows = JSON.parse(latest?.value || "[]"); } catch (_) {}
+      if (!Array.isArray(rows)) throw new Error("The shared invoice list could not be read. Your changes are still here.");
+      const matches = rows.filter(entry => String(entry.id) === String(inv.id));
+      if (matches.length > 1) throw new Error("This invoice has duplicate records. Reopen it before saving.");
+      const current = matches[0];
+      let original = current;
+      if (options.baselineJson) {
+        try { original = JSON.parse(options.baselineJson); }
+        catch (_) { throw new Error("The original invoice could not be verified. Keep the editor open and refresh the invoice list."); }
+        if (!original || String(original.id) !== String(inv.id)) throw new Error("The invoice changed while this editor was open.");
+        if (!current) throw new Error("This invoice was removed on another device. Your changes are still here.");
+      }
+      if (!options.baselineJson && current && JSON.stringify(current) !== JSON.stringify(inv)) {
+        if (!matchesPendingEditorCreation(current, options.attemptedInvoice)) throw new Error("This new invoice already exists with different details. Reopen it before saving.");
+        original = options.attemptedInvoice;
+      }
+      const baseline = current ? rows.map(entry => String(entry.id) === String(inv.id) ? original : entry) : rows;
+      const next = current ? rows.map(entry => String(entry.id) === String(inv.id) ? inv : entry) : [inv, ...rows];
+      const receipt = await store.set("sps_invoices", JSON.stringify(next), { baseValue: JSON.stringify(baseline) });
+      const issue = storeReceiptIssue(receipt, "Saving invoice changes");
+      if (issue) throw new Error(issue);
+      let confirmedRows;
+      try { confirmedRows = JSON.parse(receipt.value || "null"); } catch (_) {}
+      const confirmed = Array.isArray(confirmedRows) && confirmedRows.find(entry => String(entry.id) === String(inv.id));
+      if (!confirmed || (inv.qbId && String(confirmed.qbId) !== String(inv.qbId))) throw new Error("The saved invoice could not be verified. Keep this editor open and retry Save.");
+      invoicesRef.current = confirmedRows;
+      setInvoices(confirmedRows);
+      return confirmed;
+    })();
     // QuickBooks sync is handled inside the invoice editor's Save (create or update),
     // so here we only persist locally. This avoids double-pushing / duplicates.
     const prevInv = (invoices || []).find(iv => iv.id === inv.id);
@@ -43709,11 +43987,12 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
   // derives the exact mutation server-side, and commits it with the service-role batch CAS.
   const stopMutationFallbacks = () => ({ sps_clients: clients, sps_catalog: catalog, sps_completed: completedSids, sps_schedule: schedule, sps_invoices: invoices });
   const adoptStopBaseline = (values) => {
-    setClients(values.sps_clients);
-    setCatalog(values.sps_catalog);
-    setCompletedSids(values.sps_completed);
-    setSchedule(values.sps_schedule);
-    setInvoices(values.sps_invoices);
+    // A server refresh is display adoption, not a new whole-section editing intent.
+    adoptClientsDisplay(values.sps_clients);
+    adoptCatalogDisplay(values.sps_catalog);
+    adoptCompletedDisplay(values.sps_completed);
+    adoptScheduleDisplay(values.sps_schedule);
+    adoptInvoicesDisplay(values.sps_invoices);
   };
   const refreshStopBaseline = async () => {
     try {
@@ -43734,12 +44013,33 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       body,
     });
   };
+  const saveStopReport = async ({ clientId, entry, updated }) => {
+    const body = await buildReportEditRequest({ clientId, entry, updated });
+    const saved = await requestStopReportEdit({
+      url: `${PROD_URL}/api/stop-report`,
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body,
+    });
+    // A confirmed server edit is a display refresh, never a new whole-client write.
+    if (!await refreshStopBaseline()) {
+      throw new Error("Your report is saved on the server, but this device could not refresh it. Keep your edits open and try saving again to confirm the display.");
+    }
+    return saved;
+  };
 
   const refreshCompletionOutboxView = async (changedItem = null) => {
     if (!authUserId) return [];
-    const items = await readCompletionOutbox(authUserId).catch(() => []);
-    publishCompletionOutbox(items, changedItem);
-    return items;
+    try {
+      const items = await readCompletionOutbox(authUserId);
+      publishCompletionOutbox(items, changedItem);
+      return items;
+    } catch (error) {
+      // An unavailable device store is not an empty queue. Keep existing reports and warnings
+      // visible until a verified read succeeds instead of making recovery appear complete.
+      console.warn("completion outbox refresh failed:", error?.message || error);
+      setCompletionReviewMessage("This device could not read its saved reports. The reports already listed here have been kept. Try again.");
+      return null;
+    }
   };
   const patchCompletionOutboxItem = async (id, updater) => {
     const item = await updateCompletionIntent(authUserId, id, updater);
@@ -43900,13 +44200,9 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
         if (!["queued", "syncing"].includes(candidate.state) || Number(candidate.retryAt || 0) > Date.now()) continue;
         let item = await patchCompletionOutboxItem(candidate.id, { state: "syncing", lastError: "", syncStartedAt: Date.now() }) || candidate;
         try {
-          // Completion is its own atomic server transaction. Do not make it wait behind unrelated
-          // pending edits elsewhere in the app; the store's dirty-aware refresh below preserves
-          // those edits and merges them on their normal queue.
-          const blocked = store.listConflicts().find(conflict => STOP_MUTATION_KEYS.includes(conflict.key));
-          if (blocked) {
-            const error = new Error("Resolve the shared data conflict before this completed stop can sync."); error.status = 409; error.code = "app-state-conflict"; throw error;
-          }
+          // The server validates this exact stop against the latest shared records and commits
+          // atomically. An unrelated device conflict must not block that transaction. Keep the
+          // saved request and retry key intact so a competing report still fails safely there.
           const requestResult = await requestStopMutation(item.request);
           const saved = requestResult.data;
           await applyConfirmedCompletion(saved, item);
@@ -43989,16 +44285,15 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
 
   const handleUncompleteStop = async (clientId, sid) => {
     try {
-      const blocked = store.listConflicts().find(conflict => STOP_MUTATION_KEYS.includes(conflict.key));
-      if (blocked) throw new Error("Resolve the shared data conflict at the top of the app before reopening this stop.");
+      // Reversal uses the server's exact completion receipt, independent of unrelated local edits.
       let saved;
       try {
-        saved = await requestStopMutation({ mode: "reverse", clientId, sid, allowLegacy: false });
+        ({ data: saved } = await requestStopMutation({ mode: "reverse", clientId, sid, allowLegacy: false }));
       } catch (error) {
         if (error.code === "legacy-completion") {
           const proceed = window.confirm("This stop was completed before exact reversal receipts existed. The app cannot know its prior balance or which inventory locations were used. Continue by removing only the saved visit and completed flag? Inventory and balance will remain unchanged for manual review.");
           if (!proceed) return { ok: false, cancelled: true, legacy: true };
-          saved = await requestStopMutation({ mode: "reverse", clientId, sid, allowLegacy: true });
+          ({ data: saved } = await requestStopMutation({ mode: "reverse", clientId, sid, allowLegacy: true }));
         } else throw error;
       }
       const refreshed = await refreshStopBaseline();
@@ -44431,23 +44726,23 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     <Modal title={completionReviews.length === 1 ? "Completed report needs review" : `${completionReviews.length} completed reports need review`} onClose={() => { if (!completionReviewBusyId) { setCompletionReviewOpen(false); setCompletionReviewMessage(""); } }} maxWidth={620}>
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5 }}>
-          The full report is safe on this device. Review the exact issue below—nothing will be resent or overwritten unless you choose an action.
+          Your notes and photos remain on this device. Retrying uses this saved report and its delivery settings.
         </div>
-        {completionReviewMessage && <div role="alert" style={{ padding: "10px 12px", borderRadius: 11, background: hexA("#d97706", 0.1), color: "#b45309", fontSize: 12.5, fontWeight: 700, lineHeight: 1.45 }}>{completionReviewMessage}</div>}
+        {completionReviewMessage && <div role="alert" style={{ padding: "2px 0 2px 12px", borderLeft: `3px solid ${T.primary}`, color: T.text, fontSize: 12.5, fontWeight: 700, lineHeight: 1.45 }}>{completionReviewMessage}</div>}
         {completionReviews.map(item => {
           const context = completionReviewContext(item);
           const deliveryLabels = (item.reviewChannels || []).map(channel => ({ text: "Text", email: "Email", app: "Client app" }[channel.key] || channel.key));
           const isReport = item.reviewKind === "report";
           return (
-            <div key={item.id} style={{ border: `1px solid ${hexA("#d97706", 0.28)}`, borderRadius: 14, padding: 14, background: hexA("#d97706", 0.055), display: "flex", flexDirection: "column", gap: 10 }}>
+            <div key={item.id} style={{ borderTop: `1px solid ${T.border}`, paddingTop: 16, display: "flex", flexDirection: "column", gap: 10 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontSize: 15, fontWeight: 850, color: T.text }}>{context.clientName}</div>
                   <div style={{ marginTop: 2, fontSize: 12, color: T.textMuted }}>{context.service} · {context.date}</div>
                 </div>
-                <span style={{ flexShrink: 0, borderRadius: 999, padding: "4px 8px", background: isReport ? hexA("#d97706", 0.14) : hexA(T.primary, 0.1), color: isReport ? "#b45309" : T.primary, fontSize: 10.5, fontWeight: 850, textTransform: "uppercase", letterSpacing: ".06em" }}>{isReport ? "Save issue" : `${deliveryLabels.join(" + ") || "Delivery"} issue`}</span>
+                <span style={{ flexShrink: 0, padding: "4px 0", color: T.primary, fontSize: 10.5, fontWeight: 850, textTransform: "uppercase", letterSpacing: ".06em" }}>{isReport ? "Save issue" : `${deliveryLabels.join(" + ") || "Delivery"} issue`}</span>
               </div>
-              <div role="alert" style={{ fontSize: 12.5, color: T.text, lineHeight: 1.5, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 11, padding: "10px 11px" }}>{item.reviewError}</div>
+              <div role="alert" style={{ fontSize: 13, color: T.text, lineHeight: 1.5 }}>{item.errorCode === "app-state-conflict" ? "Other saved changes blocked this report. Retry to sync this stop." : item.reviewError}</div>
               {item.errorCode && <div style={{ fontSize: 10.5, color: T.textMuted }}>Reference: {item.errorCode}</div>}
               <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, flexWrap: "wrap" }}>
                 {isReport ? (
@@ -44494,7 +44789,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     // every other page keeps the centered, single-scroll column.
     const dtMasterDetail = (page === "clients" && !adding) || (page === "invoices" && (perms.canInvoice || perms.viewInvoices));
     return (
-      <AppCtx.Provider value={{ T, branding, perms, email, invoices, clients, schedule, tiers: serviceTiers || DEFAULT_TIERS }}>
+      <AppCtx.Provider value={{ T, branding, perms, email, invoices, clients, schedule, saveStopReport, tiers: serviceTiers || DEFAULT_TIERS }}>
         <div style={{ fontFamily: fontStack, background: T.bg, position: "fixed", top: 0, left: 0, right: 0, bottom: 0, overflow: "hidden", display: "flex", flexDirection: "row", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em", ["--ring"]: hexA(T.primary, 0.22), ["--ringBorder"]: T.primary }}>
           {shellCss}
           <DesktopSidebar page={page} perms={perms} commsBadge={commsNavCount} onNav={handleTabNav} onSignOut={handleSignOut} currentUser={currentUser} branding={branding} syncState={syncState} onSync={manualSync} T={T} vp={vp} />
@@ -44528,7 +44823,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
   }
 
   return (
-    <AppCtx.Provider value={{ T, branding, perms, email, invoices, clients, schedule, tiers: serviceTiers || DEFAULT_TIERS }}>
+    <AppCtx.Provider value={{ T, branding, perms, email, invoices, clients, schedule, saveStopReport, tiers: serviceTiers || DEFAULT_TIERS }}>
       <div style={{
         fontFamily: fontStack,
         // Pinned to the viewport so the header/nav can't drift on iOS overscroll.

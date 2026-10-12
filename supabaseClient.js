@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { idb } from "./idbStore.js";
+import { requestAppState } from "./appStateRequest.js";
 import { describeStateConflicts, mergeStoredState, normalizeStoredValue } from "./stateMerge.js";
 import { isTransientAppStateError, nextAppStateRetry } from "./appStateBackoff.js";
 
@@ -28,6 +29,9 @@ let _initialReadConfirmed = false;
 let _loadPromise = null;
 let _flushing = false;
 let _ensureHydratePromise = null;
+let _pendingHydratedIdentity = -1;
+let _pendingHydrationFailedIdentity = -1;
+const _hydrationHeldKeys = new Set();
 let _pendingPersistTail = Promise.resolve({ durable: true, empty: true });
 let _snapshotPersistTail = Promise.resolve();
 let _lastErrorAt = 0;
@@ -42,6 +46,42 @@ const _chains = {};
 
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 const sameStored = (a, b) => a === b;
+const serverProtectedKeys = new Set(["sps_clients", "sps_completed"]);
+function normalizeRemoteStoredValue(key, value) {
+  const raw = normalizeStoredValue(value);
+  if (!serverProtectedKeys.has(key) || typeof raw !== "string") return raw;
+  // PostgreSQL jsonb::text adds whitespace and orders keys. React's save fence uses
+  // JSON.stringify, so use that same representation after reading a guarded section.
+  try { return JSON.stringify(JSON.parse(raw)); } catch (_) { return raw; }
+}
+function projectAcceptedReports(key, displayedValue, remoteValue) {
+  if (key !== "sps_clients" || displayedValue === undefined || remoteValue === undefined) return displayedValue;
+  try {
+    const displayed = JSON.parse(displayedValue), remote = JSON.parse(remoteValue);
+    if (!Array.isArray(displayed) || !Array.isArray(remote)) return displayedValue;
+    const receiptId = entry => typeof entry?.completionReceiptId === "string" && entry.completionReceiptId;
+    const byId = new Map(remote.filter(client => client?.id != null).map(client => [String(client.id), client]));
+    if (byId.size !== remote.length) return displayedValue;
+    const projected = displayed.map(client => {
+      const saved = byId.get(String(client?.id));
+      const savedReports = new Map((Array.isArray(saved?.history) ? saved.history : []).filter(receiptId).map(entry => [receiptId(entry), entry]));
+      const seen = new Set();
+      const history = (Array.isArray(client?.history) ? client.history : []).flatMap(entry => {
+        const id = receiptId(entry);
+        if (!id) return [entry]; // Receipt-less legacy reports keep ordinary local merge behavior.
+        if (seen.has(id) || !savedReports.has(id)) return [];
+        seen.add(id); return [savedReports.get(id)];
+      });
+      for (const [id, entry] of savedReports) if (!seen.has(id)) history.push(entry);
+      return client && (Object.hasOwn(client, "history") || history.length) ? { ...client, history } : client;
+    });
+    const displayedIds = new Set(displayed.map(client => String(client?.id)));
+    for (const client of remote) {
+      if (!displayedIds.has(String(client.id)) && Array.isArray(client.history) && client.history.some(receiptId)) projected.push(client);
+    }
+    return JSON.stringify(projected);
+  } catch (_) { return displayedValue; }
+}
 const pendingIdbKey = (uid = _uid) => (uid ? `pending-v2:${uid}` : "");
 const pendingStorageKey = (uid = _uid) => (uid ? `${PENDING_KEY}:${uid}` : "");
 const snapshotIdbKey = (uid = _uid) => (uid ? `snapshot-v2:${uid}` : SNAP_KEY);
@@ -175,10 +215,10 @@ async function writePendingSnapshot(uid, data) {
       const key = pendingIdbKey(uid);
       if (key) {
         try { await idb.del(key); } catch (_) {}
-        let stored = await idb.get(key);
+        let stored = await idb.getVerified(key);
         if (stored) {
           await idb.set(key, { uid, at: Date.now(), data: {} });
-          stored = await idb.get(key);
+          stored = await idb.getVerified(key);
         }
         indexedDbCleared = !stored || !!(
           stored.uid === uid
@@ -219,7 +259,7 @@ async function writePendingSnapshot(uid, data) {
     const key = pendingIdbKey(uid);
     if (key) {
       await idb.set(key, { uid, at: Date.now(), data });
-      const stored = await idb.get(key);
+      const stored = await idb.getVerified(key);
       indexedDbDurable = !!(
         stored
         && stored.uid === uid
@@ -246,10 +286,22 @@ function persistPending() {
   // Capture both account and value now. A sign-out during this write must still preserve the old
   // account's intent, never write it under the next signed-in account, and never drop it.
   const uid = _uid;
+  const identityVersion = _identityVersion;
   const data = { ..._pending };
+  const hydrated = _pendingHydratedIdentity === identityVersion;
+  const write = async () => {
+    if (!hydrated) {
+      const recovery = await ensureHydrate();
+      if (!recovery?.ok) return { durable: false, error: recovery?.error || new Error("Pending work could not be recovered") };
+      if (identityVersion !== _identityVersion || uid !== _uid) return { durable: false, staleIdentity: true };
+    }
+    // No snapshot may replace an unread account queue. If hydration was still in progress, include
+    // the recovered intents as well as the changes waiting in memory before touching either store.
+    return writePendingSnapshot(uid, hydrated ? data : { ..._pending });
+  };
   const run = _pendingPersistTail.then(
-    () => writePendingSnapshot(uid, data),
-    () => writePendingSnapshot(uid, data)
+    write,
+    write
   );
   _pendingPersistTail = run.then(
     (result) => result,
@@ -262,15 +314,32 @@ async function awaitPendingDurability() {
   // If another local edit is staged while the current IndexedDB write is completing, wait for that
   // newer envelope too. The network must never get ahead of the durable intent it is committing.
   let observed;
+  let retriedStorage = false;
   do {
     observed = _pendingPersistTail;
     const result = await observed;
+    if (observed !== _pendingPersistTail) continue;
     if (!result || result.durable !== true) {
+      // A WebView can temporarily suspend IndexedDB. Retry must actually write the retained intent
+      // again after storage recovers, rather than repeatedly awaiting the same failed receipt.
+      // Limit each attempt to one fresh snapshot so unavailable storage still releases the UI.
+      if (!retriedStorage) {
+        retriedStorage = true;
+        persistPending();
+        continue;
+      }
       const error = (result && result.error) || new Error("Pending work could not be verified on this device");
       error.code = error.code || "pending_durability_unavailable";
       throw error;
     }
   } while (observed !== _pendingPersistTail);
+}
+
+function pendingDurabilityFailure(error) {
+  const durabilityError = new Error("This change could not be saved on this device. Keep this screen open and retry before continuing.");
+  durabilityError.code = (error && error.code) || "pending_durability_unavailable";
+  throttledError(durabilityError.message);
+  return { ok: false, error: durabilityError, durabilityFailed: true, review: true, queued: false };
 }
 
 function notifyCache(hasData) {
@@ -280,10 +349,13 @@ function notifyCache(hasData) {
 
 async function hydrateFromIDB() {
   try {
-    if (!_uid) return;
+    if (!_uid) return { ok: false, noUser: true };
     const identityVersion = _identityVersion;
-    const [scopedSnap, pendingSnap] = await Promise.all([idb.get(snapshotIdbKey()), idb.get(pendingIdbKey())]);
-    if (identityVersion !== _identityVersion || !_uid) return;
+    const [scopedSnap, pendingSnap] = await Promise.all([idb.get(snapshotIdbKey()), idb.getVerified(pendingIdbKey())]);
+    if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+    if (pendingSnap != null && (pendingSnap.uid !== _uid || !pendingSnap.data || typeof pendingSnap.data !== "object" || Array.isArray(pendingSnap.data))) {
+      throw new Error("The saved pending work needs recovery before this device can save another change.");
+    }
     const legacySnap = await idb.get(SNAP_KEY);
     let snap = scopedSnap;
     if (!snap) {
@@ -292,10 +364,10 @@ async function hydrateFromIDB() {
         try { await idb.set(snapshotIdbKey(), legacySnap); } catch (_) {}
       }
     }
-    if (identityVersion !== _identityVersion || !_uid) return;
+    if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
     if (snap && snap.uid === _uid && snap.data) {
       for (const key of Object.keys(snap.data)) {
-        const value = normalizeStoredValue(snap.data[key]);
+        const value = normalizeRemoteStoredValue(key, snap.data[key]);
         if (value === undefined) continue;
         if (!hasOwn(_confirmed, key)) _confirmed[key] = value;
         if (!hasOwn(_cache, key)) _cache[key] = value;
@@ -306,6 +378,7 @@ async function hydrateFromIDB() {
       }
     }
     if (pendingSnap && pendingSnap.uid === _uid) mergePendingSources(pendingSnap.data);
+    _pendingHydratedIdentity = identityVersion;
     // One-time safe migration from the old global queue: only the UID stamped on the matching
     // legacy snapshot may claim it, and only when neither scoped storage source has a newer queue.
     // Without that ownership evidence it remains quarantined and is never displayed or replayed.
@@ -314,9 +387,11 @@ async function hydrateFromIDB() {
         const legacyRaw = localStorage.getItem(PENDING_KEY);
         if (legacyRaw) {
           mergePendingSources(JSON.parse(legacyRaw));
-          localStorage.removeItem(PENDING_KEY);
-          await persistPending();
-          await idb.del(SNAP_KEY);
+          const saved = await writePendingSnapshot(_uid, { ..._pending });
+          if (saved.durable) {
+            localStorage.removeItem(PENDING_KEY);
+            await idb.del(SNAP_KEY);
+          }
         }
       } catch (_) {}
     }
@@ -330,15 +405,33 @@ async function hydrateFromIDB() {
         notifyConflict(key, _pending[key].conflicts || [{ path: "$", kind: "legacy-base-unknown" }]);
       }
     }
-  } catch (_) {}
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error };
+  }
 }
 
 function ensureHydrate() {
   if (_ensureHydratePromise) return _ensureHydratePromise;
   const identityVersion = _identityVersion;
-  _ensureHydratePromise = hydrateFromIDB().then(() => {
-    if (identityVersion === _identityVersion && _uid) notifyCache(Object.keys(_cache).length > 0);
+  const run = hydrateFromIDB().then(result => {
+    if (identityVersion === _identityVersion && _uid) {
+      if (result?.ok) {
+        // A background read may recover the queue while a form still holds an edit entered before
+        // recovery. Protect those original intents on its later save, not only on the read's caller.
+        if (_pendingHydrationFailedIdentity === identityVersion) {
+          Object.keys(_pending).forEach(key => _hydrationHeldKeys.add(key));
+          _pendingHydrationFailedIdentity = -1;
+        }
+        notifyCache(Object.keys(_cache).length > 0);
+      } else {
+        _pendingHydrationFailedIdentity = identityVersion;
+        if (_ensureHydratePromise === run) _ensureHydratePromise = null;
+      }
+    }
+    return result;
   });
+  _ensureHydratePromise = run;
   return _ensureHydratePromise;
 }
 
@@ -367,6 +460,9 @@ function resetForIdentity() {
   _loadPromise = null;
   _flushing = false;
   _ensureHydratePromise = null;
+  _pendingHydratedIdentity = -1;
+  _pendingHydrationFailedIdentity = -1;
+  _hydrationHeldKeys.clear();
   _cacheReadyState = { ready: false, hasData: false };
   _initSelectAt = 0;
   _initRetryCount = 0;
@@ -383,7 +479,7 @@ function isAuthError(error) {
 
 async function refreshForAuthError(error) {
   if (!isAuthError(error)) return;
-  try { await supabase.auth.refreshSession(); } catch (_) {}
+  try { await requestAppState("refresh-session", () => supabase.auth.refreshSession()); } catch (_) {}
 }
 
 async function readRemote(key, identityVersion = _identityVersion) {
@@ -393,17 +489,18 @@ async function readRemote(key, identityVersion = _identityVersion) {
   // attempt. Infrastructure failures are returned to the caller and writes enter the durable
   // exponential retry lane below.
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const { data, error } = await supabase.from("app_state")
+    if (identityVersion !== _identityVersion || !_uid) return { staleIdentity: true };
+    const { data, error } = await requestAppState("read", () => supabase.from("app_state")
       .select("key, value, version, updated_at")
       .eq("key", key)
-      .maybeSingle();
+      .maybeSingle());
     if (identityVersion !== _identityVersion || !_uid) return { staleIdentity: true };
     if (!error) {
       if (!data) return { ok: true, exists: false, value: undefined, version: 0 };
       return {
         ok: true,
         exists: true,
-        value: normalizeStoredValue(data.value),
+        value: normalizeRemoteStoredValue(key, data.value),
         version: Number(data.version) || 0,
         updatedAt: data.updated_at || null,
       };
@@ -421,9 +518,10 @@ async function readRemoteVersions(keys, identityVersion = _identityVersion) {
   if (!safeKeys.length) return { ok: true, versions: new Map() };
   let lastError = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const { data, error } = await supabase.from("app_state")
+    if (identityVersion !== _identityVersion || !_uid) return { staleIdentity: true };
+    const { data, error } = await requestAppState("versions", () => supabase.from("app_state")
       .select("key, version")
-      .in("key", safeKeys);
+      .in("key", safeKeys));
     if (identityVersion !== _identityVersion || !_uid) return { staleIdentity: true };
     if (!error) {
       return {
@@ -443,22 +541,39 @@ function rpcRow(data) {
   return Array.isArray(data) ? data[0] : data;
 }
 
+async function readAppliedValue(key, version, identityVersion) {
+  // The database may preserve accepted reports when an older snapshot tries to remove them.
+  // CAS acknowledges the write/version, not that its submitted JSON was stored unchanged.
+  const remote = await readRemote(key, identityVersion);
+  if (remote.staleIdentity) return remote;
+  if (!remote.ok) return remote;
+  if (!remote.exists || remote.version < version) {
+    return { ok: false, error: new Error("The saved shared version could not be confirmed. Retry saving.") };
+  }
+  return remote;
+}
+
 async function compareAndSwap(key, expectedVersion, value, identityVersion = _identityVersion) {
   let lastError = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const { data, error } = await supabase.rpc("sps_app_state_cas", {
+    if (identityVersion !== _identityVersion || !_uid) return { staleIdentity: true };
+    const { data, error } = await requestAppState("cas", () => supabase.rpc("sps_app_state_cas", {
       p_key: key,
       p_expected_version: expectedVersion,
       p_value: value,
-    });
+    }));
     if (identityVersion !== _identityVersion || !_uid) return { staleIdentity: true };
     if (!error) {
       const row = rpcRow(data) || {};
+      const actual = row.applied === true && serverProtectedKeys.has(key)
+        ? await readAppliedValue(key, Number(row.current_version) || 0, identityVersion) : null;
+      if (actual && !actual.ok) return actual;
       return {
         ok: true,
         applied: row.applied === true,
         outcome: row.outcome || (row.applied ? "updated" : "conflict"),
-        version: row.current_version == null ? 0 : Number(row.current_version),
+        version: actual ? actual.version : row.current_version == null ? 0 : Number(row.current_version),
+        value: actual ? actual.value : value,
         updatedAt: row.changed_at || null,
       };
     }
@@ -473,10 +588,11 @@ async function compareAndSwap(key, expectedVersion, value, identityVersion = _id
 async function compareAndDelete(key, expectedVersion, identityVersion = _identityVersion) {
   let lastError = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const { data, error } = await supabase.rpc("sps_app_state_delete_cas", {
+    if (identityVersion !== _identityVersion || !_uid) return { staleIdentity: true };
+    const { data, error } = await requestAppState("delete-cas", () => supabase.rpc("sps_app_state_delete_cas", {
       p_key: key,
       p_expected_version: expectedVersion,
-    });
+    }));
     if (identityVersion !== _identityVersion || !_uid) return { staleIdentity: true };
     if (!error) {
       const row = rpcRow(data) || {};
@@ -493,13 +609,14 @@ async function compareAndDelete(key, expectedVersion, identityVersion = _identit
 async function compareAndSwapBatch(operations, identityVersion = _identityVersion) {
   let lastError = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const { data, error } = await supabase.rpc("sps_app_state_batch_cas", {
+    if (identityVersion !== _identityVersion || !_uid) return { staleIdentity: true };
+    const { data, error } = await requestAppState("batch-cas", () => supabase.rpc("sps_app_state_batch_cas", {
       p_operations: operations.map((operation) => ({
         key: operation.key,
         expected_version: operation.expectedVersion,
         value: operation.value,
       })),
-    });
+    }));
     if (identityVersion !== _identityVersion || !_uid) return { staleIdentity: true };
     if (!error) {
       const row = rpcRow(data) || {};
@@ -552,7 +669,7 @@ async function init() {
   _initSelectAt = Date.now();
   const run = (async () => {
     try {
-      const { data, error } = await supabase.from("app_state").select("key, value, version");
+      const { data, error } = await requestAppState("initialize", () => supabase.from("app_state").select("key, value, version"));
       if (identityVersion !== _identityVersion || !_uid) return { ok: false, loaded: false, staleIdentity: true };
       if (error) {
         console.error("store.init failed:", error.message);
@@ -608,7 +725,7 @@ async function init() {
         }
       }
       for (const row of data) {
-        const value = normalizeStoredValue(row.value);
+        const value = normalizeRemoteStoredValue(row.key, row.value);
         if (value === undefined) continue;
         _confirmed[row.key] = value;
         _versions[row.key] = Number(row.version) || 0;
@@ -665,8 +782,25 @@ function stagePending(key, value, options = {}) {
     // even if the user makes another edit; silently upgrading it would discard part of that work.
     envelope = { ...existing, opId: newOpId(), localValue, status: "legacy", updatedAt: now };
   } else if (existing && existing.v === 2) {
+    // Display-only refreshes can include server changes that were never part of the user's intent.
+    // On a subsequent real edit, reverse the original local delta out of that projection to build
+    // its new base. Remote-only records then remain base data and cannot be resurrected by a later
+    // conflict choice after another device removes them. Overlapping fields retain their old base.
+    const projectedBase = hasOwn(options, "projectedBaseValue")
+      ? mergeStoredState(
+        key,
+        existing.localValue,
+        existing.baseExists ? existing.baseValue : undefined,
+        normalizeStoredValue(options.projectedBaseValue),
+        { prefer: "local" }
+      ).value
+      : undefined;
     envelope = {
       ...existing,
+      ...(hasOwn(options, "projectedBaseValue") ? {
+        baseExists: projectedBase !== undefined,
+        baseValue: projectedBase === undefined ? null : projectedBase,
+      } : {}),
       opId: newOpId(),
       localValue,
       deleteIntent: false,
@@ -931,19 +1065,12 @@ async function finishDeleted(key, envelope, identityVersion, options = {}) {
 
 async function commitKey(key, identityVersion = _identityVersion) {
   if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+  const hydration = await ensureHydrate();
+  if (!hydration?.ok) return pendingDurabilityFailure(hydration?.error);
   try {
     await awaitPendingDurability();
   } catch (error) {
-    const durabilityError = new Error("This change could not be saved on this device. Keep this screen open and retry before continuing.");
-    durabilityError.code = (error && error.code) || "pending_durability_unavailable";
-    throttledError(durabilityError.message);
-    return {
-      ok: false,
-      error: durabilityError,
-      durabilityFailed: true,
-      review: true,
-      queued: false,
-    };
+    return pendingDurabilityFailure(error);
   }
   if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
   await ensureHydrate();
@@ -1034,7 +1161,7 @@ async function commitKey(key, identityVersion = _identityVersion) {
     const result = await compareAndSwap(key, remote.exists ? remote.version : 0, candidate, identityVersion);
     if (result.staleIdentity) return { ok: false, staleIdentity: true };
     if (!result.ok) return commitFailure(key, envelope, result.error);
-    if (result.applied) return finishApplied(key, envelope, candidate, result.version, identityVersion);
+    if (result.applied) return finishApplied(key, envelope, result.value, result.version, identityVersion);
 
     remote = await readRemote(key, identityVersion);
     if (remote.staleIdentity) return { ok: false, staleIdentity: true };
@@ -1117,10 +1244,16 @@ async function refreshKey(key, identityVersion = _identityVersion) {
       || priorVersion !== Number(remote.version || 0)
       || (remote.exists && !sameStored(priorValue, remote.value));
 
-    // A local edit may already be staged or committing. Update its confirmed merge target, but keep
-    // the optimistic value on screen; the serialized CAS path will merge/rebase it safely. Replacing
-    // _cache here would make a foreground/realtime pull erase work that has not landed yet.
-    adoptRemote(key, remote, !_pending[key]);
+    // Preserve unresolved edits, while allowing independent server changes (such as a completed
+    // report) to appear in the display cache. Keep the original durable intent and conflict choice
+    // untouched: this projection is not a new edit, a rebase, or permission to commit either side.
+    const pending = _pending[key];
+    adoptRemote(key, remote, !pending);
+    if (pending?.v === 2 && !pending.deleteIntent && !pending.force) {
+      const projected = projectAcceptedReports(key, mergeEnvelopeWithRemote(key, pending, remote, "local").value, remote.value);
+      if (projected === undefined) delete _cache[key];
+      else _cache[key] = projected;
+    }
     saveSnapshot();
     // Do not let a successful one-key refresh certify an earlier FAILED full-app read. Doing so
     // would lift App.jsx's write fence while other sections still hold their defaults. Once the
@@ -1282,9 +1415,19 @@ async function flushKey(key) {
 
 async function resolveConflict(key, strategy, identityVersion = _identityVersion) {
   if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+  const hydration = await ensureHydrate();
+  if (!hydration?.ok) return pendingDurabilityFailure(hydration?.error);
+  if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
   const envelope = _pending[key];
   if (!envelope) return { ok: true, value: _confirmed[key], version: Number(_versions[key]) || 0 };
   if (strategy !== "local" && strategy !== "remote") throw new Error("Unknown conflict resolution");
+  try {
+    await awaitPendingDurability();
+  } catch (error) {
+    return pendingDurabilityFailure(error);
+  }
+  if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+  if (!_pending[key] || _pending[key].opId !== envelope.opId) return { ok: false, superseded: true };
 
   for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt += 1) {
     const current = _pending[key];
@@ -1333,7 +1476,7 @@ async function resolveConflict(key, strategy, identityVersion = _identityVersion
     const result = await compareAndSwap(key, remote.exists ? remote.version : 0, candidate, identityVersion);
     if (result.staleIdentity) return { ok: false, staleIdentity: true };
     if (!result.ok) return queueFailure(key, result.error, envelope);
-    if (result.applied) return finishApplied(key, envelope, candidate, result.version, identityVersion);
+    if (result.applied) return finishApplied(key, envelope, result.value, result.version, identityVersion);
   }
   return queueFailure(key, new Error("The shared version changed again. Please choose once more."), envelope);
 }
@@ -1372,7 +1515,8 @@ function replaceMany(changes) {
   const run = (async () => {
     try { await Promise.all(priors); } catch (_) {}
     if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
-    await ensureHydrate();
+    const hydration = await ensureHydrate();
+    if (!hydration?.ok) return pendingDurabilityFailure(hydration?.error);
     const initialized = await init();
     if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
     if (!initialized.ok) return { ...initialized, ok: false, initFailed: true };
@@ -1393,8 +1537,18 @@ function replaceMany(changes) {
       result = { ok: true, applied: true, outcome: "already-applied", versions: verified.versions };
     }
 
+    // Guarded sections can differ from the requested restoration while the transaction succeeds.
+    // Confirm all of them before advancing any cache or pending-edit base.
+    const protectedValues = new Map();
+    for (const operation of operations.filter(item => serverProtectedKeys.has(item.key))) {
+      const actual = await readAppliedValue(operation.key, Number(result.versions[operation.key]) || 0, identityVersion);
+      if (!actual.ok) return { ...actual, ok: false, unconfirmed: true };
+      protectedValues.set(operation.key, actual.value);
+      result.versions[operation.key] = actual.version;
+    }
     for (const operation of operations) {
       const key = operation.key;
+      if (protectedValues.has(key)) operation.value = protectedValues.get(key);
       const version = Number(result.versions[key]) || operation.expectedVersion + 1 || 1;
       _confirmed[key] = operation.value;
       _versions[key] = version;
@@ -1456,6 +1610,8 @@ function replaceMany(changes) {
 }
 
 export const store = {
+  // Display-only overlay; neither stages nor resolves the original durable local intent.
+  projectDisplay(key, displayedValue, remoteValue) { return projectAcceptedReports(key, displayedValue, remoteValue); },
   setUser(uid) {
     const nextUid = uid || null;
     if (nextUid === _uid) return;
@@ -1492,8 +1648,24 @@ export const store = {
     return refreshChangedKeys(keys, options, _identityVersion);
   },
 
-  set(key, value, options = {}) {
+  async set(key, value, options = {}) {
     const identityVersion = _identityVersion;
+    if (_pendingHydratedIdentity !== identityVersion) {
+      const recovered = await ensureHydrate();
+      if (!recovered?.ok) return pendingDurabilityFailure(recovered?.error);
+      if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+      // Finish the recovered intent before staging a form entered from an older screen. Its
+      // submitted base then merges the new change with the recovered server value instead of
+      // replacing the old offline edit in the account's pending envelope.
+      if (_pending[key]) _hydrationHeldKeys.add(key);
+    }
+    if (_hydrationHeldKeys.has(key)) {
+      if (_pending[key]) {
+        const prior = await enqueueCommit(key, identityVersion);
+        if (!prior?.ok) return prior;
+      }
+      _hydrationHeldKeys.delete(key);
+    }
     stagePending(key, value, options);
     return enqueueCommit(key, identityVersion);
   },
@@ -1522,6 +1694,11 @@ export const store = {
 
   async remove(key, options = {}) {
     const identityVersion = _identityVersion;
+    if (_pendingHydratedIdentity !== identityVersion) {
+      const recovered = await ensureHydrate();
+      if (!recovered?.ok) return pendingDurabilityFailure(recovered?.error);
+      if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+    }
     stageDelete(key, options);
     return enqueueCommit(key, identityVersion);
   },

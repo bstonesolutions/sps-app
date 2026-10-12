@@ -5,6 +5,7 @@ process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-key";
 
 const {
   compareAndSetAppStateBatch,
+  compareAndSetStopCompletionBatch,
   mutateAppState,
   NO_APP_STATE_CHANGE,
   readAppStatesVersioned,
@@ -19,6 +20,26 @@ const response = (body, ok = true, status = 200) => ({
   status,
   async json() { return body; },
   async text() { return typeof body === "string" ? body : JSON.stringify(body); },
+});
+
+test("stop completion batches use the scoped authority RPC without generic fallback", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push(String(url));
+    assert.match(String(url), /\/rpc\/sps_stop_completion_batch_cas$/);
+    const body = JSON.parse(options.body);
+    assert.equal(body.p_mode, "edit"); assert.equal(body.p_sid, "s1"); assert.equal(body.p_receipt_id, "r1");
+    assert.deepEqual(body.p_operations, [
+      { key: "sps_clients", expected_version: 4, value: "[]" },
+      { key: "sps_completed", expected_version: 6, check_only: true },
+    ]);
+    return response({ code: "PGRST202", message: "RPC migration missing" }, false, 404);
+  };
+  await assert.rejects(compareAndSetStopCompletionBatch([
+    { key: "sps_clients", expectedVersion: 4, value: [] },
+    { key: "sps_completed", expectedVersion: 6, checkOnly: true },
+  ], { mode: "edit", sid: "s1", receiptId: "r1" }), /app_state_batch_cas_failed/);
+  assert.equal(calls.length, 1);
 });
 
 test("server mutation reruns against the winner of a CAS conflict", async () => {

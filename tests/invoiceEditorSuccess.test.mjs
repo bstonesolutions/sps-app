@@ -20,7 +20,10 @@ function finishHarness(overrides = {}) {
   const state = { inv: draft, persisted: false, qbState: "sending", qbMsg: "Previous attempt failed", coverageError: "Previous coverage check failed", sendStep: null, saved: [], closed: 0, requests: 0 };
   const deps = {
     client: { id: draft.clientId, name: "Sample client" },
-    onSave: invoice => { state.saved.push(invoice); },
+    progressBaselineRef: { current: JSON.stringify(draft) },
+    pendingSpsSaveRef: { current: null },
+    setSpsSavePending: value => { state.spsSavePending = value; },
+    onSave: async invoice => { state.saved.push(invoice); return invoice; },
     setInv: invoice => { state.inv = invoice; },
     setIsPersisted: value => { state.persisted = value; },
     setQbState: value => { state.qbState = value; },
@@ -34,9 +37,9 @@ function finishHarness(overrides = {}) {
   return { state, deps, finish: new Function(...Object.keys(deps), `return (${finishSource});`)(...Object.values(deps)) };
 }
 
-test("a successful QB save adopts normalized lines and exits sending despite a stale coverage warning", () => {
+test("a successful QB save adopts normalized lines and exits sending despite a stale coverage warning", async () => {
   const { state, deps, finish } = finishHarness();
-  finish(synced);
+  await finish(synced);
   assert.deepEqual(state.saved, [synced]);
   assert.equal(state.inv, synced, "the editor must retain the returned QB id and normalized accounting content");
   assert.equal(state.persisted, true);
@@ -50,9 +53,9 @@ test("a successful QB save adopts normalized lines and exits sending despite a s
   assert.equal(state.closed, 0);
 });
 
-test("a local save with no invoice lines exits the busy editor without a notification step", () => {
+test("a local save with no invoice lines exits the busy editor without a notification step", async () => {
   const { state, finish } = finishHarness();
-  finish({ ...draft, lineItems: [] });
+  await finish({ ...draft, lineItems: [] });
   assert.equal(state.qbState, "done");
   assert.equal(state.sendStep, null);
   assert.equal(state.closed, 1);
@@ -60,10 +63,13 @@ test("a local save with no invoice lines exits the busy editor without a notific
   assert.equal(showsSendStep(null, { id: draft.clientId }, null), false);
 });
 
-test("a synchronous parent save failure does not replace the draft or expose delivery controls", () => {
+test("a failed SPS save retains the confirmed QuickBooks identity without exposing delivery controls", async () => {
   const { state, finish } = finishHarness({ onSave: () => { throw new Error("Save rejected"); } });
-  assert.throws(() => finish(synced), /Save rejected/);
-  assert.equal(state.inv, draft);
+  const result = await finish(synced);
+  assert.equal(result.ok, false);
+  assert.equal(state.inv, synced);
+  assert.match(state.qbMsg, /QuickBooks saved this invoice/);
+  assert.match(state.qbMsg, /Save rejected/);
   assert.equal(state.sendStep, null);
   assert.equal(state.persisted, false);
   assert.equal(state.closed, 0);
@@ -77,6 +83,8 @@ test("a current maintenance preflight rejection still prevents QB creation and t
   const saveSource = app.slice(saveStart, saveEnd).trim().replace(/;$/, "");
   const state = { qbState: "idle", qbMsg: "", finishes: 0, requests: 0 };
   const deps = {
+    invoiceSaveBusyRef: { current: false },
+    pendingSpsSaveRef: { current: null },
     progressState: "idle", qbState: "idle", selectedClientSnapshot: () => draft,
     editRevisionRef: { current: 0 }, needsCoverageCheck: true,
     setQbState: value => { state.qbState = value; }, setQbMsg: value => { state.qbMsg = value; },
@@ -92,4 +100,55 @@ test("a current maintenance preflight rejection still prevents QB creation and t
   assert.match(state.qbMsg, /Review the current month first/);
   assert.equal(state.finishes, 0);
   assert.equal(state.requests, 0);
+});
+
+test("invoice success waits for the SPS receipt and passes the editor's original baseline", async () => {
+  let finishReceipt;
+  let request;
+  const { state, finish } = finishHarness({ onSave: async (invoice, options) => {
+    request = { invoice, options };
+    return new Promise(resolve => { finishReceipt = resolve; });
+  } });
+  const pending = finish(synced);
+  assert.equal(state.inv.qbId, synced.qbId);
+  assert.equal(state.persisted, false);
+  assert.equal(state.sendStep, null);
+  assert.equal(state.qbState, "sending");
+  assert.deepEqual(request, { invoice: synced, options: { confirmedSave: true, baselineJson: JSON.stringify(draft) } });
+  finishReceipt(synced);
+  assert.equal((await pending).ok, true);
+  assert.equal(state.persisted, true);
+  assert.equal(state.sendStep, synced);
+});
+
+test("a rejected or missing asynchronous SPS receipt cannot mark the invoice saved", async () => {
+  for (const receipt of [undefined, { ok: false, queued: true }, { id: "different-invoice" }]) {
+    const { state, finish } = finishHarness({ onSave: async () => receipt });
+    const result = await finish(draft);
+    assert.equal(result.ok, false);
+    assert.equal(state.persisted, false);
+    assert.equal(state.sendStep, null);
+    assert.equal(state.closed, 0);
+    assert.equal(state.qbState, "error");
+  }
+});
+
+test("Retry Save after either local save failure or QuickBooks success retries only the frozen SPS checkpoint", async () => {
+  const saveStart = app.indexOf("  const save = async () => {", editorStart) + "  const save = ".length;
+  const saveEnd = app.indexOf("\n\n  const field =", saveStart);
+  const saveSource = app.slice(saveStart, saveEnd).trim().replace(/;$/, "");
+  for (const checkpoint of [synced, draft]) {
+  const pendingSpsSaveRef = { current: checkpoint };
+  const checkpoints = [];
+  const dependencies = {
+    invoiceSaveBusyRef: { current: false }, pendingSpsSaveRef, progressState: "idle", qbState: "error",
+    selectedClientSnapshot() { assert.fail("Keep the confirmed accounting snapshot"); },
+    setQbState() {}, setQbMsg() {},
+    finishSave: async invoice => { checkpoints.push(invoice); },
+    fetch() { assert.fail("Retrying an SPS save must not call QuickBooks again"); },
+  };
+  await new Function(...Object.keys(dependencies), `return (${saveSource});`)(...Object.values(dependencies))();
+  assert.deepEqual(checkpoints, [checkpoint]);
+  assert.equal(dependencies.invoiceSaveBusyRef.current, false);
+  }
 });

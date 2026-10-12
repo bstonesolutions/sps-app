@@ -193,6 +193,22 @@ export async function compareAndSetAppState(key, expectedVersion, value, request
 // exposed to browsers: callers provide decoded values and the helper preserves the app's existing
 // JSON-string-inside-jsonb representation for every row.
 export async function compareAndSetAppStateBatch(operations, requestOptions = {}) {
+  return compareAndSetBatch(operations, "sps_app_state_batch_cas", {}, requestOptions);
+}
+
+// Completion receipts can only be changed inside the dedicated database transaction. Never fall
+// back to the generic writer when this migration is absent: that would bypass report protection.
+export async function compareAndSetStopCompletionBatch(operations, { mode, sid, receiptId = "" }, requestOptions = {}) {
+  if (!["complete", "reverse", "edit"].includes(mode) || !String(sid || "").trim()
+    || (mode !== "reverse" && !String(receiptId || "").trim())) throw new Error("stop_completion_scope_invalid");
+  return compareAndSetBatch(operations, "sps_stop_completion_batch_cas", {
+    p_mode: mode,
+    p_sid: String(sid),
+    p_receipt_id: String(receiptId || ""),
+  }, requestOptions);
+}
+
+async function compareAndSetBatch(operations, rpcName, scope, requestOptions) {
   if (!Array.isArray(operations) || operations.length < 2) throw new Error("app_state_batch_operations_invalid");
   const seen = new Set();
   const wire = operations.map((operation) => {
@@ -216,10 +232,10 @@ export async function compareAndSetAppStateBatch(operations, requestOptions = {}
     return encoded;
   });
   return withAppStateRequestDeadline("batch-cas", async (signal) => {
-    const response = await fetch(`${APP_STATE_SUPABASE_URL}/rest/v1/rpc/sps_app_state_batch_cas`, {
+    const response = await fetch(`${APP_STATE_SUPABASE_URL}/rest/v1/rpc/${rpcName}`, {
       method: "POST",
       headers: headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ p_operations: wire }),
+      body: JSON.stringify({ p_operations: wire, ...scope }),
       signal,
     });
     if (!response.ok) throw await responseError("app_state_batch_cas_failed", response);

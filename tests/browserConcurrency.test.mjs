@@ -1,4 +1,4 @@
-import test, { afterEach } from "node:test";
+import test, { after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
 if (typeof globalThis.CustomEvent === "undefined") {
@@ -13,6 +13,17 @@ globalThis.localStorage = {
   setItem(key, value) { localValues.set(key, String(value)); },
   removeItem(key) { localValues.delete(key); },
 };
+
+// Concurrency tests need a working durable store. A missing IndexedDB implementation is an
+// unavailable device, not proof that previously retained pending work was successfully cleared.
+const { idb } = await import("../idbStore.js");
+const originalIdb = { get: idb.get, getVerified: idb.getVerified, set: idb.set, del: idb.del };
+const idbValues = new Map();
+idb.get = async key => idbValues.has(key) ? structuredClone(idbValues.get(key)) : undefined;
+idb.getVerified = (...args) => idb.get(...args);
+idb.set = async (key, value) => { idbValues.set(key, structuredClone(value)); return key; };
+idb.del = async key => { idbValues.delete(key); };
+after(() => Object.assign(idb, originalIdb));
 
 const { store, supabase } = await import("../supabaseClient.js");
 const originalFrom = supabase.from.bind(supabase);
@@ -86,7 +97,8 @@ function installDatabase(initialRows, options = {}) {
       for (const operation of operations) {
         const current = rows.get(operation.key);
         const version = current ? current.version + 1 : 1;
-        rows.set(operation.key, { value: operation.value, version, updated_at: null });
+        const value = options.normalizeWrite ? options.normalizeWrite(operation.key, operation.value, current?.value) : operation.value;
+        rows.set(operation.key, { value, version, updated_at: null });
         versions[operation.key] = version;
       }
       return { data: [{ applied: true, outcome: "updated", conflict_key: null, current_versions: versions }], error: null };
@@ -104,7 +116,8 @@ function installDatabase(initialRows, options = {}) {
         return { data: [{ applied: false, outcome: current ? "conflict" : "missing", current_version: current ? current.version : null, changed_at: null }], error: null };
       }
       const version = current ? current.version + 1 : 1;
-      rows.set(args.p_key, { value: args.p_value, version, updated_at: null });
+      const value = options.normalizeWrite ? options.normalizeWrite(args.p_key, args.p_value, current?.value) : args.p_value;
+      rows.set(args.p_key, { value, version, updated_at: null });
       return { data: [{ applied: true, outcome: current ? "updated" : "inserted", current_version: version, changed_at: null }], error: null };
     }
     if (name === "sps_app_state_delete_cas") {
@@ -516,6 +529,82 @@ test("browser pauses on a same-field conflict until an employee chooses", async 
   assert.deepEqual(store.listConflicts(), []);
 });
 
+test("refresh displays confirmed report history while retaining unrelated client conflicts verbatim", async () => {
+  const key = "sps_clients", uid = "client-conflict-report-projection";
+  const base = [
+    { id: "c1", name: "First client", notes: "Before", history: [] },
+    { id: "c2", name: "Second client", notes: "Unchanged", history: [] },
+  ];
+  const local = [{ ...base[0], notes: "Local notes" }, base[1]];
+  const shared = [{ ...base[0], notes: "Shared notes" }, base[1]];
+  const db = installDatabase({ [key]: { value: json(base), version: 1, updated_at: null } });
+  await loadAs(uid, key);
+  db.rows.set(key, { value: json(shared), version: 2, updated_at: null });
+  assert.equal((await store.set(key, json(local), { baseValue: json(base) })).conflict, true);
+  await tick();
+  const retainedIntent = localValues.get(`sps_pending_writes:${uid}`);
+  const retainedConflicts = store.listConflicts();
+  const firstReport = { id: "report-first", sid: "stop-first", note: "Pond netting complete" };
+  const secondReport = { id: "report-second", sid: "stop-second", note: "Pool service complete" };
+  const latest = [
+    { ...shared[0], history: [firstReport] },
+    { ...shared[1], history: [secondReport] },
+  ];
+  db.rows.set(key, { value: json(latest), version: 3, updated_at: null });
+  const reconciles = [];
+  const onReconciled = event => { if (event.detail?.key === key) reconciles.push(event.detail); };
+  document.addEventListener("sps-reconciled", onReconciled);
+  try {
+    const refreshed = await store.refresh(key);
+    const displayed = JSON.parse((await store.get(key)).value);
+
+    assert.equal(refreshed.ok, true);
+    assert.equal(refreshed.pending, true);
+    assert.equal(displayed[0].notes, "Local notes", "the unchosen overlapping edit remains on this device");
+    assert.deepEqual(displayed[0].history, [firstReport], "independent history on the same client becomes visible");
+    assert.deepEqual(displayed[1].history, [secondReport], "another client's report must not disappear behind a section conflict");
+    assert.equal(localValues.get(`sps_pending_writes:${uid}`), retainedIntent);
+    assert.deepEqual(store.listConflicts(), retainedConflicts);
+    assert.deepEqual(reconciles, [], "a display projection must not force replacement of an in-progress React edit");
+
+    // Reproject from the retained intent, not the previous projection, when another server update lands.
+    latest[1] = { ...latest[1], name: "Updated second client", history: [] };
+    db.rows.set(key, { value: json(latest), version: 4, updated_at: null });
+    await store.refresh(key);
+    const updated = JSON.parse((await store.get(key)).value);
+    assert.equal(updated[1].name, "Updated second client");
+    assert.deepEqual(updated[1].history, []);
+    assert.equal(localValues.get(`sps_pending_writes:${uid}`), retainedIntent);
+
+    const resolved = await store.resolveConflict(key, "remote");
+    assert.equal(resolved.ok, true);
+    assert.deepEqual(JSON.parse(db.rows.get(key).value), latest);
+  } finally { document.removeEventListener("sps-reconciled", onReconciled); }
+});
+
+test("refresh projects independent confirmed changes over an offline edit without changing its retry envelope", async () => {
+  const key = "sps_clients", uid = "client-pending-report-projection";
+  const base = [{ id: "c1", notes: "Before", history: [] }];
+  const local = [{ ...base[0], notes: "Local notes" }];
+  const db = installDatabase(
+    { [key]: { value: json(base), version: 1, updated_at: null } },
+    { casError: { status: 522, message: "Temporarily offline" } },
+  );
+  await loadAs(uid, key);
+  assert.equal((await store.set(key, json(local), { baseValue: json(base) })).queued, true);
+  await tick();
+  const retainedIntent = localValues.get(`sps_pending_writes:${uid}`);
+  const report = { id: "confirmed-report", sid: "confirmed-stop" };
+  db.rows.set(key, { value: json([{ ...base[0], history: [report] }]), version: 2, updated_at: null });
+
+  const refreshed = await store.refresh(key);
+  assert.equal(refreshed.ok, true);
+  assert.deepEqual(JSON.parse((await store.get(key)).value), [{ ...local[0], history: [report] }]);
+  assert.equal(localValues.get(`sps_pending_writes:${uid}`), retainedIntent);
+  assert.equal(db.casCalls, 1, "refresh must not turn a display projection into a write");
+  assert.deepEqual(store.listConflicts(), []);
+});
+
 test("an older response cannot clear a newer queued edit", async () => {
   const base = [{ id: "c1", note: "A" }];
   let releaseFirst;
@@ -618,4 +707,71 @@ test("atomic multi-section replacement changes nothing when one baseline is stal
   assert.equal(result.conflictKey, "sps_clients");
   assert.equal(db.rows.get("sps_clients").value, originalClients);
   assert.equal(db.rows.get("sps_schedule").value, originalSchedule);
+});
+
+test("a guarded client save adopts preserved server history instead of the submitted snapshot", async () => {
+  const key = "sps_clients";
+  const history = [{ sid: "stop-1", completionReceiptId: "accepted-report", notes: "Saved report" }];
+  const base = [{ id: "c1", notes: "Before", history }];
+  const db = installDatabase({ [key]: { value: json(base), version: 1 } }, {
+    normalizeWrite: (_, value, old) => json(JSON.parse(value).map(client => ({ ...client, history: JSON.parse(old)[0].history }))),
+  });
+  await loadAs("guarded-client-save", key);
+  const result = await store.set(key, json([{ ...base[0], notes: "Office change", history: [] }]), { baseValue: json(base) });
+  assert.equal(result.ok, true);
+  assert.deepEqual(JSON.parse(result.value)[0].history, history);
+  assert.equal(JSON.parse(result.value)[0].notes, "Office change");
+  assert.equal((await store.get(key)).value, db.rows.get(key).value);
+  assert.equal(idbValues.has("pending-v2:guarded-client-save"), false);
+});
+
+test("a guarded conflict resolution adopts the preserved report returned by the database", async () => {
+  const key = "sps_clients";
+  const history = [{ sid: "stop-1", completionReceiptId: "accepted-report", notes: "Saved report" }];
+  const base = [{ id: "c1", notes: "Before", history }];
+  const db = installDatabase({ [key]: { value: json(base), version: 1 } }, {
+    normalizeWrite: (_, value, old) => json(JSON.parse(value).map(client => ({ ...client, history: JSON.parse(old)[0].history }))),
+  });
+  await loadAs("guarded-client-conflict", key);
+  db.rows.set(key, { value: json([{ ...base[0], notes: "Remote edit" }]), version: 2 });
+  assert.equal((await store.set(key, json([{ ...base[0], notes: "Local edit", history: [] }]), { baseValue: json(base) })).conflict, true);
+  const result = await store.resolveConflict(key, "local");
+  assert.equal(result.ok, true);
+  assert.deepEqual(JSON.parse(result.value)[0].history, history);
+  assert.equal(JSON.parse(result.value)[0].notes, "Local edit");
+  assert.equal((await store.get(key)).value, db.rows.get(key).value);
+});
+
+test("atomic replacement adopts protected server values for both reports and completion markers", async () => {
+  const history = [{ sid: "stop-1", completionReceiptId: "accepted-report", notes: "Saved report" }];
+  const clients = [{ id: "c1", history }];
+  const completed = { "stop-1": { v: 2, receiptId: "accepted-report" } };
+  const db = installDatabase({ sps_clients: { value: json(clients), version: 1 }, sps_completed: { value: json(completed), version: 1 } }, {
+    normalizeWrite: (_, __, old) => old,
+  });
+  await loadAs("guarded-batch-save", "sps_clients");
+  const result = await store.replaceMany([
+    { key: "sps_clients", value: json([]), expectedVersion: 1 },
+    { key: "sps_completed", value: json({}), expectedVersion: 1 },
+  ]);
+  assert.equal(result.ok, true);
+  assert.equal((await store.get("sps_clients")).value, db.rows.get("sps_clients").value);
+  assert.equal((await store.get("sps_completed")).value, db.rows.get("sps_completed").value);
+});
+
+test("failed protected post-write verification retains the durable pending edit for a later retry", async () => {
+  const key = "sps_clients";
+  const base = [{ id: "c1", notes: "Before" }];
+  let verificationFails = true;
+  const db = installDatabase({ [key]: { value: json(base), version: 1 } }, {
+    beforeRead: ({ call }) => { if (verificationFails) throw new Error("Verification unavailable"); },
+  });
+  await loadAs("guarded-save-unconfirmed", key);
+  const result = await store.set(key, json([{ ...base[0], notes: "Saved on server" }]), { baseValue: json(base) });
+  assert.equal(result.ok, false);
+  assert.ok(idbValues.get("pending-v2:guarded-save-unconfirmed")?.data[key]);
+  assert.equal(JSON.parse(db.rows.get(key).value)[0].notes, "Saved on server");
+  verificationFails = false;
+  assert.equal((await store.flushKey(key)).ok, true);
+  assert.equal(idbValues.has("pending-v2:guarded-save-unconfirmed"), false);
 });

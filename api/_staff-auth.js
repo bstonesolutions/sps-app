@@ -132,6 +132,12 @@ export function memberHasCapability(member, capability) {
     return memberHasCapability(member, "completeStops") || tabMode(member, "clients") === "edit";
   }
 
+  if (capability === "editHistory") {
+    const clients = tabMode(member, "clients");
+    if (clients !== null) return clients === "edit";
+    return ["full", "lead"].includes(role) || (role === "custom" && member.perms?.canEditHistory === true);
+  }
+
   if (capability === "invoiceView") {
     const mode = tabMode(member, "invoices");
     if (mode !== null) return mode === "view" || mode === "edit";

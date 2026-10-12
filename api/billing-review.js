@@ -14,6 +14,7 @@ import { quickBooksMaintenanceGuard } from "./quickbooks/maintenance-guard.js";
 import { invoiceServiceDescriptionIssue } from "../invoiceServiceDescription.js";
 import { invoiceCompletedVisitSources, reserveCompletedVisitInvoice } from "../invoiceVisitImport.js";
 import { billingReviewAccountingIssue } from "./_billing-review-claims.js";
+import { BILLING_REVIEW_EDIT_FIELDS, BILLING_REVIEW_LINE_EDIT_FIELDS } from "../billingReviewReceipt.js";
 
 export const config = { maxDuration: 60 };
 const KEYS = [BILLING_REVIEW_KEY, "sps_invoices", "sps_estimates", "sps_schedule", "sps_clients", "sps_completed", "sps_invoicing", "sps_maintenance_billing"];
@@ -23,8 +24,8 @@ const copy = value => structuredClone(value);
 const list = value => Array.isArray(value) ? value : [];
 const same = (a, b) => text(a) === text(b);
 const fail = (status, code, message) => Object.assign(new Error(message), { status, code });
-const editedFields = ["title", "date", "dueDate", "termsDays", "taxRate", "notes", "discountType", "discount", "serviceMonth", "lineItems"];
-const lineFields = ["id", "desc", "qty", "unitPrice", "unitCost", "knownUnitCost", "costKnown", "taxable", "kind", "refId", "unit", "bundleNote", "bundleItems", "discountType", "discount", "serviceMonth", "serviceDate", "maintenanceService", "isLateFee"];
+const editedFields = BILLING_REVIEW_EDIT_FIELDS;
+const lineFields = BILLING_REVIEW_LINE_EDIT_FIELDS;
 const sourceFields = ["sourceStopId", "sourceStopIds", "sourceCompletionReceiptId", "sourceCompletionReceiptIds", "sourceVisitDates", "sourceClientId", "sourceEstimateId", "sourceEstimateItemId", "sourceEstimateLineId"];
 const nowISO = now => new Date(now()).toISOString();
 
