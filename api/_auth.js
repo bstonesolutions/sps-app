@@ -17,8 +17,9 @@ const SUPABASE_KEY =
   process.env.SUPABASE_ANON_KEY ||
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlzcWFydXNyZXdjZWV6Y2thd2xvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2MjkzODEsImV4cCI6MjA5NjIwNTM4MX0.GCX-Bt3sSoDaaF-XT2xeu4h6wR4tXO2hqOydQUkl_CQ";
 
-// Resolve the Supabase user from the request's Bearer token, or null.
-export async function verifyUser(req) {
+// Staff mutations distinguish an unavailable identity service from a rejected token.
+// Existing direct callers keep their historical null-on-failure contract by default.
+export async function verifyUser(req, { distinguishUnavailable = false } = {}) {
   const hdr = req.headers.authorization || req.headers.Authorization || "";
   const token = hdr.startsWith("Bearer ") ? hdr.slice(7) : "";
   if (!token) return null;
@@ -26,10 +27,19 @@ export async function verifyUser(req) {
     const r = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
       headers: { Authorization: `Bearer ${token}`, apikey: SUPABASE_KEY },
     });
-    if (!r.ok) return null;
-    const u = await r.json().catch(() => null);
-    return u && u.id ? u : null;
+    if (!r.ok) {
+      if (r.status >= 500 || [408, 425, 429].includes(r.status)) throw new Error("auth_user_service_unavailable");
+      return null;
+    }
+    const u = await r.json();
+    if (!u || !u.id) throw new Error("auth_user_response_invalid");
+    return u;
   } catch (_) {
+    if (distinguishUnavailable) {
+      const error = new Error("User verification is temporarily unavailable.");
+      error.code = "AUTH_USER_UNAVAILABLE";
+      throw error;
+    }
     return null;
   }
 }

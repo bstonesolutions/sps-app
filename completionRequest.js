@@ -81,6 +81,16 @@ export async function requestCompletedStop({
       // Headers can arrive before a slow response body finishes. Keep that abort
       // retryable instead of turning HTTP 200 plus an empty body into a review error.
       if (didTimeout || error?.name === "AbortError") throw error;
+      // A dropped or truncated successful response does not tell us whether the
+      // transaction committed. Retry the same key to recover its receipt.
+      if (response.ok) {
+        throw requestError("The server response could not be confirmed. The saved report will retry automatically.", {
+          status: 502,
+          code: "completion-response-unconfirmed",
+          requestId,
+          durationMs: elapsedMs(startedAt, now),
+        });
+      }
       return {};
     });
     const durationMs = elapsedMs(startedAt, now);

@@ -197,7 +197,12 @@ function authorizationUnavailable(res) {
 }
 
 export async function requireStaff(req, res, feature = "this action") {
-  const user = await verifyUser(req);
+  let user;
+  try {
+    user = await verifyUser(req, { distinguishUnavailable: true });
+  } catch (_) {
+    return authorizationUnavailable(res);
+  }
   if (!user || !user.email) {
     res.status(401).json({ error: "Please sign in again to do that." });
     return null;

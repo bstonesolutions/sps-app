@@ -10,7 +10,8 @@ Accepted completion reports are protected in PostgreSQL. A stale client snapshot
 - The compact RPC receives one client, validates the exact permitted change under locks, and replaces that client in the stored roster. It preserves the historical JSON encoding depth.
 - Generic writes from older apps still pass through the report-protection trigger.
 - An older app can block a request locally before contacting the API. Server changes cannot retrieve or retry a report that exists only on that device. Build 43 removes the unrelated conflict gate and retains failed report drafts for retry.
-- Build 44 also keeps a timeout during the successful response body retryable. The original completion key is retained so retrying cannot duplicate the completion.
+- Build 44 keeps a timeout during the successful response body retryable. Build 45 also retries interrupted or truncated successful response bodies. The original completion key is retained so retrying cannot duplicate the completion.
+- Staff stop endpoints return a retryable service-unavailable response for temporary auth-service failures. Invalid tokens still require sign-in; a transient auth outage must not strand a report in manual review.
 - Do not reinstall an app to resolve a pending report. Its unsent draft may exist only on that device.
 
 ## Validation

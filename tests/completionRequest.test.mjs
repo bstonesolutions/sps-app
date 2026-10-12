@@ -157,6 +157,37 @@ test("server rejection keeps status, code, request id, and duration for outbox r
   assert.equal(events.rows.at(-1).details.status, 409);
 });
 
+for (const bodyFailure of [new TypeError("terminated body stream"), new SyntaxError("Unexpected end of JSON input")]) {
+  test(`interrupted successful response remains queued and retries the exact request: ${bodyFailure.name}`, async () => {
+    const request = body();
+    const sent = [];
+    const fetchImpl = async (_url, options) => {
+      sent.push(JSON.parse(options.body));
+      return {
+        ok: true,
+        status: 200,
+        json: async () => {
+          if (sent.length === 1) throw bodyFailure;
+          return { ok: true, applied: false, alreadyCompleted: true, receiptId: "receipt-original" };
+        },
+      };
+    };
+    const options = { url: "https://spsway.app/api/stop-completion", body: request, fetchImpl, logger: logger() };
+    await assert.rejects(requestCompletedStop(options), error => {
+      assert.equal(error.status, 502);
+      assert.equal(error.code, "completion-response-unconfirmed");
+      assert.equal(classifyCompletionFailure(error).retryable, true);
+      assert.equal(classifyCompletionFailure(error).needsReview, false);
+      assert.doesNotMatch(error.message, /nothing was changed/i);
+      return true;
+    });
+    const recovered = await requestCompletedStop(options);
+    assert.equal(recovered.data.receiptId, "receipt-original");
+    assert.equal(recovered.data.applied, false);
+    assert.deepEqual(sent, [request, request]);
+  });
+}
+
 test("request ids remain available without Web Crypto", () => {
   const id = createCompletionRequestId({
     cryptoImpl: null,
