@@ -392,3 +392,137 @@ test("a conflict choice cannot bypass an unread newer IndexedDB intent", async (
     assert.equal(db.row.value, newest);
   } finally { idb.getVerified = read; }
 });
+
+async function prepareClientConflict(uid, { withPulse = false } = {}) {
+  const key = "sps_clients", pulse = "sps_conflict_test_pulse";
+  const base = json([{ id: "c1", notes: "Before" }]);
+  const local = json([{ id: "c1", notes: "Local" }]);
+  const shared = json([{ id: "c1", notes: "Shared" }]);
+  const envelope = (value, baseline) => ({
+    v: 2, opId: `original-${value}`, baseExists: true, baseValue: baseline, baseVersion: 1,
+    localValue: value, status: "conflict", conflicts: [{ path: "$.id:c1.notes", kind: "same-field-edit" }],
+    createdAt: 1000, updatedAt: 1000,
+  });
+  localValues.clear(); idbValues.clear(); localMode = "write"; idbMode = "write"; idbDeleteMode = "delete";
+  const data = { [key]: envelope(local, base) };
+  if (withPulse) data[pulse] = envelope(json({ tick: -1 }), json({ tick: -2 }));
+  idbValues.set(`pending-v2:${uid}`, { uid, at: 1000, data });
+  const db = installDatabase(key, shared);
+  store.setUser(uid); await store.get(key); await store.initialize();
+  return { key, pulse, base, local, shared, db };
+}
+
+const deferred = () => {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+};
+
+test("a client conflict finishes while unrelated pending saves continue", async () => {
+  const uid = "conflict-unrelated-save-fence";
+  const { key, pulse, db } = await prepareClientConflict(uid, { withPulse: true });
+  const ordinarySet = idb.set;
+  let producing = true, writes = 0;
+  const saves = [];
+  idb.set = async (storageKey, value) => {
+    if (storageKey === `pending-v2:${uid}`) {
+      await new Promise(resolve => setImmediate(resolve));
+      if (producing && writes < 20) {
+        writes += 1;
+        saves.push(store.set(pulse, json({ tick: writes }), { baseValue: json({ tick: -2 }) }));
+      }
+    }
+    return ordinarySet(storageKey, value);
+  };
+  try {
+    saves.push(store.set(pulse, json({ tick: 0 }), { baseValue: json({ tick: -2 }) }));
+    const result = await store.resolveConflict(key, "local");
+    assert.equal(result.ok, true);
+    assert.equal(db.casCalls, 1);
+    assert.ok(writes < 20, "the client choice must finish before unrelated saves stop extending the global queue");
+  } finally {
+    producing = false;
+    await Promise.all(saves);
+    idb.set = ordinarySet;
+  }
+});
+
+test("a conflict choice cannot use an older durability receipt for a newer same-key edit", async () => {
+  const uid = "conflict-same-key-durability-fence";
+  const { key, pulse, base, db } = await prepareClientConflict(uid, { withPulse: true });
+  const newest = json([{ id: "c1", notes: "Newest" }]);
+  const first = deferred(), entered = deferred(), newer = deferred(), newerEntered = deferred();
+  const ordinarySet = idb.set;
+  let firstWrite = true;
+  idb.set = async (storageKey, value) => {
+    if (storageKey === `pending-v2:${uid}`) {
+      if (firstWrite) { firstWrite = false; entered.resolve(); await first.promise; }
+      else if (value.data[key]?.localValue === newest) { newerEntered.resolve(); await newer.promise; }
+    }
+    return ordinarySet(storageKey, value);
+  };
+  let pulseSave, latestSave;
+  try {
+    pulseSave = store.set(pulse, json({ tick: 0 }), { baseValue: json({ tick: -2 }) });
+    await entered.promise;
+    const choice = store.resolveConflict(key, "local");
+    await new Promise(resolve => setImmediate(resolve));
+    latestSave = store.set(key, newest, { baseValue: base });
+    first.resolve();
+    await newerEntered.promise;
+    const result = await choice;
+    assert.equal(result.superseded, true);
+    assert.equal(db.casCalls, 0, "the newer value is not yet durably stored");
+    newer.resolve(); await latestSave;
+    const retried = await store.resolveConflict(key, "local");
+    assert.equal(retried.ok, true); assert.equal(db.row.value, newest);
+  } finally {
+    first.resolve(); newer.resolve();
+    await Promise.all([pulseSave, latestSave].filter(Boolean));
+    idb.set = ordinarySet;
+  }
+});
+
+test("an account switch invalidates a conflict choice waiting for local durability", async () => {
+  const uid = "conflict-identity-durability-fence";
+  const { key, pulse, db } = await prepareClientConflict(uid, { withPulse: true });
+  const held = deferred(), entered = deferred();
+  const ordinarySet = idb.set;
+  idb.set = async (storageKey, value) => {
+    if (storageKey === `pending-v2:${uid}`) { entered.resolve(); await held.promise; }
+    return ordinarySet(storageKey, value);
+  };
+  let pulseSave;
+  try {
+    pulseSave = store.set(pulse, json({ tick: 0 }), { baseValue: json({ tick: -2 }) });
+    await entered.promise;
+    const choice = store.resolveConflict(key, "local");
+    await new Promise(resolve => setImmediate(resolve));
+    store.setUser("different-account");
+    held.resolve();
+    const result = await choice;
+    assert.equal(result.staleIdentity, true); assert.equal(db.casCalls, 0);
+    assert.ok(idbValues.get(`pending-v2:${uid}`)?.data[key], "the original account's unsaved work remains recoverable");
+    assert.equal(idbValues.has("pending-v2:different-account"), false);
+  } finally { held.resolve(); await pulseSave; idb.set = ordinarySet; }
+});
+
+test("identical conflict autosaves retain their original intent without rewriting the large pending copy", async () => {
+  const uid = "conflict-identical-autosaves";
+  const { key, base, local, db } = await prepareClientConflict(uid);
+  const original = structuredClone(idbValues.get(`pending-v2:${uid}`));
+  const ordinarySet = idb.set;
+  let pendingWrites = 0;
+  idb.set = async (storageKey, value) => {
+    if (storageKey === `pending-v2:${uid}`) pendingWrites += 1;
+    return ordinarySet(storageKey, value);
+  };
+  try {
+    const results = await Promise.all(Array.from({ length: 20 }, () => store.set(key, local, { baseValue: base })));
+    assert.ok(results.every(result => result.conflict));
+    assert.equal(pendingWrites, 0);
+    assert.deepEqual(idbValues.get(`pending-v2:${uid}`), original);
+    assert.equal(db.casCalls, 0);
+    assert.equal((await store.resolveConflict(key, "local")).ok, true);
+  } finally { idb.set = ordinarySet; }
+});

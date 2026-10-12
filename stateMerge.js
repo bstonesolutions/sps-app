@@ -253,7 +253,41 @@ function identityFor(item, key, path) {
   if (key === "sps_invoices" && path.length === 0 && scalarId(item.qbId)) return `qb:${scalarId(item.qbId)}`;
   if (scalarId(item.id)) return `id:${scalarId(item.id)}`;
   if (scalarId(item.sid)) return `sid:${scalarId(item.sid)}`;
+  if (key === "sps_clients" && path.length === 2 && path[1] === "history"
+    && scalarId(item.completionReceiptId)) return `receipt:${scalarId(item.completionReceiptId)}`;
   return "";
+}
+
+// Older client visits have no persisted id. They can participate in an otherwise keyed
+// history merge only when the exact same row occurs once in each snapshot. These temporary
+// identities never reach storage and cannot identify an edited, deleted, or duplicate legacy
+// row. Such histories keep the ordinary whole-array conflict instead of guessing a match.
+function clientHistoryIdentityResolver(base, local, remote, key, path) {
+  const receiptIdentities = new Map();
+  for (const array of [base, local, remote]) for (const item of array) {
+    const receipt = scalarId(item?.completionReceiptId);
+    if (!receipt) continue;
+    const identity = identityFor(item, key, path);
+    if (receiptIdentities.has(receipt) && receiptIdentities.get(receipt) !== identity) return null;
+    receiptIdentities.set(receipt, identity);
+  }
+  const identities = new WeakMap();
+  for (let index = 0; index < base.length; index += 1) {
+    const original = base[index];
+    if (identityFor(original, key, path)) continue;
+    if (!isObject(original)) return null;
+    for (const array of [base, local, remote]) {
+      let match;
+      for (const item of array) {
+        if (identityFor(item, key, path) || !equal(original, item)) continue;
+        if (match) return null;
+        match = item;
+      }
+      if (!match) return null;
+      identities.set(match, `unchanged-history:${index}`);
+    }
+  }
+  return (item) => identityFor(item, key, path) || identities.get(item) || "";
 }
 
 // A local invoice begins life with only its app id, then gains a qbId after creation. Another
@@ -332,9 +366,13 @@ function mergeOrder(baseOrder, localOrder, remoteOrder, available, path, ctx) {
 }
 
 function mergeKeyedArray(base, local, remote, path, ctx) {
+  const clientHistory = ctx.key === "sps_clients" && path.length === 2 && path[1] === "history";
   const resolveIdentity = ctx.key === "sps_invoices" && path.length === 0
     ? invoiceIdentityResolver([base, local, remote])
-    : null;
+    : clientHistory
+      ? clientHistoryIdentityResolver(base, local, remote, ctx.key, path)
+      : null;
+  if (clientHistory && !resolveIdentity) return null;
   const bm = keyedArrayMap(base, ctx.key, path, resolveIdentity);
   const lm = keyedArrayMap(local, ctx.key, path, resolveIdentity);
   const rm = keyedArrayMap(remote, ctx.key, path, resolveIdentity);

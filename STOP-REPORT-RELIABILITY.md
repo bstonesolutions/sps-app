@@ -12,6 +12,8 @@ Accepted completion reports are protected in PostgreSQL. A stale client snapshot
 - An older app can block a request locally before contacting the API. Server changes cannot retrieve or retry a report that exists only on that device. Build 43 removes the unrelated conflict gate and retains failed report drafts for retry.
 - Build 44 keeps a timeout during the successful response body retryable. Build 45 also retries interrupted or truncated successful response bodies. The original completion key is retained so retrying cannot duplicate the completion.
 - Staff stop endpoints return a retryable service-unavailable response for temporary auth-service failures. Invalid tokens still require sign-in; a transient auth outage must not strand a report in manual review.
+- Build 46 fences a conflict choice to its captured durable operation instead of waiting for every future unrelated autosave. Repeated identical pending edits keep their original operation identity and do not rewrite the full local queue. A newer real edit or account switch still supersedes the choice.
+- Build 46 merges independent receipt-backed report additions around exact unchanged unique legacy visits. Changed, removed, duplicate, or ambiguous legacy visits still require review.
 - Do not reinstall an app to resolve a pending report. Its unsent draft may exist only on that device.
 
 ## Validation
@@ -33,3 +35,11 @@ Apply one receipt per transaction. Re-read the restored report, row versions, an
 ## Release evidence
 
 Record production migration status, deployment SHA and aliases, exact recovery results, and native upload status separately. An Xcode upload does not prove TestFlight availability or App Store approval. Browser fixtures do not prove a device-only report was uploaded.
+
+## Clients review verification and remaining storage limits
+
+The build 46 browser fixture uses the actual review component, review handler, store, and IndexedDB with synthetic clients. With continuing unrelated writes, build 45 remains on Saving without starting a client CAS. Build 46 completes both choices, retains independent fields from both devices, and removes the review. This proves the reproduced queue defect, not the contents of a physical device's private pending queue.
+
+Large-roster SQL checks must include the JSON request-body parsing used by PostgREST, not only direct function calls. A 269-client, 173-report, 19.3 MB synthetic roster with clustered photo histories peaked near 440 MiB for one generic writer and 647 MiB across two concurrent writers in the local test. Both reports and concurrency fences remained correct. The live database restarted at 2026-10-12 22:47:30 UTC; no available log establishes its cause. These measurements identify memory-pressure risk but do not prove an out-of-memory restart. The generic snapshot path still carries the full roster; compact stop endpoints do not eliminate that older-client cost.
+
+Rachael Switalski's stop 1791379462959-0 was confirmed present at 22:48 UTC with one accepted receipt, one report, one photo, and notes. The current Clients review is not evidence that this report is still device-only.

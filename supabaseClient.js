@@ -311,28 +311,18 @@ function persistPending() {
 }
 
 async function awaitPendingDurability() {
-  // If another local edit is staged while the current IndexedDB write is completing, wait for that
-  // newer envelope too. The network must never get ahead of the durable intent it is committing.
-  let observed;
-  let retriedStorage = false;
-  do {
-    observed = _pendingPersistTail;
-    const result = await observed;
-    if (observed !== _pendingPersistTail) continue;
-    if (!result || result.durable !== true) {
-      // A WebView can temporarily suspend IndexedDB. Retry must actually write the retained intent
-      // again after storage recovers, rather than repeatedly awaiting the same failed receipt.
-      // Limit each attempt to one fresh snapshot so unavailable storage still releases the UI.
-      if (!retriedStorage) {
-        retriedStorage = true;
-        persistPending();
-        continue;
-      }
-      const error = (result && result.error) || new Error("Pending work could not be verified on this device");
-      error.code = error.code || "pending_durability_unavailable";
-      throw error;
-    }
-  } while (observed !== _pendingPersistTail);
+  // Fence the intent captured by the caller, not global queue quiescence. Unrelated autosaves
+  // may keep extending the tail indefinitely. Callers check that same opId after this receipt
+  // before committing, so a newer edit cannot borrow an older intent's durability proof.
+  let result = await _pendingPersistTail;
+  if (result?.durable === true) return;
+  // A suspended WebView must make one real retry after storage recovers. Do not repeatedly await
+  // the same failed receipt, or chase later unrelated writes after this retry is protected.
+  result = await persistPending();
+  if (result?.durable === true) return;
+  const error = result?.error || new Error("Pending work could not be verified on this device");
+  error.code = error.code || "pending_durability_unavailable";
+  throw error;
 }
 
 function pendingDurabilityFailure(error) {
@@ -776,6 +766,11 @@ function stagePending(key, value, options = {}) {
   if (localValue === undefined) throw new Error("store.set requires a JSON value");
   const now = Date.now();
   const existing = _pending[key];
+  // Reconcile events may submit the exact same dirty React value repeatedly. It is still the
+  // same durable intent, not another edit or permission to supersede an in-flight review choice.
+  // A projected base and explicit force are meaningful operations even when the value matches.
+  if (existing && existing.localValue === localValue && !existing.deleteIntent
+    && !existing.force && !options.force && !hasOwn(options, "projectedBaseValue")) return existing;
   let envelope;
   if (existing && existing.v !== 2) {
     // A pre-versioning queue item has no trustworthy merge base. Preserve it as a visible conflict
@@ -1067,16 +1062,18 @@ async function commitKey(key, identityVersion = _identityVersion) {
   if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
   const hydration = await ensureHydrate();
   if (!hydration?.ok) return pendingDurabilityFailure(hydration?.error);
+  const envelope = _pending[key];
   try {
     await awaitPendingDurability();
   } catch (error) {
     return pendingDurabilityFailure(error);
   }
   if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+  if ((_pending[key]?.opId || null) !== (envelope?.opId || null)) return { ok: false, superseded: true };
   await ensureHydrate();
   const initialized = await init();
   if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
-  const envelope = _pending[key];
+  if ((_pending[key]?.opId || null) !== (envelope?.opId || null)) return { ok: false, superseded: true };
   if (!initialized.ok) {
     if (initialized.staleIdentity) return { ok: false, staleIdentity: true };
     if (!envelope || initialized.deferred) {
