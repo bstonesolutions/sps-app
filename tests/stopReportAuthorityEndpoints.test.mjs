@@ -41,6 +41,7 @@ async function setup({ missingReport = false, existingClients, existingCompleted
   })) await db.query("insert into public.app_state(key,value) values($1,$2::jsonb)", [key, JSON.stringify(JSON.stringify(value))]);
   await db.exec(await readFile(new URL("../supabase/migrations/20261012213546_stop_report_authority.sql", import.meta.url), "utf8"));
   await db.exec(await readFile(new URL("../supabase/migrations/20261012215154_stop_report_memory_bound.sql", import.meta.url), "utf8"));
+  await db.exec(await readFile(new URL("../supabase/migrations/20261012222135_stop_report_linear_replace.sql", import.meta.url), "utf8"));
   await db.query("select set_config('request.jwt.claim.role','service_role',false)");
   await db.exec("set role service_role");
   await db.query("select public.sps_activate_stop_report_guard()");

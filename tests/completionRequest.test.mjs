@@ -5,6 +5,7 @@ import {
   createCompletionRequestId,
   requestCompletedStop,
 } from "../completionRequest.js";
+import { classifyCompletionFailure } from "../completionOutbox.js";
 
 const body = () => ({
   mode: "complete",
@@ -83,6 +84,48 @@ test("completed-stop timeout aborts the request and remains retryable", async ()
     },
   );
   assert.equal(abortObserved, true);
+  assert.equal(events.rows.at(-1).message, "[completion-sync] request timed out");
+});
+
+test("HTTP 200 response-body timeout keeps the exact completion queued for automatic retry", async () => {
+  const events = logger();
+  const request = body();
+  let deadline;
+  let bodyReadStarted = false;
+  let sentBody;
+  await assert.rejects(requestCompletedStop({
+    url: "https://spsway.app/api/stop-completion",
+    body: request,
+    requestId: "completion-body-timeout-1",
+    logger: events,
+    setTimer: callback => { deadline = callback; return 1; },
+    clearTimer: () => {},
+    fetchImpl: async (_url, options) => {
+      sentBody = options.body;
+      return {
+        ok: true,
+        status: 200,
+        json: () => new Promise((_resolve, reject) => {
+          bodyReadStarted = true;
+          options.signal.addEventListener("abort", () => {
+            reject(Object.assign(new Error("response body aborted"), { name: "AbortError" }));
+          }, { once: true });
+          queueMicrotask(deadline);
+        }),
+      };
+    },
+  }), error => {
+    assert.equal(bodyReadStarted, true);
+    assert.equal(error.status, 408);
+    assert.equal(error.code, "completion-request-timeout");
+    assert.equal(error.requestId, "completion-body-timeout-1");
+    assert.equal(classifyCompletionFailure(error).retryable, true);
+    assert.equal(classifyCompletionFailure(error).needsReview, false);
+    assert.doesNotMatch(error.message, /nothing was changed/i);
+    assert.match(error.message, /safe on this device and will retry automatically/i);
+    return true;
+  });
+  assert.deepEqual(JSON.parse(sentBody), request);
   assert.equal(events.rows.at(-1).message, "[completion-sync] request timed out");
 });
 

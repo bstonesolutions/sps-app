@@ -39,6 +39,17 @@ function unchangedRequestedFields(entry, changes) {
   return Object.entries(changes).every(([key, value]) => same(entry[key], value));
 }
 
+function confirmedReportFields(entry, changes) {
+  // The client verifies these saved fields, then refreshes shared state. Returning
+  // unchanged inline photos can make a notes-only confirmation several megabytes.
+  const confirmed = { sid: entry.sid, completionReceiptId: entry.completionReceiptId };
+  for (const key of Object.keys(changes)) confirmed[key] = entry[key];
+  for (const key of ["recoveredFromSchedule", "recoveredAt"]) {
+    if (Object.hasOwn(entry, key)) confirmed[key] = entry[key];
+  }
+  return confirmed;
+}
+
 function receiptReport(snapshot, { sid, clientId, receiptId }) {
   const completed = snapshot.sps_completed?.value;
   const clients = snapshot.sps_clients?.value;
@@ -88,7 +99,7 @@ export default async function handler(req, res) {
       const current = receiptReport(snapshot, { sid, clientId, receiptId });
       if (current.code) return res.status(409).json({ ok: false, code: current.code, error: "This saved report could not be identified safely. Your edits are still here; refresh its saved version before retrying." });
       if (current.entry && unchangedRequestedFields(current.entry, changes)) {
-        return res.status(200).json({ ok: true, applied: false, alreadyApplied: true, receiptId, entry: current.entry });
+        return res.status(200).json({ ok: true, applied: false, alreadyApplied: true, receiptId, entry: confirmedReportFields(current.entry, changes) });
       }
       if ((recovery && current.entry) || (!recovery && (!current.entry || reportHash(current.entry) !== expectedHash))) {
         return res.status(409).json({ ok: false, code: "report-changed", error: "Someone changed this report while you were editing it. Your edits are still here; review the latest saved report before trying again." });
@@ -110,7 +121,7 @@ export default async function handler(req, res) {
         { key: "sps_clients", expectedVersion: snapshot.sps_clients.version, value: nextClients },
         { key: "sps_completed", expectedVersion: snapshot.sps_completed.version, checkOnly: true },
       ], { mode: "edit", sid, receiptId, clientId });
-      if (saved.applied) return res.status(200).json({ ok: true, applied: true, receiptId, entry: nextEntry });
+      if (saved.applied) return res.status(200).json({ ok: true, applied: true, receiptId, entry: confirmedReportFields(nextEntry, changes) });
       if (saved.outcome !== "conflict") throw new Error("unexpected_report_edit_outcome");
     }
     return res.status(409).json({ ok: false, code: "report-contention", error: "The shared report changed again. Your edits are still here; retry saving." });

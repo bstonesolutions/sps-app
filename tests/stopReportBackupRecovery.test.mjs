@@ -29,7 +29,7 @@ async function setup({competing=false,duplicate=false,large=false,depth=1,empty=
  for(const [key,value] of Object.entries({sps_clients:current,sps_completed:saved.completed,sps_catalog:catalog,sps_schedule:[]}))await db.query('insert into app_state(key,value) values($1,$2::jsonb)',[key,JSON.stringify(Array.from({length:depth}).reduce(v=>JSON.stringify(v),value))]);
  await db.query('insert into sps_backups(key,value) values($1,$2)',['fixture-backup',JSON.stringify(archive)]);
  await db.exec(await readFile(new URL('../supabase/migrations/20261012213546_stop_report_authority.sql',import.meta.url),'utf8'));
- for(const path of ['supabase/migrations/20261012215154_stop_report_memory_bound.sql','supabase/migrations/20261012215738_stop_report_restore_cas.sql'])await db.exec(await readFile(new URL(`../${path}`,import.meta.url),'utf8'));
+ for(const path of ['supabase/migrations/20261012215154_stop_report_memory_bound.sql','supabase/migrations/20261012215738_stop_report_restore_cas.sql','supabase/migrations/20261012222135_stop_report_linear_replace.sql'])await db.exec(await readFile(new URL(`../${path}`,import.meta.url),'utf8'));
  await db.query('select sps_activate_stop_report_guard()');
  await db.exec(await readFile(new URL('../scripts/recover-stop-reports-from-backup.sql',import.meta.url),'utf8'));
  const rows=async()=>(await db.query("select key,value,version from app_state where key in ('sps_clients','sps_completed') order by key")).rows;

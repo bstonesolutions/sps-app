@@ -56,7 +56,7 @@ nativeTest('two real concurrent devices preserve both reports and deduct shared 
     for (const [key, value] of Object.entries({ sps_clients: clients, sps_catalog: catalog, sps_completed: {} })) {
       await setup.query('insert into app_state(key,value) values($1,$2::jsonb)', [key, encode(value)]);
     }
-    for (const migration of ['20261012213546_stop_report_authority.sql', '20261012215154_stop_report_memory_bound.sql']) {
+    for (const migration of ['20261012213546_stop_report_authority.sql', '20261012215154_stop_report_memory_bound.sql', '20261012222135_stop_report_linear_replace.sql']) {
       await setup.query(await readFile(new URL(`../supabase/migrations/${migration}`, import.meta.url), 'utf8'));
     }
     await setup.query("select set_config('request.jwt.claim.role','service_role',false)");

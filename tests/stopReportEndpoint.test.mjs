@@ -2,7 +2,7 @@ import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { applyStopCompletion } from "../stopCompletion.js";
-import { stableReportJSON } from "../stopReport.js";
+import { requestStopReportEdit, stableReportJSON } from "../stopReport.js";
 
 process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-key";
 const { default: handler, canEditReportFinancials } = await import("../api/stop-report.js");
@@ -11,13 +11,13 @@ afterEach(() => { globalThis.fetch = originalFetch; });
 const response = (body, ok = true, status = 200) => ({ ok, status, async json() { return body; }, async text() { return JSON.stringify(body); } });
 const hash = entry => createHash("sha256").update(stableReportJSON(entry)).digest("hex");
 
-function fixture({ role = "field", tabAccess = { schedule: "edit", clients: "edit" }, beforeCas } = {}) {
+function fixture({ role = "field", tabAccess = { schedule: "edit", clients: "edit" }, beforeCas, entryOverrides = {} } = {}) {
   const completed = applyStopCompletion({
     clients: [{ id: "c1", name: "Client", phone: "111", history: [{ sid: "older", notes: "Older report", photos: [{ src: "older.jpg" }] }] }],
     catalog: { locations: [], treatments: [], products: [], parts: [] }, completed: {},
     clientId: "c1", sid: "s1", receiptId: "receipt-one", idempotencyKey: "completion-attempt-one",
     completedAt: "2026-10-12T10:00:00.000Z", postBalance: false,
-    entry: { date: "10/12/2026", type: "Pond service", invoice: "$100", notes: "Original notes", photos: [{ src: "original.jpg" }], readings: { pH: 7 }, partsUsed: [], services: [{ name: "Pond service", price: 100 }] },
+    entry: { date: "10/12/2026", type: "Pond service", invoice: "$100", notes: "Original notes", photos: [{ src: "original.jpg" }], readings: { pH: 7 }, partsUsed: [], services: [{ name: "Pond service", price: 100 }], ...entryOverrides },
   });
   assert.equal(completed.ok, true);
   const state = {
@@ -66,13 +66,39 @@ test("a field report edit preserves original receipt, accounting fields and ever
   const result = await f.invoke(f.request({ notes: "Finished cleaning", photos: [{ src: "original.jpg" }, { src: "new.jpg" }], readings: { pH: 7.4 } }));
   assert.equal(result.statusCode, 200, JSON.stringify(result.body));
   assert.equal(result.body.applied, true);
-  assert.equal(result.body.entry.invoice, "$100");
+  assert.equal(f.state.sps_clients.value[0].history[0].invoice, "$100");
+  assert.equal(Object.hasOwn(result.body.entry, "invoice"), false);
+  assert.deepEqual(result.body.entry.photos, [{ src: "original.jpg" }, { src: "new.jpg" }]);
+  assert.deepEqual(result.body.entry.readings, { pH: 7.4 });
   assert.equal(result.body.entry.completionReceiptId, "receipt-one");
   assert.equal(result.body.entry.sid, "s1");
   assert.equal(f.state.sps_clients.value[0].history[1].notes, "Older report");
   assert.equal(f.state.sps_clients.value[0].phone, "111");
   assert.equal(f.state.sps_completed.version, 3);
   assert.equal(f.calls.some(url => /send-|quickbooks|messages/.test(url)), false);
+});
+
+test("notes-only confirmations omit unchanged legacy inline photos while preserving storage and installed-client verification", async () => {
+  const photos = [{ src: `data:image/jpeg;base64,${"a".repeat(5_000_000)}`, label: "Original visit" }];
+  const f = fixture({ entryOverrides: { photos } });
+  const body = f.request({ notes: "Corrected visit notes" });
+  const originalReceipt = structuredClone(f.state.sps_completed);
+  const saved = await f.invoke(body);
+  assert.equal(saved.statusCode, 200, JSON.stringify(saved.body));
+  assert.ok(Buffer.byteLength(JSON.stringify(saved.body), "utf8") < 512, "unchanged five-megabyte photo must not travel in a notes-only confirmation");
+  assert.deepEqual(saved.body.entry, { sid: "s1", completionReceiptId: "receipt-one", notes: "Corrected visit notes" });
+  assert.deepEqual(f.state.sps_clients.value[0].history[0], { ...f.original, notes: "Corrected visit notes" });
+  assert.deepEqual(f.state.sps_completed, originalReceipt);
+  const accepted = await requestStopReportEdit({
+    url: "https://fixture.invalid/stop-report", body,
+    fetchImpl: async () => response(saved.body),
+  });
+  assert.equal(accepted.applied, true, "the existing client must accept the smaller confirmed response without changes");
+  const retry = await f.invoke(body);
+  assert.equal(retry.statusCode, 200); assert.equal(retry.body.alreadyApplied, true);
+  assert.deepEqual(retry.body.entry, saved.body.entry);
+  assert.ok(Buffer.byteLength(JSON.stringify(retry.body), "utf8") < 512);
+  assert.equal(f.writes.length, 1, "a lost confirmation retry must not rewrite the report");
 });
 
 test("stale report edits are rejected but a lost success reply can retry without another mutation", async () => {

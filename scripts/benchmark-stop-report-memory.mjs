@@ -3,6 +3,8 @@
 // socket at /tmp/sps-stop-native-pg and port65439; use postgres trust auth locally.
 // Install pg into an isolated /tmp directory, then:
 // SPS_NATIVE_MEMORY_TEST=1 SPS_NATIVE_PG_MODULE=/tmp/sps-stop-sql-harness/node_modules/pg SPS_MEMORY_REUSE=1 node scripts/benchmark-stop-report-memory.mjs optimized
+// The 3.66MB target defaults to the last roster entry. Set SPS_MEMORY_TARGET_INDEX=0
+// to compare the first entry. Late indices must stay within the same time bound.
 // Repeat with baseline to compare the installed original authority migration.
 // SPS_MEMORY_ALLOCATOR labels the server's launch configuration in the artifact;
 // it does not change that configuration. Preserve default macOS RSS separately
@@ -34,10 +36,13 @@ await setup.query(`do $$ begin if not exists(select 1 from pg_roles where rolnam
  create table app_state(key text primary key,value jsonb not null,updated_at timestamptz default now());grant select,insert,update,delete on app_state to anon,authenticated,service_role;`);
 await setup.query(await sql('APP-STATE-CONCURRENCY-MIGRATION.sql'));await setup.query(await sql('APP-STATE-BATCH-CHECK-ONLY-MIGRATION.sql'));
 const clients=Array.from({length:269},(_,i)=>({id:`native-${i}`,name:`Synthetic ${i}`,history:i<164?[{sid:`old-${i}`,completionReceiptId:`old-receipt-${i}`,notes:'Saved report',photos:[randomBytes(i===0?2_745_000:71_500).toString('base64')]}]:[]}));
+const targetIndex=Number(process.env.SPS_MEMORY_TARGET_INDEX??268);
+if(!Number.isInteger(targetIndex)||targetIndex<0||targetIndex>=clients.length)throw Error('SPS_MEMORY_TARGET_INDEX must be an integer from0 through268');
+const [largeClient]=clients.splice(0,1);clients.splice(targetIndex,0,largeClient);
 const cid='native-0',sid='new-stop',rid='new-receipt',catalog={treatments:[],parts:[],products:[]};
 for(const [key,value]of Object.entries({sps_clients:clients,sps_completed:{},sps_catalog:catalog,sps_schedule:[],sps_billing_reviews:[],sps_invoices:[]})) await setup.query('insert into app_state(key,value) values($1,$2::jsonb)',[key,JSON.stringify(JSON.stringify(value))]);
 await setup.query(await sql('supabase/migrations/20261012213546_stop_report_authority.sql'));
-if(optimized)await setup.query(await sql('supabase/migrations/20261012215154_stop_report_memory_bound.sql'));
+if(optimized){await setup.query(await sql('supabase/migrations/20261012215154_stop_report_memory_bound.sql'));await setup.query(await sql('supabase/migrations/20261012222135_stop_report_linear_replace.sql'));}
 
 await setup.query("select set_config('request.jwt.claim.role','service_role',false)");await setup.query('select sps_activate_stop_report_guard()');await setup.end();
 let completion=applyStopCompletion({clients,completed:{},catalog,clientId:cid,sid,receiptId:rid,idempotencyKey:'native-completion-key',completedAt:'2026-10-12T20:00:00.000Z',entry:{sid,notes:'New accepted report',invoice:'$0',photos:[]},postBalance:false});if(!completion.ok)throw Error(completion.code);
@@ -50,9 +55,9 @@ async function measure(name,operation,reuse){
  try{await operation(c);await sample();}finally{clearInterval(timer);while(busy)await new Promise(r=>setTimeout(r,5));if(!reuse)await c.end();}
  const row={name,ms:Math.round(performance.now()-started),baselineMiB:+(baseline/1048576).toFixed(1),peakRssMiB:+(peak/1048576).toFixed(1),samples};measurements.push(row);console.log(JSON.stringify(row));
 }
-async function rpc(c,mode,nextClients,nextCompleted,receipt=rid){const rows=(await c.query("select key,version from app_state where key in ('sps_clients','sps_completed')")).rows;const versions=Object.fromEntries(rows.map(r=>[r.key,Number(r.version)]));const operations=[{key:'sps_clients',expected_version:versions.sps_clients,value:JSON.stringify(optimized?nextClients[0]:nextClients)},{key:'sps_completed',expected_version:versions.sps_completed,...(mode==='edit'?{check_only:true}:{value:JSON.stringify(nextCompleted)})}];const r=(await c.query(optimized?'select * from sps_stop_completion_delta_cas($1::jsonb,$2,$3,$4,$5)':'select * from sps_stop_completion_batch_cas($1::jsonb,$2,$3,$4)',optimized?[JSON.stringify(operations),mode,sid,receipt,cid]:[JSON.stringify(operations),mode,sid,receipt])).rows[0];if(!r.applied)throw Error(JSON.stringify(r));}
+async function rpc(c,mode,nextClients,nextCompleted,receipt=rid){const rows=(await c.query("select key,version from app_state where key in ('sps_clients','sps_completed')")).rows;const versions=Object.fromEntries(rows.map(r=>[r.key,Number(r.version)]));const operations=[{key:'sps_clients',expected_version:versions.sps_clients,value:JSON.stringify(optimized?nextClients[targetIndex]:nextClients)},{key:'sps_completed',expected_version:versions.sps_completed,...(mode==='edit'?{check_only:true}:{value:JSON.stringify(nextCompleted)})}];const r=(await c.query(optimized?'select * from sps_stop_completion_delta_cas($1::jsonb,$2,$3,$4,$5)':'select * from sps_stop_completion_batch_cas($1::jsonb,$2,$3,$4)',optimized?[JSON.stringify(operations),mode,sid,receipt,cid]:[JSON.stringify(operations),mode,sid,receipt])).rows[0];if(!r.applied)throw Error(JSON.stringify(r));}
 await measure('complete',c=>rpc(c,'complete',completion.clients,completion.completed));
-const edited=structuredClone(completion.clients);edited[0].history[0].notes='Corrected report';
+const edited=structuredClone(completion.clients);edited[targetIndex].history[0].notes='Corrected report';
 await measure('edit',c=>rpc(c,'edit',edited));
 const generic=structuredClone(edited);generic[0].notes='Ordinary profile change';
 await measure('generic-profile',c=>c.query("update app_state set value=$1::jsonb where key='sps_clients'",[JSON.stringify(JSON.stringify(generic))]));
@@ -65,12 +70,12 @@ if(process.env.SPS_MEMORY_REUSE){
  const reuse=new Client(conn);await reuse.connect();
  const fresh=applyStopCompletion({clients:reverse.clients,completed:reverse.completed,catalog,clientId:cid,sid,receiptId:'next-receipt',idempotencyKey:'native-next-key',completedAt:'2026-10-13T20:00:00.000Z',entry:{sid,notes:'Repeated-save report',invoice:'$0',photos:[]},postBalance:false});if(!fresh.ok)throw Error(fresh.code);
  await measure('reused-complete',c=>rpc(c,'complete',fresh.clients,fresh.completed,'next-receipt'),reuse);
- for(let i=0;i<8;i++){fresh.clients[0].history[0].notes=`Repeated edit ${i}`;await measure(`reused-edit-${i+1}`,c=>rpc(c,'edit',fresh.clients,null,'next-receipt'),reuse);}
+ for(let i=0;i<8;i++){fresh.clients[targetIndex].history[0].notes=`Repeated edit ${i}`;await measure(`reused-edit-${i+1}`,c=>rpc(c,'edit',fresh.clients,null,'next-receipt'),reuse);}
  await reuse.end();
 }
-const result={allocator:process.env.SPS_MEMORY_ALLOCATOR||'default',optimized,payloadBytes:Buffer.byteLength(JSON.stringify(clients)),targetClientBytes:Buffer.byteLength(JSON.stringify(clients[0])),server:'native PostgreSQL17',connection:{host:conn.host,port:conn.port,database:dbname},measurements};
+const result={allocator:process.env.SPS_MEMORY_ALLOCATOR||'default',optimized,targetIndex,payloadBytes:Buffer.byteLength(JSON.stringify(clients)),targetClientBytes:Buffer.byteLength(JSON.stringify(clients[targetIndex])),server:'native PostgreSQL17',connection:{host:conn.host,port:conn.port,database:dbname},measurements};
 await mkdir(new URL('../.sps-review/',import.meta.url),{recursive:true});
-await writeFile(new URL(`../.sps-review/stop-native-memory-${optimized?'optimized':'baseline'}-${process.env.SPS_MEMORY_ALLOCATOR||'default'}${process.env.SPS_MEMORY_REUSE?'-reused':''}.json`,import.meta.url),JSON.stringify(result,null,2));
+await writeFile(new URL(`../.sps-review/stop-native-memory-${optimized?'optimized':'baseline'}-${process.env.SPS_MEMORY_ALLOCATOR||'default'}-index${targetIndex}${process.env.SPS_MEMORY_REUSE?'-reused':''}.json`,import.meta.url),JSON.stringify(result,null,2));
 
 // Drop only the uniquely named synthetic database this invocation created.
 const cleanup=new Client({...conn,database:'postgres'});await cleanup.connect();await cleanup.query(`drop database ${dbname}`);await cleanup.end();

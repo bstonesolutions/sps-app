@@ -41,7 +41,7 @@ async function setup() {
     sps_catalog: catalog, sps_schedule: [] })) {
     await db.query('insert into public.app_state(key,value) values($1,$2::jsonb)', [key, encode(value)]);
   }
-  for (const path of ['20261012213546_stop_report_authority.sql', '20261012215154_stop_report_memory_bound.sql']) {
+  for (const path of ['20261012213546_stop_report_authority.sql', '20261012215154_stop_report_memory_bound.sql', '20261012222135_stop_report_linear_replace.sql']) {
     const sql = await readFile(new URL(`../supabase/migrations/${path}`, import.meta.url), 'utf8');
     assert.ok(sql.trim(), `${path} must contain the migration`);
     await db.exec(sql);

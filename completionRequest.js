@@ -77,7 +77,12 @@ export async function requestCompletedStop({
       body: JSON.stringify(body),
       signal: controller.signal,
     });
-    const data = await response.json().catch(() => ({}));
+    const data = await response.json().catch(error => {
+      // Headers can arrive before a slow response body finishes. Keep that abort
+      // retryable instead of turning HTTP 200 plus an empty body into a review error.
+      if (didTimeout || error?.name === "AbortError") throw error;
+      return {};
+    });
     const durationMs = elapsedMs(startedAt, now);
     if (!response.ok || data.ok !== true) {
       const error = requestError(data.error || "The stop could not be saved. Nothing was changed.", {

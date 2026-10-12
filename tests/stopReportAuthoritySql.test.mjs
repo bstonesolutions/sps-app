@@ -12,6 +12,7 @@ const PGlite = runtime ? (await import(pathToFileURL(runtime).href)).PGlite : nu
 const sqlTest = (name, fn) => test(name, { skip: !PGlite && 'Set SPS_SQL_TEST_PGLITE_PATH to run real SQL' }, fn);
 const migration = await readFile(new URL('../supabase/migrations/20261012213546_stop_report_authority.sql', import.meta.url), 'utf8');
 const memoryMigration = await readFile(new URL('../supabase/migrations/20261012215154_stop_report_memory_bound.sql', import.meta.url), 'utf8');
+const linearMigration = await readFile(new URL('../supabase/migrations/20261012222135_stop_report_linear_replace.sql', import.meta.url), 'utf8');
 const baseSql = await readFile(new URL('../APP-STATE-CONCURRENCY-MIGRATION.sql', import.meta.url), 'utf8');
 const batchSql = await readFile(new URL('../APP-STATE-BATCH-CHECK-ONLY-MIGRATION.sql', import.meta.url), 'utf8');
 const catalog = { treatments: [], parts: [], products: [] };
@@ -56,7 +57,7 @@ async function setup({ completed = true, depth = 1, activate = true } = {}) {
     sps_completed: completed ? completion.completed : {}, sps_catalog: catalog, sps_schedule: [], sps_billing_reviews: [], sps_invoices: [] })) {
     await db.query('insert into public.app_state(key,value) values($1,$2::jsonb)', [name, JSON.stringify(encoded(value, depth))]);
   }
-  await db.exec(migration); await db.exec(memoryMigration); await as(db, 'service_role');
+  await db.exec(migration); await db.exec(memoryMigration); await db.exec(linearMigration); await as(db, 'service_role');
   if (activate) await db.query('select public.sps_activate_stop_report_guard()');
   return { db, completion };
 }
