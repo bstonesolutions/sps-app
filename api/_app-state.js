@@ -198,13 +198,28 @@ export async function compareAndSetAppStateBatch(operations, requestOptions = {}
 
 // Completion receipts can only be changed inside the dedicated database transaction. Never fall
 // back to the generic writer when this migration is absent: that would bypass report protection.
-export async function compareAndSetStopCompletionBatch(operations, { mode, sid, receiptId = "" }, requestOptions = {}) {
+export async function compareAndSetStopCompletionBatch(operations, { mode, sid, receiptId = "", clientId }, requestOptions = {}) {
+  const validClientId = (typeof clientId === "string" && clientId.trim())
+    || (typeof clientId === "number" && Number.isFinite(clientId));
   if (!["complete", "reverse", "edit"].includes(mode) || !String(sid || "").trim()
+    || !validClientId || String(clientId).length > 320
     || (mode !== "reverse" && !String(receiptId || "").trim())) throw new Error("stop_completion_scope_invalid");
-  return compareAndSetBatch(operations, "sps_stop_completion_batch_cas", {
+  if (!Array.isArray(operations)) throw new Error("app_state_batch_operations_invalid");
+  const clientOperations = operations.filter(operation => operation?.key === "sps_clients");
+  if (clientOperations.length !== 1 || clientOperations[0].checkOnly === true
+    || !Array.isArray(clientOperations[0].value)) throw new Error("stop_completion_clients_operation_invalid");
+  const clients = clientOperations[0].value.filter(client => client && typeof client === "object"
+    && !Array.isArray(client) && String(client.id) === String(clientId));
+  if (clients.length !== 1) throw new Error("stop_completion_client_scope_ambiguous");
+  // Send only the identified client. The restricted SQL transaction constructs the one-client
+  // replacement under the original row-version fence without decoding another full roster.
+  const compactOperations = operations.map(operation => operation === clientOperations[0]
+    ? { ...operation, value: clients[0] } : operation);
+  return compareAndSetBatch(compactOperations, "sps_stop_completion_delta_cas", {
     p_mode: mode,
     p_sid: String(sid),
     p_receipt_id: String(receiptId || ""),
+    p_client_id: String(clientId),
   }, requestOptions);
 }
 

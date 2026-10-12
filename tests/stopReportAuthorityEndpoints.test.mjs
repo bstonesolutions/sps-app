@@ -21,7 +21,7 @@ const hash = entry => createHash("sha256").update(stableReportJSON(entry)).diges
 const catalog = { locations: [], treatments: [], parts: [], products: [] };
 const initial = [{ id: "c1", name: "Synthetic Client", phone: "111", history: [] }];
 
-async function setup({ missingReport = false } = {}) {
+async function setup({ missingReport = false, existingClients, existingCompleted } = {}) {
   const db = new PGlite();
   await db.exec(`create role anon; create role authenticated; create role service_role;
     create schema auth;
@@ -35,11 +35,12 @@ async function setup({ missingReport = false } = {}) {
   await db.exec(await readFile(new URL("../APP-STATE-BATCH-CHECK-ONLY-MIGRATION.sql", import.meta.url), "utf8"));
   const saved = applyStopCompletion({ clients: initial, completed: {}, catalog, clientId: "c1", sid: "s1", receiptId: "receipt-missing", idempotencyKey: "missing-report-key", completedAt: "2026-10-12T10:00:00.000Z", entry: { invoice: "$0", notes: "Original" }, postBalance: false });
   for (const [key, value] of Object.entries({
-    sps_clients: initial, sps_completed: missingReport ? saved.completed : {}, sps_catalog: catalog,
+    sps_clients: existingClients || initial, sps_completed: existingCompleted || (missingReport ? saved.completed : {}), sps_catalog: catalog,
     sps_schedule: [{ date: "10/12/2026", stops: [{ sid: "s1", clientId: "c1", type: "Pond cleaning" }] }],
     sps_invoices: [], sps_invoicing: {},
   })) await db.query("insert into public.app_state(key,value) values($1,$2::jsonb)", [key, JSON.stringify(JSON.stringify(value))]);
   await db.exec(await readFile(new URL("../supabase/migrations/20261012213546_stop_report_authority.sql", import.meta.url), "utf8"));
+  await db.exec(await readFile(new URL("../supabase/migrations/20261012215154_stop_report_memory_bound.sql", import.meta.url), "utf8"));
   await db.query("select set_config('request.jwt.claim.role','service_role',false)");
   await db.exec("set role service_role");
   await db.query("select public.sps_activate_stop_report_guard()");
@@ -53,10 +54,11 @@ async function setup({ missingReport = false } = {}) {
       assert.ok(names);
       return response((await db.query("select key,value,version,updated_at from public.app_state where key=any($1::text[])", [names])).rows);
     }
-    assert.match(href, /\/rpc\/sps_stop_completion_batch_cas$/);
+    assert.match(href, /\/rpc\/sps_stop_completion_delta_cas$/);
     const body = JSON.parse(options.body);
     try {
-      return response((await db.query("select * from public.sps_stop_completion_batch_cas($1::jsonb,$2,$3,$4)", [JSON.stringify(body.p_operations), body.p_mode, body.p_sid, body.p_receipt_id])).rows);
+      assert.equal(Array.isArray(JSON.parse(body.p_operations.find(operation => operation.key === "sps_clients").value)), false);
+      return response((await db.query("select * from public.sps_stop_completion_delta_cas($1::jsonb,$2,$3,$4,$5)", [JSON.stringify(body.p_operations), body.p_mode, body.p_sid, body.p_receipt_id, body.p_client_id])).rows);
     } catch (error) {
       rpcErrors.push(error.message);
       return response({ message: error.message }, false, 500);
@@ -113,6 +115,64 @@ sqlTest("actual missing-report repair API and restricted SQL agree on the recove
     assert.equal(repaired.body.entry.recoveredFromSchedule, true);
     assert.equal((await f.state("sps_clients")).value[0].history[0].notes, "Recovered visit notes");
     assert.equal((await f.invoke(edit, body)).body.alreadyApplied, true);
+    assert.deepEqual(f.rpcErrors, []);
+  } finally { await f.db.close(); }
+});
+
+sqlTest("actual legacy reopen API uses the compact client scope and preserves another accepted report", async () => {
+  const base = [{ ...initial[0], history: [{ sid: "s1", invoice: "$20", notes: "Legacy visit", photos: [{ src: "fixture://legacy" }] }] },
+    { id: "c2", name: "Other client", history: [] }];
+  const other = applyStopCompletion({ clients: base, completed: { s1: true }, catalog, clientId: "c2", sid: "other-stop",
+    receiptId: "other-receipt", idempotencyKey: "other-report-attempt", completedAt: "2026-10-12T10:00:00.000Z",
+    entry: { notes: "Other accepted report", photos: [{ src: "fixture://other" }], invoice: "$0" }, postBalance: false });
+  assert.equal(other.ok, true);
+  const f = await setup({ existingClients: other.clients, existingCompleted: other.completed });
+  try {
+    const beforeClients = await f.state("sps_clients");
+    const beforeCompleted = await f.state("sps_completed");
+    assert.equal((await f.invoke(complete, { mode: "reverse", clientId: "c1", sid: "s1" })).statusCode, 409);
+    const reopened = await f.invoke(complete, { mode: "reverse", clientId: "c1", sid: "s1", allowLegacy: true });
+    assert.equal(reopened.statusCode, 200, JSON.stringify({ body: reopened.body, errors: f.rpcErrors }));
+    assert.equal(reopened.body.legacy, true);
+    const afterClients = await f.state("sps_clients");
+    const afterCompleted = await f.state("sps_completed");
+    assert.deepEqual(afterClients.value[0].history, []);
+    assert.deepEqual(afterClients.value[1], beforeClients.value[1]);
+    assert.equal(Number(afterClients.version), Number(beforeClients.version) + 1);
+    assert.equal(Number(afterCompleted.version), Number(beforeCompleted.version) + 1);
+    assert.equal(afterCompleted.value.s1, undefined);
+    assert.deepEqual(afterCompleted.value["other-stop"], beforeCompleted.value["other-stop"]);
+    assert.deepEqual(f.rpcErrors, []);
+  } finally { await f.db.close(); }
+});
+
+sqlTest("actual modern reopen API restores a historical balance receipt through the compact transaction", async () => {
+  const base = [{ ...initial[0], balance: "$25" }, { id: "c2", name: "Other client", history: [] }];
+  const other = applyStopCompletion({ clients: base, completed: {}, catalog, clientId: "c2", sid: "other-stop",
+    receiptId: "other-receipt", idempotencyKey: "other-report-attempt", completedAt: "2026-10-12T10:00:00.000Z",
+    entry: { notes: "Keep this report", photos: [{ src: "fixture://other" }], invoice: "$0" }, postBalance: false });
+  const saved = applyStopCompletion({ clients: other.clients, completed: other.completed, catalog, clientId: "c1", sid: "s1",
+    receiptId: "historical-balance-receipt", idempotencyKey: "historical-balance-attempt", completedAt: "2026-10-12T11:00:00.000Z",
+    entry: { notes: "Historical completion", invoice: "$100" }, postBalance: true });
+  assert.equal(saved.ok, true);
+  assert.equal(saved.receipt.balance.changed, true);
+  const f = await setup({ existingClients: saved.clients, existingCompleted: saved.completed });
+  try {
+    const beforeClients = await f.state("sps_clients");
+    const beforeCompleted = await f.state("sps_completed");
+    const reopened = await f.invoke(complete, { mode: "reverse", clientId: "c1", sid: "s1" });
+    assert.equal(reopened.statusCode, 200, JSON.stringify({ body: reopened.body, errors: f.rpcErrors }));
+    assert.equal(reopened.body.receiptId, "historical-balance-receipt");
+    const afterClients = await f.state("sps_clients");
+    const afterCompleted = await f.state("sps_completed");
+    assert.equal(afterClients.value[0].balance, "$25");
+    assert.equal(afterClients.value[0].__spsCompletionBalanceReceipt, undefined);
+    assert.deepEqual(afterClients.value[0].history, []);
+    assert.deepEqual(afterClients.value[1], beforeClients.value[1]);
+    assert.equal(Number(afterClients.version), Number(beforeClients.version) + 1);
+    assert.equal(Number(afterCompleted.version), Number(beforeCompleted.version) + 1);
+    assert.equal(afterCompleted.value.__stopReversedRequests["historical-balance-receipt"].clientId, "c1");
+    assert.deepEqual(afterCompleted.value["other-stop"], beforeCompleted.value["other-stop"]);
     assert.deepEqual(f.rpcErrors, []);
   } finally { await f.db.close(); }
 });

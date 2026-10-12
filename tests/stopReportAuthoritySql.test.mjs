@@ -11,6 +11,7 @@ const runtime = process.env.SPS_SQL_TEST_PGLITE_PATH;
 const PGlite = runtime ? (await import(pathToFileURL(runtime).href)).PGlite : null;
 const sqlTest = (name, fn) => test(name, { skip: !PGlite && 'Set SPS_SQL_TEST_PGLITE_PATH to run real SQL' }, fn);
 const migration = await readFile(new URL('../supabase/migrations/20261012213546_stop_report_authority.sql', import.meta.url), 'utf8');
+const memoryMigration = await readFile(new URL('../supabase/migrations/20261012215154_stop_report_memory_bound.sql', import.meta.url), 'utf8');
 const baseSql = await readFile(new URL('../APP-STATE-CONCURRENCY-MIGRATION.sql', import.meta.url), 'utf8');
 const batchSql = await readFile(new URL('../APP-STATE-BATCH-CHECK-ONLY-MIGRATION.sql', import.meta.url), 'utf8');
 const catalog = { treatments: [], parts: [], products: [] };
@@ -55,7 +56,7 @@ async function setup({ completed = true, depth = 1, activate = true } = {}) {
     sps_completed: completed ? completion.completed : {}, sps_catalog: catalog, sps_schedule: [], sps_billing_reviews: [], sps_invoices: [] })) {
     await db.query('insert into public.app_state(key,value) values($1,$2::jsonb)', [name, JSON.stringify(encoded(value, depth))]);
   }
-  await db.exec(migration); await as(db, 'service_role');
+  await db.exec(migration); await db.exec(memoryMigration); await as(db, 'service_role');
   if (activate) await db.query('select public.sps_activate_stop_report_guard()');
   return { db, completion };
 }
@@ -330,5 +331,30 @@ sqlTest('269 clients with 19MB inline photos can preserve missing reports withou
     assert.equal(saved.length, 269); assert.equal(saved.filter(c => c.history.length).length, 164);
     assert.equal(saved[0].history[0].photos[0].length, 120_000);
     assert.ok(elapsed < 15_000, `Guard took ${elapsed}ms`);
+  } finally { await db.close(); }
+});
+
+sqlTest('compact wire helpers replace only the top-level indexed client across whitespace Unicode and historical wire depths', async () => {
+  const { db } = await setup();
+  try {
+    await db.exec('reset role');
+    const target = { id: 9, name: 'Renée 池', history: [{ sid: 'quoted-stop', completionReceiptId: 'quoted-receipt', notes: 'Brackets ],[ and a quoted "client"', photos: [] }] };
+    const values = [{ id: 'nested', embedded: target, text: 'Newline\n and tab\t' }, { id: 'middle', history: [] }, target];
+    const raw = ` \n[\t${JSON.stringify(values[0])},\r\n ${JSON.stringify(values[1])},\n\t${JSON.stringify(target)} \r\n] `;
+    const replacement = { ...target, name: 'Renée 更新', history: [{ ...target.history[0], notes: 'Corrected' }] };
+    for (const depth of [0, 1, 2]) {
+      const wire = depth === 0 ? values : depth === 1 ? raw : JSON.stringify(raw);
+      const actual = (await db.query(`select public.sps_stop_client_target_wire($1::jsonb,'9','quoted-receipt') target,
+        public.sps_stop_replace_client_value($1::jsonb,2,$2::jsonb,public.sps_stop_state_wire_template($1::jsonb)) replaced`,
+        [JSON.stringify(wire), JSON.stringify(replacement)])).rows[0];
+      assert.equal(actual.target.index, 2); assert.equal(actual.target.matches, 1); assert.equal(actual.target.receipts, 1);
+      assert.deepEqual(actual.target.client, target);
+      assert.deepEqual(decoded(actual.replaced), [values[0], values[1], replacement]);
+      assert.equal(typeof actual.replaced, depth === 0 ? 'object' : 'string');
+      if (depth === 2) assert.equal(typeof JSON.parse(actual.replaced), 'string');
+    }
+    await assert.rejects(db.query('select public.sps_stop_replace_client_value($1::jsonb,20,$2::jsonb,$3::jsonb)',
+      [JSON.stringify(raw), JSON.stringify(replacement), JSON.stringify('[]')]), /stop_client_index_missing/);
+    await assert.rejects(db.query('select public.sps_stop_state_json_text($1::jsonb)', [JSON.stringify(encoded(values, 3))]), /stop_state_encoding_invalid/);
   } finally { await db.close(); }
 });

@@ -766,7 +766,7 @@ export default async function handler(req, res) {
       } : null;
       telemetry.setPhase("commit-batch");
       const saved = await compareAndSetStopCompletionBatch(operations, {
-        mode, sid, receiptId: mutation.receipt?.id || "",
+        mode, sid, receiptId: mutation.receipt?.id || "", clientId,
       }, telemetry.appStateOptions("commit-batch"));
       uncertainCommit = null;
       if (saved.applied) {

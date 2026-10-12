@@ -24,22 +24,71 @@ const response = (body, ok = true, status = 200) => ({
 
 test("stop completion batches use the scoped authority RPC without generic fallback", async () => {
   const calls = [];
+  const client = { id: "c1", history: [{ completionReceiptId: "r1", notes: "Saved report" }] };
   globalThis.fetch = async (url, options) => {
     calls.push(String(url));
-    assert.match(String(url), /\/rpc\/sps_stop_completion_batch_cas$/);
+    assert.match(String(url), /\/rpc\/sps_stop_completion_delta_cas$/);
     const body = JSON.parse(options.body);
     assert.equal(body.p_mode, "edit"); assert.equal(body.p_sid, "s1"); assert.equal(body.p_receipt_id, "r1");
+    assert.equal(body.p_client_id, "c1");
     assert.deepEqual(body.p_operations, [
-      { key: "sps_clients", expected_version: 4, value: "[]" },
+      { key: "sps_clients", expected_version: 4, value: JSON.stringify(client) },
       { key: "sps_completed", expected_version: 6, check_only: true },
     ]);
     return response({ code: "PGRST202", message: "RPC migration missing" }, false, 404);
   };
   await assert.rejects(compareAndSetStopCompletionBatch([
-    { key: "sps_clients", expectedVersion: 4, value: [] },
+    { key: "sps_clients", expectedVersion: 4, value: [client] },
     { key: "sps_completed", expectedVersion: 6, checkOnly: true },
-  ], { mode: "edit", sid: "s1", receiptId: "r1" }), /app_state_batch_cas_failed/);
+  ], { mode: "edit", sid: "s1", receiptId: "r1", clientId: "c1" }), /app_state_batch_cas_failed/);
   assert.equal(calls.length, 1);
+});
+
+test("compact stop protocol excludes unrelated client media without changing the original operations", async () => {
+  const target = { id: 7, history: [{ sid: "s1", notes: "Updated stop" }] };
+  const untouched = { id: "other", history: [{ photos: ["x".repeat(19_000_000)] }] };
+  const operations = [
+    { key: "sps_clients", expectedVersion: 9, value: [untouched, target] },
+    { key: "sps_completed", expectedVersion: 11, checkOnly: true },
+    { key: "sps_catalog", expectedVersion: 4, value: { products: [] } },
+  ];
+  globalThis.fetch = async (url, options) => {
+    assert.match(String(url), /\/rpc\/sps_stop_completion_delta_cas$/);
+    assert.ok(Buffer.byteLength(options.body) < 1000, "unrelated 19 MB of client photos must never reach the RPC");
+    const body = JSON.parse(options.body);
+    assert.equal(body.p_client_id, "7");
+    assert.deepEqual(JSON.parse(body.p_operations[0].value), target);
+    assert.deepEqual(body.p_operations.slice(1), [
+      { key: "sps_completed", expected_version: 11, check_only: true },
+      { key: "sps_catalog", expected_version: 4, value: '{"products":[]}' },
+    ]);
+    return response([{ applied: true, outcome: "applied", current_versions: { sps_clients: 10 } }]);
+  };
+  const result = await compareAndSetStopCompletionBatch(operations, { mode: "edit", sid: "s1", receiptId: "r1", clientId: 7 });
+  assert.equal(result.applied, true);
+  assert.equal(operations[0].value[0], untouched);
+  assert.equal(operations[0].value[1], target);
+  assert.equal(operations[0].value.length, 2);
+});
+
+test("compact stop protocol rejects missing ambiguous or invalid client scope before any network write", async () => {
+  let calls = 0;
+  globalThis.fetch = async () => { calls += 1; throw new Error("No write should occur"); };
+  const scope = { mode: "edit", sid: "s1", receiptId: "r1", clientId: "c1" };
+  const operations = value => [
+    { key: "sps_clients", expectedVersion: 4, value },
+    { key: "sps_completed", expectedVersion: 6, checkOnly: true },
+  ];
+  for (const clients of [[], [{ id: "other" }], [{ id: "c1" }, { id: "c1" }], { id: "c1" }]) {
+    await assert.rejects(compareAndSetStopCompletionBatch(operations(clients), scope), /stop_completion_/);
+  }
+  for (const clientId of [undefined, null, {}, [], "", " ", Infinity, NaN, "a".repeat(321)]) {
+    await assert.rejects(compareAndSetStopCompletionBatch(operations([{ id: "c1" }]), { ...scope, clientId }), /scope_invalid/);
+  }
+  await assert.rejects(compareAndSetStopCompletionBatch(operations([{ id: 7 }, { id: "7" }]), { ...scope, clientId: 7 }), /scope_ambiguous/);
+  const duplicate = operations([{ id: "c1" }]); duplicate.push({ ...duplicate[0] });
+  await assert.rejects(compareAndSetStopCompletionBatch(duplicate, scope), /clients_operation_invalid/);
+  assert.equal(calls, 0);
 });
 
 test("server mutation reruns against the winner of a CAS conflict", async () => {

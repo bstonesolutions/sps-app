@@ -30,9 +30,10 @@ function fixture({ role = "field", tabAccess = { schedule: "edit", clients: "edi
     if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "staff@example.com" });
     if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify([{ id: "e1", email: "staff@example.com", role, tabAccess }]) }]);
     if (href.includes("/rest/v1/app_state?")) return response(Object.entries(state).map(([key, row]) => ({ key, value: JSON.stringify(row.value), version: row.version })));
-    assert.match(href, /\/rpc\/sps_stop_completion_batch_cas$/);
+    assert.match(href, /\/rpc\/sps_stop_completion_delta_cas$/);
     const body = JSON.parse(options.body); writes.push(body);
     assert.equal(body.p_mode, "edit"); assert.equal(body.p_sid, "s1"); assert.equal(body.p_receipt_id, "receipt-one");
+    assert.equal(body.p_client_id, "c1");
     assert.deepEqual(body.p_operations.map(op => op.key), ["sps_clients", "sps_completed"]);
     assert.deepEqual(body.p_operations[1], { key: "sps_completed", expected_version: state.sps_completed.version, check_only: true });
     if (beforeCas) {
@@ -41,7 +42,12 @@ function fixture({ role = "field", tabAccess = { schedule: "edit", clients: "edi
     }
     for (const op of body.p_operations) {
       assert.equal(op.expected_version, state[op.key].version);
-      if (!op.check_only) state[op.key] = { value: JSON.parse(op.value), version: state[op.key].version + 1 };
+      if (!op.check_only) {
+        const incoming = JSON.parse(op.value);
+        assert.equal(Array.isArray(incoming), false);
+        assert.equal(String(incoming.id), body.p_client_id);
+        state[op.key] = { value: state[op.key].value.map(client => String(client.id) === body.p_client_id ? incoming : client), version: state[op.key].version + 1 };
+      }
     }
     return response([{ applied: true, outcome: "applied", current_versions: {} }]);
   };

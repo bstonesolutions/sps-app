@@ -66,11 +66,20 @@ function installServer() {
       const keys = href.match(/key=in\.\(([^)]*)\)/)?.[1]?.split(",").map(decodeURIComponent) || [];
       return response(keys.flatMap(key => state[key] ? [{ key, version: state[key].version, value: JSON.stringify(state[key].value) }] : []));
     }
-    if (href.endsWith("/rest/v1/rpc/sps_stop_completion_batch_cas")) {
-      const operations = JSON.parse(options.body).p_operations;
+    if (href.endsWith("/rest/v1/rpc/sps_stop_completion_delta_cas")) {
+      const body = JSON.parse(options.body);
+      const operations = body.p_operations;
+      assert.equal(body.p_client_id, report.clientId);
       for (const operation of operations) assert.equal(operation.expected_version, state[operation.key]?.version || 0);
       for (const operation of operations) {
-        if (!operation.check_only) state[operation.key] = { version: (state[operation.key]?.version || 0) + 1, value: JSON.parse(operation.value) };
+        if (!operation.check_only) {
+          const incoming = JSON.parse(operation.value);
+          assert.ok(operation.key !== "sps_clients" || (!Array.isArray(incoming) && String(incoming.id) === body.p_client_id));
+          const value = operation.key === "sps_clients"
+            ? state.sps_clients.value.map(client => String(client.id) === body.p_client_id ? incoming : client)
+            : incoming;
+          state[operation.key] = { version: (state[operation.key]?.version || 0) + 1, value };
+        }
       }
       batchWrites += 1;
       return response([{ applied: true, outcome: "applied", current_versions: {} }]);

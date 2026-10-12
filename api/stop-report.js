@@ -109,7 +109,7 @@ export default async function handler(req, res) {
       const saved = await compareAndSetStopCompletionBatch([
         { key: "sps_clients", expectedVersion: snapshot.sps_clients.version, value: nextClients },
         { key: "sps_completed", expectedVersion: snapshot.sps_completed.version, checkOnly: true },
-      ], { mode: "edit", sid, receiptId });
+      ], { mode: "edit", sid, receiptId, clientId });
       if (saved.applied) return res.status(200).json({ ok: true, applied: true, receiptId, entry: nextEntry });
       if (saved.outcome !== "conflict") throw new Error("unexpected_report_edit_outcome");
     }
