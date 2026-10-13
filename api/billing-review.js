@@ -213,7 +213,9 @@ export function createBillingReviewHandler(overrides = {}) {
     };
     const captured = responseCapture();
     try {
-      await deps.createInvoice({ ...req, method: "POST", body: { invoice: copy(approval.payload) }, [BILLING_REVIEW_CREATE_CONTEXT]: context }, captured);
+      // Node exposes headers through an inherited accessor, so spreading the request drops them.
+      // Keep the caller's credentials for the QuickBooks handler's own authentication check.
+      await deps.createInvoice({ ...req, headers: req.headers, method: "POST", body: { invoice: copy(approval.payload) }, [BILLING_REVIEW_CREATE_CONTEXT]: context }, captured);
       const result = captured.body || {};
       if (captured.statusCode < 300 && result.success === true && text(result.qbId)) {
         await changeReview(review.id, current => {
