@@ -33,6 +33,7 @@ import { deleteSelectedInvoiceDrafts, invoiceBulkDeleteEligibility, invoiceDelet
 import { emptyMaintenancePaymentLedger, normalizeMaintenancePaymentLedger } from "./maintenancePaymentLedger";
 import InvoiceClientPicker from "./InvoiceClientPicker";
 import BillingReviewQueue from "./BillingReviewQueue.jsx";
+import InvoiceVisitPanel from "./InvoiceVisitPanel.jsx";
 import { billingReviewSaveReceiptMatches } from "./billingReviewReceipt";
 import InvoiceDeletionReview, { InvoiceDeletionConflicts } from "./InvoiceDeletionReview.jsx";
 import { initialInvoiceClientId, invoiceClientSnapshot, resolveInvoiceClient } from "./invoiceClientSelection";
@@ -18969,6 +18970,37 @@ async function refreshBillingInvoiceState() {
   return result;
 }
 
+function InvoiceVisitEvidence({ invoice, client, schedule = [] }) {
+  const { T, schedule: sharedSchedule = [] } = useApp();
+  const [photoView, setPhotoView] = useState(null);
+  useEffect(() => {
+    if (!photoView) return;
+    const closePhoto = event => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setPhotoView(null);
+    };
+    document.addEventListener("keydown", closePhoto, true);
+    return () => document.removeEventListener("keydown", closePhoto, true);
+  }, [photoView]);
+  return <>
+    <InvoiceVisitPanel invoice={invoice} client={client} schedule={schedule.length ? schedule : sharedSchedule} T={T} renderPhotos={photos => (
+      <div className="iv-visit-photos-grid">
+        {photos.map((photo, index) => {
+          const src = typeof photo === "string" ? photo : photo.src;
+          const label = typeof photo === "object" && photo.label ? photo.label : `Photo ${index + 1}`;
+          return <button type="button" key={`${index}-${label}`} onClick={() => setPhotoView({ photos, index })} aria-label={`Open visit photo ${index + 1}${typeof photo === "object" && photo.label ? ` ${photo.label}` : ""}`}>
+            <ProtectedImage src={src} alt={typeof photo === "object" ? photo.caption || label : label} />
+            <span>{label}</span>
+          </button>;
+        })}
+      </div>
+    )} />
+    {photoView && createPortal(<PhotoViewer photos={photoView.photos} index={photoView.index} onClose={() => setPhotoView(null)} />, document.body)}
+  </>;
+}
+
 function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCatalog, presetClientId, maintenanceLedger: providedMaintenanceLedger = null, schedule = [], onSave, onPersistProgress, onResolveReview, onClose, onDelete, billingReview = false, onSaveReview, onConfirmReview, onDiscardReview, onLoadInvoiceNumbers }) {
   const { T, perms } = useApp();
   const canSeeLineCost = !!(perms.isAdmin || perms.seeProfit || perms.seeInventoryCost);
@@ -19892,6 +19924,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
             </div>}
           </div>
         )}
+        <InvoiceVisitEvidence key={inv.clientId || "no-client"} invoice={inv} client={client} schedule={schedule} />
         <fieldset
           disabled={canCompareQuickBooksVersions || spsSavePending || progressState === "saving" || qbState === "sending" || (billingReview && (reviewLocked || !!reviewBusy))}
           style={{ display: "flex", flexDirection: "column", gap: 18, border: 0, padding: 0, margin: 0, minWidth: 0, opacity: canCompareQuickBooksVersions || reviewLocked ? 0.58 : 1 }}
@@ -21767,6 +21800,7 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onPersis
   // ── Modal layout (mobile / inside a client record): accounting action, then document. ──
   const body = (
     <div style={{ display: "flex", flexDirection: "column", gap: 14, paddingBottom: "max(16px, env(safe-area-inset-bottom))" }}>
+      <InvoiceVisitEvidence key={invoice.id} invoice={invoice} client={client} schedule={schedule} />
       {quickBooksBlock}
       {doc}
       {reportBlock}
@@ -21814,6 +21848,7 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onPersis
           )}
         </div>
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingTop: 18, paddingBottom: 8 }}>
+          <div style={{ marginBottom: 18 }}><InvoiceVisitEvidence key={invoice.id} invoice={invoice} client={client} schedule={schedule} /></div>
           {doc}
           {reportBlock && <div style={{ marginTop: 14 }}>{reportBlock}</div>}
         </div>

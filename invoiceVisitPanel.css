@@ -1,0 +1,60 @@
+.iv-visit-panel { container-type: inline-size; color: var(--visit-text); background: var(--visit-surface); padding: 4px 0; min-width: 0; }
+.iv-visit-panel * { box-sizing: border-box; }
+.iv-visit-panel header { display: flex; align-items: center; justify-content: space-between; gap: 16px; border-left: 3px solid var(--visit-accent); padding-left: 12px; margin-bottom: 18px; }
+.iv-visit-panel h3, .iv-visit-panel h4, .iv-visit-panel p { margin: 0; }
+.iv-visit-panel h3 { font-size: 22px; font-weight: 800; line-height: 1.15; letter-spacing: -.035em; }
+.iv-visit-panel .iv-visit-client { font-size: 14px; color: var(--visit-muted); line-height: 1.4; margin-top: 4px; }
+.iv-visit-private { color: var(--visit-muted); font-size: 12px; white-space: nowrap; }
+.iv-visit-report { border-top: 1px solid var(--visit-border); }
+.iv-visit-panel summary { cursor: pointer; list-style: none; }
+.iv-visit-panel summary::-webkit-details-marker { display: none; }
+.iv-visit-panel summary:focus-visible, .iv-visit-panel button:focus-visible, .iv-visit-panel input:focus-visible { outline: 2px solid var(--visit-accent); outline-offset: 3px; }
+.iv-visit-report > summary { display: flex; flex-wrap: wrap; gap: 10px 12px; align-items: center; min-height: 70px; padding: 14px 0; }
+.iv-visit-date { font-size: 13px; font-weight: 650; color: var(--visit-muted); flex: 0 0 98px; font-variant-numeric: tabular-nums; }
+.iv-visit-summary { flex: 1; min-width: 110px; display: grid; gap: 4px; }
+.iv-visit-summary strong { font-size: 16px; line-height: 1.3; font-weight: 800; overflow-wrap: anywhere; }
+.iv-visit-summary > span { font-size: 12px; color: var(--visit-muted); }
+.iv-visit-link-state { font-size: 11px; color: var(--visit-accent); }
+.iv-visit-chevron { flex-shrink: 0; color: var(--visit-muted); }
+details[open] > summary > .iv-visit-chevron { transform: rotate(90deg); }
+.iv-visit-report-body { padding: 0 0 18px; display: grid; gap: 18px; }
+.iv-visit-report-body h4 { font-size: 13px; line-height: 1.4; font-weight: 800; margin-bottom: 7px; }
+.iv-visit-narrative { display: grid; gap: 16px; }
+.iv-visit-notes { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.6; }
+.iv-visit-panel .iv-visit-muted { font-size: 13px; color: var(--visit-muted); line-height: 1.5; }
+.iv-visit-services { margin-top: 12px; font-size: 13px; line-height: 1.5; }
+.iv-visit-services > span { font-size: 11px; color: var(--visit-muted); }
+.iv-visit-office { padding-left: 12px; border-left: 2px solid var(--visit-accent); }
+.iv-visit-panel ul { list-style: none; margin: 0; padding: 0; }
+.iv-visit-materials li { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--visit-border); }
+.iv-visit-materials li:first-child { border-top: 1px solid var(--visit-border); }
+.iv-visit-materials li > div { display: grid; gap: 3px; min-width: 0; }
+.iv-visit-materials li strong { font-size: 14px; font-weight: 700; overflow-wrap: anywhere; }
+.iv-visit-materials li > div > span { font-size: 12px; color: var(--visit-muted); }
+.iv-visit-billable, .iv-visit-billing-note { font-size: 12px; text-align: right; max-width: 110px; line-height: 1.4; }
+.iv-visit-billable { color: var(--visit-accent); font-weight: 750; }
+.iv-visit-billing-note { color: var(--visit-muted); }
+.iv-visit-panel .iv-visit-caption { font-size: 12px; color: var(--visit-muted); line-height: 1.5; margin-top: 9px; }
+.iv-visit-photos h4 span { color: var(--visit-muted); font-weight: 500; margin-left: 4px; }
+.iv-visit-photos-grid { display: flex; gap: 8px; overflow-x: auto; padding: 3px; }
+.iv-visit-photos-grid button { padding: 0; border: 0; background: var(--visit-subtle); flex: 0 0 84px; color: var(--visit-text); cursor: pointer; font-family: inherit; border-radius: 6px; overflow: hidden; }
+.iv-visit-photos-grid img { display: block; width: 84px; height: 84px; object-fit: cover; }
+.iv-visit-photos-grid span { display: block; padding: 5px 4px; font-size: 11px; }
+.iv-visit-more > summary, .iv-visit-browse > summary { display: flex; justify-content: space-between; align-items: center; gap: 10px; min-height: 44px; font-size: 13px; font-weight: 750; }
+.iv-visit-more { border-top: 1px solid var(--visit-border); }
+.iv-visit-more li { display: flex; justify-content: space-between; gap: 14px; font-size: 13px; line-height: 1.5; padding: 5px 0; }
+.iv-visit-more li > span:last-child { color: var(--visit-muted); white-space: nowrap; font-size: 12px; }
+.iv-visit-more dl { display: flex; flex-wrap: wrap; gap: 14px 24px; margin: 10px 0 0; }
+.iv-visit-more dt { font-size: 11px; color: var(--visit-muted); }
+.iv-visit-more dd { margin: 3px 0 0; font-size: 16px; font-weight: 750; }
+.iv-visit-panel .iv-visit-unlinked-note { font-size: 12px; line-height: 1.5; color: var(--visit-muted); border-left: 2px solid var(--visit-border); padding-left: 10px; }
+.iv-visit-missing, .iv-visit-empty { padding: 12px 0 15px; border-top: 1px solid var(--visit-border); font-size: 14px; }
+.iv-visit-missing strong { color: var(--visit-accent); }
+.iv-visit-missing p, .iv-visit-empty p { color: var(--visit-muted); margin-top: 6px; font-size: 13px; line-height: 1.5; }
+.iv-visit-browse { border-top: 1px solid var(--visit-border); }
+.iv-visit-count { color: var(--visit-muted); font-weight: 500; margin-left: 5px; }
+.iv-visit-browse input { border: 1px solid var(--visit-border); border-radius: 8px; background: var(--visit-surface); color: var(--visit-text); padding: 11px 12px; font: inherit; font-size: 16px; width: 100%; margin: 12px 0; }
+.iv-visit-browse button { border: 0; background: transparent; color: var(--visit-accent); min-height: 44px; font: inherit; font-size: 13px; font-weight: 750; cursor: pointer; }
+@container (min-width: 640px) { .iv-visit-narrative:has(.iv-visit-office) { grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr); gap: 28px; } }
+@container (max-width: 360px) { .iv-visit-date { flex-basis: calc(100% - 24px); } .iv-visit-link-state { display: none; } .iv-visit-panel h3 { font-size: 20px; } }
+@media print { .iv-visit-panel { display: none !important; } }
