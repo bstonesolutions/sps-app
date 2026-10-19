@@ -136,3 +136,24 @@ test("accepted report edits display the confirmed server report over retained lo
     assert.equal(db.calls,calls,"display adoption cannot create another save");
   }finally{h.dispose()}
 });
+
+for (const unstaged of [false, true]) {
+  test(`compact client receipt is displayed without a roster save${unstaged ? ' while preserving an unstaged edit' : ''}`,async()=>{
+    const uid=`hook-compact-create-${unstaged}`,key='sps_clients';
+    const base=[{id:'client',name:'Existing client',notes:'Before',history:[]}];
+    const created={id:'new-client-uuid',name:'Cedar House',history:[],equipment:[]};
+    const db=database(base);store.setUser(uid);await store.initialize();
+    const h=mountHook(key,[]);
+    try {
+      await h.settle();
+      if(unstaged) h.result[1](current=>[{...current[0],notes:'Typed during creation'}]);
+      db.value=json([...base,created]);db.version=2;
+      const saved=await store.acceptCreatedClient({client:created,beforeVersion:1,afterVersion:2,replayed:false},store.captureIdentity());
+      assert.equal(saved.ok,true);h.result[4](saved.parsedValue);await h.settle();
+      assert.equal(h.result[0].length,2);assert.equal(h.result[0][1].name,'Cedar House');
+      assert.equal(h.result[0][0].notes,unstaged?'Typed during creation':'Before');
+      assert.equal(db.calls,unstaged?1:0,'only a real concurrent user edit should write the roster');
+      assert.equal(JSON.parse(db.value).filter(c=>c.id===created.id).length,1);
+    }finally{h.dispose()}
+  });
+}

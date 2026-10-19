@@ -44,6 +44,7 @@ import { quickBooksInvoiceSyncEligibility, quickBooksInvoiceUrl, syncInvoiceToQu
 import { appendCompletedVisitsToInvoice, completedVisitBillableTotal, completedVisitInvoiceLink, completedVisitLineItems, completedVisitSource, invoiceCompletedVisitSources, removeInvoiceLineAndPruneCompletedVisitSources, reserveCompletedVisitInvoice } from "./invoiceVisitImport";
 import { normalizeMaintenanceBillingPolicy } from "./maintenanceBilling";
 import { saveClientEditorChanges } from "./clientEditSave";
+import { createNewClientAttempt, saveNewClientChanges } from "./clientCreateSave";
 import { maintenanceCoverageMonthDate, prepaymentInvoiceLabel, prepaymentInvoiceSummary } from "./clientMaintenanceBillingForm";
 import MaintenanceCoverageWorkspace from "./MaintenanceCoverageWorkspace";
 import { maintenanceDraftInvoice } from "./maintenanceDraftInvoice";
@@ -7644,6 +7645,8 @@ function ClientEditForm({ client, invoices = [], onSave, onCancel, onDelete, tit
   });
   const combined = assembleAddress({ street: form.street, city: form.city, state: form.state, zip: form.zip });
   const hasPersistedClient = client?.id != null && String(client.id).trim() !== "";
+  const newClientAttemptRef = useRef(null);
+  if (!hasPersistedClient && !newClientAttemptRef.current) newClientAttemptRef.current = createNewClientAttempt();
   const prepaidMaintenance = String(form.maintenanceBilling?.mode || "").toLowerCase() === "prepaid";
   const clientInvoiceChoices = (invoices || [])
     .filter((invoice) => invoiceMatchesClient(invoice, form))
@@ -7700,7 +7703,7 @@ function ClientEditForm({ client, invoices = [], onSave, onCancel, onDelete, tit
     setFormSaving(true);
     try {
       if (!manageClientAutoInvoice || !hasPersistedClient) {
-        await onSave(next, { clientEdit: hasPersistedClient, baselineClient: initialFormRef.current });
+        await onSave(next, { clientEdit: hasPersistedClient, baselineClient: initialFormRef.current, newClientAttempt: newClientAttemptRef.current });
         return;
       }
       const response = await fetch(`${PROD_URL}/api/client-maintenance-billing`, {
@@ -7791,8 +7794,8 @@ function ClientEditForm({ client, invoices = [], onSave, onCancel, onDelete, tit
     <div>
       <button onClick={onCancel} disabled={formSaving} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", padding: "0 0 16px", display: "flex", alignItems: "center", gap: 4 }}>← Cancel</button>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
-        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 800, color: T.text }}>{title}</h2>
-        <Btn onClick={() => { void saveClient(); }} disabled={formSaving}>{formSaving ? "Saving…" : title === "Add Client" ? "Create Client" : "Save Changes"}</Btn>
+        <h2 style={{ margin: 0, fontSize: hasPersistedClient ? 20 : 24, fontWeight: 800, color: T.text }}>{title}</h2>
+        <Btn onClick={() => { void saveClient(); }} disabled={formSaving}>{formSaving ? (hasPersistedClient ? "Saving…" : "Saving client") : !hasPersistedClient ? (formError ? "Retry client save" : "Create Client") : "Save Changes"}</Btn>
       </div>
       {formError && !(manageClientAutoInvoice && hasPersistedClient) && (
         <div ref={saveFeedbackRef} role="alert" style={{ marginBottom: 14, padding: "10px 13px", borderLeft: `3px solid ${T.primary}`, background: hexA(T.primary, 0.055), color: T.primary, fontSize: 12.5, fontWeight: 750, lineHeight: 1.45 }}>
@@ -7907,7 +7910,7 @@ function ClientEditForm({ client, invoices = [], onSave, onCancel, onDelete, tit
                                   <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
                                     <div style={{ position: "relative", width: 110 }}>
                                       <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", fontSize: 13, color: T.textMuted }}>$</span>
-                                      <input value={(form.planRates || {})[div] || ""} onChange={e => setDivRate(div, e.target.value)} inputMode="decimal" placeholder="0"
+                                      <input value={(form.planRates || {})[div] || ""} onChange={e => setDivRate(div, e.target.value)} inputMode="decimal" placeholder="0" disabled={!hasPersistedClient && !manageClientAutoInvoice} aria-label={`${div} monthly rate`}
                                         style={{ width: "100%", padding: "9px 10px 9px 22px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
                                     </div>
                                     <span style={{ fontSize: 11, color: T.textMuted }}>/mo</span>
@@ -7984,12 +7987,13 @@ function ClientEditForm({ client, invoices = [], onSave, onCancel, onDelete, tit
                     now sets its own rate in the Services & Plans card above, which auto-sums monthlyRate. */}
                 {showClientPlanMoney && activeRateDivs().length === 0 && (
                   <FieldRow label="Monthly Rate">
-                    <div style={{ position: "relative" }}>
+                    <fieldset disabled={!hasPersistedClient && !manageClientAutoInvoice} style={{ position: "relative", border: 0, padding: 0, margin: 0, minWidth: 0 }}>
                       <span style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: "#9ca3af" }}>$</span>
                       <Input value={form.monthlyRate || ""} onChange={e => set("monthlyRate", e.target.value.replace(/[^0-9.]/g, ""))} placeholder="e.g. 150" />
-                    </div>
+                    </fieldset>
                   </FieldRow>
                 )}
+                {!hasPersistedClient && !manageClientAutoInvoice && showClientPlanMoney && <p style={{ margin: 0, fontSize: 12, color: T.textMuted }}>An accounting user can set rates after this client is saved</p>}
                 {manageClientAutoInvoice && <div>
                   <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "#6b7280", display: "block", marginBottom: 5 }}>Auto-Invoice</label>
                   <div style={{ display: "flex", gap: 8 }}>
@@ -42704,16 +42708,39 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     return () => window.removeEventListener("sps-deeplink", onDeep);
   }, [hydrated, !!clientUser, !!currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleSaveNewClient = (form) => {
-    const newClient = {
-      ...form,
-      id: Date.now(),
-      status: form.status || "Active",
-      balance: form.balance || "$0.00",
-      equipment: form.equipment || [],
-      history: form.history || [],
-    };
-    setClients(cs => [...cs, newClient]);
+  const handleSaveNewClient = async (form, options = {}) => {
+    const attempt = options.newClientAttempt;
+    const identity = attempt?.identity || store.captureIdentity();
+    if (attempt && !attempt.identity) attempt.identity = identity;
+    const newClient = await saveNewClientChanges({
+      form,
+      attempt,
+      isCurrentIdentity: () => store.isCurrentIdentity(identity),
+      createClient: async (payload) => {
+        const headers = await authHeaders({ "Content-Type": "application/json" });
+        if (!store.isCurrentIdentity(identity)) throw new Error("The signed-in account changed. Reopen Add Client before saving.");
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 55_000);
+        try {
+          const response = await fetch(`${PROD_URL}/api/client-create`, {
+            method: "POST", headers, signal: controller.signal, body: JSON.stringify(payload),
+          });
+          const receipt = await response.json().catch(() => ({}));
+          if (!response.ok || !receipt.ok) throw new Error(receipt.error || "The client save was not confirmed. Your form is still here. Try Create Client again.");
+          return receipt;
+        } catch (error) {
+          if (error?.name === "AbortError") throw new Error("The client save could not be confirmed in time. Your form is still here. Try Create Client again to check the same save.");
+          throw error;
+        } finally {
+          clearTimeout(timeout);
+        }
+      },
+      acceptClient: async receipt => {
+        const accepted = await store.acceptCreatedClient(receipt, identity);
+        if (accepted?.ok && store.isCurrentIdentity(identity)) adoptClientsDisplay(accepted.parsedValue);
+        return accepted;
+      },
+    });
     // Saving a lead-conversion: stamp the lead won + linked, so the funnel keeps the record.
     if (convertLead) {
       const leadId = convertLead.id;
@@ -42721,6 +42748,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       setConvertLead(null);
     }
     setAdding(false);
+    return newClient;
   };
 
   // Convert a lead → a real client (the funnel's payoff). Opens the FULL Add-Client form prefilled

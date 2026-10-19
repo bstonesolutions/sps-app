@@ -15,6 +15,7 @@ function saveHarness(overrides = {}) {
   const state = { saving: false, error: "", posts: [], saves: [] };
   const deps = {
     formSavingRef: { current: false },
+    newClientAttemptRef: { current: null },
     initialFormRef: { current: { id: "c1", name: "Original contact" } },
     form: { id: "c1", name: "Edited contact", maintenanceBilling: { ...prepaid } },
     client: { id: "c1", name: "Original contact" },

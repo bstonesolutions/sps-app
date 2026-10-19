@@ -138,6 +138,15 @@ export function memberHasCapability(member, capability) {
     return ["full", "lead"].includes(role) || (role === "custom" && member.perms?.canEditHistory === true);
   }
 
+  if (capability === "editClients") {
+    const clients = tabMode(member, "clients");
+    if (clients !== null) return clients === "edit";
+    // Mirror the Add Client button: legacy custom roles use their saved flag;
+    // ordinary legacy roles use the role preset, never a stale override.
+    return ["full", "lead"].includes(role)
+      || (role === "custom" && member.perms?.canEditClients === true);
+  }
+
   if (capability === "invoiceView") {
     const mode = tabMode(member, "invoices");
     if (mode !== null) return mode === "view" || mode === "edit";

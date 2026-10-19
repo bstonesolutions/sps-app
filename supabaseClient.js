@@ -1606,7 +1606,66 @@ function replaceMany(changes) {
   return run;
 }
 
+function isCurrentIdentity(identity) {
+  return !!_uid && identity?.uid === _uid && identity?.generation === _identityVersion;
+}
+
+// A compact server receipt proves one client, not the contents of an entire roster. Only
+// advance the roster version when its exact predecessor is available locally. Otherwise
+// show the saved addition while leaving the confirmed snapshot and every pending edit intact.
+function acceptCreatedClient(receipt, identity) {
+  const key = "sps_clients";
+  const prior = _chains[key] || Promise.resolve();
+  const run = (async () => {
+    try { await prior; } catch (_) {}
+    if (!isCurrentIdentity(identity)) return { ok: false, staleIdentity: true };
+    const client = receipt?.client;
+    const before = Number(receipt?.beforeVersion), after = Number(receipt?.afterVersion);
+    if (!client || typeof client !== "object" || Array.isArray(client)
+      || typeof client.id !== "string" || !client.id || typeof client.name !== "string" || !client.name.trim()
+      || !Number.isSafeInteger(before) || before < 0 || !Number.isSafeInteger(after) || after < before
+      || (!receipt.replayed && after <= before)) {
+      return { ok: false, error: new Error("The saved client receipt is incomplete. Retry to confirm the same client.") };
+    }
+    let displayed, confirmed;
+    try {
+      displayed = JSON.parse(_cache[key] || "[]");
+      confirmed = JSON.parse(_confirmed[key] || "[]");
+      if (!Array.isArray(displayed) || !Array.isArray(confirmed)) throw new Error("Invalid roster");
+    } catch (_) {
+      return { ok: false, error: new Error("The client was saved. Refresh the client list to display it.") };
+    }
+    const currentVersion = Number(_versions[key]) || 0;
+    if (currentVersion >= after) {
+      // A late replay must not replace newer edits or resurrect a client that was removed later.
+      return { ok: true, value: _cache[key] || "[]", parsedValue: displayed, superseded: true, projected: false };
+    }
+    const hasClient = list => list.some(item => String(item?.id) === client.id);
+    const canReconstruct = !receipt.replayed && !receipt.clientProjection
+      && currentVersion === before && after === before + 1
+      && !_pending[key] && !hasClient(confirmed);
+    if (!hasClient(displayed)) displayed = [...displayed, client];
+    _cache[key] = JSON.stringify(displayed);
+    _cacheAt[key] = Date.now();
+    if (canReconstruct) {
+      _confirmed[key] = JSON.stringify([...confirmed, client]);
+      _versions[key] = after;
+      _exists[key] = true;
+      // Persistence failure cannot turn a confirmed server creation into a failed creation.
+      saveSnapshot().catch(() => {});
+    }
+    // The caller adopts this display through the hook's dirty-aware projection. No forced
+    // reconcile event and no full-roster network request are needed to finish the form.
+    return { ok: true, value: _cache[key], parsedValue: displayed, projected: !canReconstruct };
+  })();
+  _chains[key] = run.then(() => {}, () => {});
+  return run;
+}
+
 export const store = {
+  captureIdentity() { return { uid: _uid, generation: _identityVersion }; },
+  isCurrentIdentity,
+  acceptCreatedClient,
   // Display-only overlay; neither stages nor resolves the original durable local intent.
   projectDisplay(key, displayedValue, remoteValue) { return projectAcceptedReports(key, displayedValue, remoteValue); },
   setUser(uid) {
