@@ -105,7 +105,7 @@ test("progress persistence validates visits and confirms the exact shared invoic
   assert.match(persistence, /store\.replaceMany/);
   assert.match(persistence, /expectedVersion: Number\(invoiceRead\.version\)/);
   assert.match(persistence, /const confirmedRead = await store\.get\("sps_invoices"\)/);
-  assert.match(persistence, /JSON\.stringify\(confirmed\) !== JSON\.stringify\(nextInvoice\)/);
+  assert.match(persistence, /invoiceCheckpointMatches\(nextInvoice, confirmed\)/);
   assert.match(persistence, /setInvoices\(confirmedInvoices\)/);
   assert.ok(persistence.indexOf("!== baselineJson") < persistence.indexOf("reserveCompletedVisitInvoice("));
   assert.ok(persistence.indexOf("reserveCompletedVisitInvoice(") < persistence.indexOf("store.replaceMany"));

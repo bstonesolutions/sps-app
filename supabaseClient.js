@@ -3,6 +3,8 @@ import { idb } from "./idbStore.js";
 import { requestAppState } from "./appStateRequest.js";
 import { describeStateConflicts, mergeStoredState, normalizeStoredValue } from "./stateMerge.js";
 import { isTransientAppStateError, nextAppStateRetry } from "./appStateBackoff.js";
+import { normalizeInvoiceProjectionIntent, projectInvoiceAccountingAuthority } from "./invoiceAuthorityProjection.js";
+import { stableInvoiceReviewJSON } from "./invoiceReviewIdentity.js";
 
 const SUPABASE_URL = "https://ysqarusrewceezckawlo.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlzcWFydXNyZXdjZWV6Y2thd2xvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2MjkzODEsImV4cCI6MjA5NjIwNTM4MX0.GCX-Bt3sSoDaaF-XT2xeu4h6wR4tXO2hqOydQUkl_CQ";
@@ -41,12 +43,15 @@ let _initRetryAt = 0;
 let _initLastError = null;
 let _cacheReadyState = { ready: false, hasData: false };
 let _retryAfterAt = 0;
+// Targeted receipts can be newer than the reconstructable whole-ledger snapshot.
+// A slower full refresh must not roll those confirmed choices back on this device.
+let _invoiceReceiptVersion = 0;
 const _cacheAt = {};
 const _chains = {};
 
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 const sameStored = (a, b) => a === b;
-const serverProtectedKeys = new Set(["sps_clients", "sps_completed"]);
+const serverProtectedKeys = new Set(["sps_clients", "sps_completed", "sps_invoices"]);
 function normalizeRemoteStoredValue(key, value) {
   const raw = normalizeStoredValue(value);
   if (!serverProtectedKeys.has(key) || typeof raw !== "string") return raw;
@@ -160,6 +165,53 @@ function normalizeEnvelope(raw) {
 function pendingDisplayValue(envelope) {
   if (envelope && envelope.deleteIntent) return undefined;
   return envelope && typeof envelope.localValue === "string" ? envelope.localValue : undefined;
+}
+
+function invoicePendingNeedsRecovery(envelope) {
+  if (!envelope) return false;
+  if (envelope.v !== 2 || envelope.deleteIntent || envelope.force) return true;
+  try {
+    return ![envelope.baseExists ? envelope.baseValue : "[]", envelope.localValue]
+      .every(value => Array.isArray(JSON.parse(value)));
+  } catch (_) { return true; }
+}
+
+function projectInvoicePending(envelope, remoteValue) {
+  if (!envelope || typeof remoteValue !== "string") return null;
+  try {
+    const canonical = JSON.parse(remoteValue);
+    if (!Array.isArray(canonical)) return null;
+    // An old queue without a trustworthy base is recoverable work, not evidence
+    // that its whole ledger should hide current payments on unrelated invoices.
+    if (invoicePendingNeedsRecovery(envelope)) return remoteValue;
+    const base = JSON.parse(envelope.baseExists ? envelope.baseValue : "[]"), local = JSON.parse(envelope.localValue);
+    if (!Array.isArray(base) || !Array.isArray(local)) return remoteValue;
+    const normalized = normalizeInvoiceProjectionIntent(base, local, canonical);
+    const merged = mergeStoredState("sps_invoices", envelope.baseExists ? envelope.baseValue : undefined,
+      JSON.stringify(normalized), remoteValue, { prefer: "local" }).value;
+    let authorityBase = base;
+    try {
+      const retained = JSON.parse(envelope.invoiceProjectionBaseValue);
+      if (Array.isArray(retained)) authorityBase = retained;
+    } catch (_) {}
+    return JSON.stringify(projectInvoiceAccountingAuthority(authorityBase, JSON.parse(merged), canonical));
+  } catch (_) { return null; }
+}
+
+function projectInvoiceDisplay(displayedValue, remoteValue) {
+  const pending = _pending.sps_invoices;
+  if (!pending) return displayedValue;
+  const projection = projectInvoicePending(pending, _confirmed.sps_invoices ?? remoteValue);
+  if (projection === null) return displayedValue;
+  // A React edit may not have reached its save effect yet. Only replace fields
+  // still equal to the retained intent; changes since that intent stay visible
+  // and will be saved as real new work by the hook.
+  try {
+    const merged = mergeStoredState("sps_invoices", pending.localValue, displayedValue, projection, { prefer: "local" }).value;
+    // The hook's save fence compares serialized values. Preserve the receipt's
+    // exact field order when the merged display has no real unstaged change.
+    return stableInvoiceReviewJSON(JSON.parse(merged)) === stableInvoiceReviewJSON(JSON.parse(projection)) ? projection : merged;
+  } catch (_) { return displayedValue; }
 }
 
 function mergePendingSources(source) {
@@ -389,7 +441,8 @@ async function hydrateFromIDB() {
       const value = pendingDisplayValue(_pending[key]);
       if (_pending[key].deleteIntent && _pending[key].status !== "conflict") delete _cache[key];
       else if (_pending[key].deleteIntent && hasOwn(_confirmed, key)) _cache[key] = _confirmed[key];
-      else if (value !== undefined) _cache[key] = value;
+      else if (value !== undefined) _cache[key] = key === "sps_invoices"
+        ? (projectInvoicePending(_pending[key], _confirmed[key]) ?? value) : value;
       if (_pending[key].status === "conflict" || _pending[key].status === "legacy") {
         _conflicts[key] = _pending[key];
         notifyConflict(key, _pending[key].conflicts || [{ path: "$", kind: "legacy-base-unknown" }]);
@@ -459,6 +512,7 @@ function resetForIdentity() {
   _initRetryAt = 0;
   _initLastError = null;
   _retryAfterAt = 0;
+  _invoiceReceiptVersion = 0;
   clearObject(_cacheAt);
   clearObject(_chains);
 }
@@ -721,7 +775,8 @@ async function init() {
         _versions[row.key] = Number(row.version) || 0;
         _exists[row.key] = true;
         const pending = _pending[row.key];
-        if (pending && pending.deleteIntent && pending.status === "conflict") _cache[row.key] = value;
+        if (pending && row.key === "sps_invoices") _cache[row.key] = projectInvoicePending(pending, value) ?? pendingDisplayValue(pending);
+        else if (pending && pending.deleteIntent && pending.status === "conflict") _cache[row.key] = value;
         else if (!pending && !(_cacheAt[row.key] > _initSelectAt)) _cache[row.key] = value;
       }
       _loaded = true;
@@ -762,7 +817,7 @@ async function init() {
 }
 
 function stagePending(key, value, options = {}) {
-  const localValue = normalizeStoredValue(value);
+  let localValue = normalizeStoredValue(value);
   if (localValue === undefined) throw new Error("store.set requires a JSON value");
   const now = Date.now();
   const existing = _pending[key];
@@ -775,6 +830,10 @@ function stagePending(key, value, options = {}) {
   if (existing && existing.v !== 2) {
     // A pre-versioning queue item has no trustworthy merge base. Preserve it as a visible conflict
     // even if the user makes another edit; silently upgrading it would discard part of that work.
+    if (key === "sps_invoices" && hasOwn(options, "projectedBaseValue")) {
+      localValue = mergeStoredState(key, normalizeStoredValue(options.projectedBaseValue), localValue,
+        existing.localValue, { prefer: "local" }).value;
+    }
     envelope = { ...existing, opId: newOpId(), localValue, status: "legacy", updatedAt: now };
   } else if (existing && existing.v === 2) {
     // Display-only refreshes can include server changes that were never part of the user's intent.
@@ -790,11 +849,22 @@ function stagePending(key, value, options = {}) {
         { prefer: "local" }
       ).value
       : undefined;
+    if (key === "sps_invoices" && hasOwn(options, "projectedBaseValue") && typeof _confirmed[key] === "string") {
+      // The displayed canonical accounting may deliberately hide a held device
+      // proposal. Apply only the newly typed delta to that recoverable intent;
+      // saving an unrelated note must not silently erase its proposed charges.
+      const retained = mergeStoredState(key, existing.baseExists ? existing.baseValue : undefined,
+        existing.localValue, _confirmed[key], { prefer: "local" }).value;
+      localValue = mergeStoredState(key, normalizeStoredValue(options.projectedBaseValue), localValue,
+        retained, { prefer: "local" }).value;
+    }
     envelope = {
       ...existing,
       ...(hasOwn(options, "projectedBaseValue") ? {
         baseExists: projectedBase !== undefined,
         baseValue: projectedBase === undefined ? null : projectedBase,
+        ...(key === "sps_invoices" ? { invoiceProjectionBaseValue: existing.invoiceProjectionBaseValue
+          ?? (existing.baseExists ? existing.baseValue : "[]") } : {}),
       } : {}),
       opId: newOpId(),
       localValue,
@@ -837,7 +907,8 @@ function stagePending(key, value, options = {}) {
   recalculateRetryWindow();
   if (envelope.status === "conflict" || envelope.status === "legacy") _conflicts[key] = envelope;
   else delete _conflicts[key];
-  _cache[key] = localValue;
+  _cache[key] = key === "sps_invoices" && (envelope.v !== 2 || envelope.invoiceProjectionBaseValue)
+    ? (projectInvoicePending(envelope, _confirmed[key]) ?? localValue) : localValue;
   _cacheAt[key] = now;
   persistPending();
   return envelope;
@@ -894,7 +965,7 @@ function setConflict(key, envelope, conflicts) {
   if (next.deleteIntent) {
     if (hasOwn(_confirmed, key)) _cache[key] = _confirmed[key];
     else delete _cache[key];
-  } else _cache[key] = next.localValue;
+  } else _cache[key] = key === "sps_invoices" ? (projectInvoicePending(next, _confirmed[key]) ?? next.localValue) : next.localValue;
   persistPending();
   notifyConflict(key, safe);
   return { ok: false, conflict: true, key, conflicts: safe };
@@ -1246,7 +1317,10 @@ async function refreshKey(key, identityVersion = _identityVersion) {
     // untouched: this projection is not a new edit, a rebase, or permission to commit either side.
     const pending = _pending[key];
     adoptRemote(key, remote, !pending);
-    if (pending?.v === 2 && !pending.deleteIntent && !pending.force) {
+    if (pending && key === "sps_invoices") {
+      const projected = projectInvoicePending(pending, remote.value);
+      if (projected !== null) _cache[key] = projected;
+    } else if (pending?.v === 2 && !pending.deleteIntent && !pending.force) {
       const projected = projectAcceptedReports(key, mergeEnvelopeWithRemote(key, pending, remote, "local").value, remote.value);
       if (projected === undefined) delete _cache[key];
       else _cache[key] = projected;
@@ -1717,9 +1791,16 @@ function acceptInvoiceReviewResolution(receipt, identity, options = {}) {
       ok: false, serverConfirmed: true, targetChanged: true,
       error: new Error("The QuickBooks choice was saved, but this invoice was edited again on this device. Your newer work is preserved; reopen the invoice to compare it."),
     });
-    if (!equal(target(displayed), expected) && !equal(target(displayed), invoice)) return changedResult();
-
     const pending = _pending[key];
+    let unchangedPendingProjection = false;
+    try {
+      const originalTarget = pending && target(readList(pending.localValue));
+      const projected = pending && projectInvoicePending(pending, _confirmed[key]);
+      unchangedPendingProjection = equal(originalTarget, expected) && projected !== null
+        && equal(target(displayed), target(readList(projected)));
+    } catch (_) {}
+    if (!equal(target(displayed), expected) && !equal(target(displayed), invoice) && !unchangedPendingProjection) return changedResult();
+
     let nextPending = pending;
     let pendingBase, pendingLocal;
     if (pending) {
@@ -1763,6 +1844,7 @@ function acceptInvoiceReviewResolution(receipt, identity, options = {}) {
 
     const canReconstruct = currentVersion === before && after === before + 1 && equal(target(confirmed), beforeInvoice);
     const nextDisplay = replace(displayed);
+    _invoiceReceiptVersion = Math.max(_invoiceReceiptVersion, after);
     // Mutate before persisting so concurrent edits queued during the disk write
     // start from the resolved record. They receive a newer opId and stay intact.
     if (nextPending) {
@@ -1804,13 +1886,106 @@ function acceptInvoiceReviewResolution(receipt, identity, options = {}) {
   return run;
 }
 
+// A server refresh receipt contains the entire canonical ledger at one confirmed
+// revision. It is a read/adoption operation, never a new local whole-array edit.
+// Keep the original pending delta so a conflict on A cannot block fresh B, and so
+// choosing a side later still compares against the actual original merge base.
+function acceptInvoiceRefreshSnapshot(receipt, identity) {
+  const key = "sps_invoices";
+  let captured;
+  try { captured = JSON.parse(JSON.stringify(receipt)); } catch (_) {}
+  const prior = _chains[key] || Promise.resolve();
+  const run = (async () => {
+    try { await prior; } catch (_) {}
+    if (!isCurrentIdentity(identity)) return { ok: false, staleIdentity: true };
+    const before = captured?.beforeVersion, after = captured?.afterVersion;
+    const invoices = captured?.invoices;
+    const validIds = Array.isArray(invoices) && invoices.every(invoice => invoice
+      && typeof invoice === "object" && !Array.isArray(invoice)
+      && typeof invoice.id === "string" && invoice.id.trim());
+    if (captured?.ok !== true || captured.actorId !== identity.uid || captured.key !== key || captured.complete !== true || !validIds
+      || new Set(invoices.map(invoice => invoice.id)).size !== invoices.length
+      || !Number.isSafeInteger(before) || before < 0 || !Number.isSafeInteger(after) || after < before) {
+      return { ok: false, error: new Error("The refreshed invoice snapshot could not be verified. Retry QuickBooks refresh.") };
+    }
+    const hydration = await ensureHydrate();
+    if (!hydration?.ok) return pendingDurabilityFailure(hydration?.error);
+    try { await awaitPendingDurability(); }
+    catch (error) { return pendingDurabilityFailure(error); }
+    if (!isCurrentIdentity(identity)) return { ok: false, staleIdentity: true };
+    const currentVersion = Number(_versions[key]) || 0;
+    const currentValue = () => {
+      let parsedValue, confirmedParsedValue;
+      try { parsedValue = JSON.parse(_cache[key] || "[]"); } catch (_) {}
+      try { confirmedParsedValue = JSON.parse(_confirmed[key] || "[]"); } catch (_) {}
+      const confirmedUsable = (Number(_versions[key]) || 0) >= _invoiceReceiptVersion && Array.isArray(confirmedParsedValue);
+      return { value: _cache[key], parsedValue: Array.isArray(parsedValue) ? parsedValue : null,
+        confirmedValue: confirmedUsable ? _confirmed[key] : null,
+        confirmedParsedValue: confirmedUsable ? confirmedParsedValue : null,
+        version: Number(_versions[key]) || 0, pending: !!_pending[key],
+        recoveryPending: invoicePendingNeedsRecovery(_pending[key]) };
+    };
+    if (after < Math.max(currentVersion, _invoiceReceiptVersion)) {
+      return { ok: true, superseded: true, ...currentValue() };
+    }
+    const value = JSON.stringify(invoices);
+    const canonical = item => Array.isArray(item) ? item.map(canonical)
+      : item && typeof item === "object" ? Object.fromEntries(Object.keys(item).sort().map(name => [name, canonical(item[name])])) : item;
+    const equal = (left, right) => JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
+    let confirmed;
+    try { confirmed = JSON.parse(_confirmed[key]); } catch (_) {}
+    if (currentVersion === after && _exists[key] && !equal(confirmed, invoices)) {
+      return { ok: false, error: new Error("The invoice refresh disagrees with an already confirmed revision. Retry QuickBooks refresh.") };
+    }
+    adoptRemote(key, { exists: true, value, version: after }, !_pending[key]);
+    _invoiceReceiptVersion = Math.max(_invoiceReceiptVersion, after);
+    const projectCurrent = () => {
+      const pending = _pending[key];
+      if (!pending) return false;
+      const projected = projectInvoicePending(pending, _confirmed[key]);
+      if (projected === null) return true;
+      _cache[key] = projected;
+      return false;
+    };
+    let projectionBlocked = projectCurrent();
+    _cacheAt[key] = Date.now();
+    // saveSnapshot captures the account and exact confirmed data before its first
+    // await. Verify its durable revision; a newer same-account snapshot is safe.
+    try {
+      await saveSnapshot();
+      const saved = await idb.getVerified(snapshotIdbKey(identity.uid));
+      if (!isCurrentIdentity(identity)) return { ok: false, staleIdentity: true };
+      const savedVersion = saved?.versions?.[key];
+      if (saved?.uid !== identity.uid || !Number.isSafeInteger(savedVersion) || savedVersion < after
+        || (savedVersion === after && !equal(JSON.parse(saved.data?.[key]), invoices))) {
+        throw new Error("The refreshed invoice copy could not be verified on this device.");
+      }
+    } catch (error) {
+      if (!isCurrentIdentity(identity)) return { ok: false, staleIdentity: true };
+      return { ...pendingDurabilityFailure(error), serverConfirmed: true, ...currentValue() };
+    }
+    if (!isCurrentIdentity(identity)) return { ok: false, staleIdentity: true };
+    // A form may stage more work while IndexedDB is writing. Project that newest
+    // intent rather than restoring the display captured at refresh start.
+    projectionBlocked = projectCurrent();
+    return { ok: true, serverConfirmed: true, durable: true, projectionBlocked,
+      ...currentValue(), superseded: (Number(_versions[key]) || 0) > after };
+  })();
+  _chains[key] = run.then(() => {}, () => {});
+  return run;
+}
+
 export const store = {
   captureIdentity() { return { uid: _uid, generation: _identityVersion }; },
   isCurrentIdentity,
   acceptCreatedClient,
   acceptInvoiceReviewResolution,
+  acceptInvoiceRefreshSnapshot,
   // Display-only overlay; neither stages nor resolves the original durable local intent.
-  projectDisplay(key, displayedValue, remoteValue) { return projectAcceptedReports(key, displayedValue, remoteValue); },
+  projectDisplay(key, displayedValue, remoteValue) {
+    return key === "sps_invoices" ? projectInvoiceDisplay(displayedValue, remoteValue)
+      : projectAcceptedReports(key, displayedValue, remoteValue);
+  },
   setUser(uid) {
     const nextUid = uid || null;
     if (nextUid === _uid) return;

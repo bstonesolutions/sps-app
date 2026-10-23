@@ -12,6 +12,8 @@ import {
 import {
   rankQuickBooksInvoiceCandidates,
 } from "../../invoiceReconciliationActions.js";
+import { readInvoiceWriteProposal } from "../_invoice-write-candidates.js";
+import { persistQuickBooksInvoiceRefresh } from "../_quickbooks-invoice-refresh.js";
 import { requireUser } from "../_auth.js";
 import { requireCapability } from "../_staff-auth.js";
 import { resolveInvoiceReviewOnServer, validateInvoiceReviewResolutionRequest } from "../_invoice-review-resolution.js";
@@ -19,6 +21,13 @@ import { resolveInvoiceReviewOnServer, validateInvoiceReviewResolutionRequest } 
 export default async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
+
+  if (req.method === "POST" && req.body?.mode === "invoice-write-proposal") {
+    const actor = await requireCapability(req, res, "invoiceCreate", "saved invoice changes");
+    if (!actor) return;
+    try { return res.status(200).json(await readInvoiceWriteProposal(req.body)); }
+    catch (error) { return res.status(error.status || 503).json({ok:false, code:error.code, error:error.message}); }
+  }
 
   // This narrow mutation authorizes staff capability independently of the
   // legacy read-only sync route. Neither browser accounting content nor its
@@ -191,6 +200,13 @@ export default async function handler(req, res) {
     }
   }
 
+  // Full ledger reads also reconcile shared invoices on the server. Portal link
+  // and targeted inspection branches above remain read-only.
+  if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
+  const refreshActor = await requireCapability(req, res, "invoiceView", "invoice refresh");
+  if (!refreshActor) return;
+  const startedAt = new Date().toISOString();
+
   try {
     const query = (entity, options = {}) => fetchAllQuickBooksQueryPages({
       fetchImpl: fetch,
@@ -313,7 +329,12 @@ export default async function handler(req, res) {
       },
     });
 
+    const invoiceRefresh = await persistQuickBooksInvoiceRefresh({
+      invoices: mappedInvoices, customers: mappedCustomers, reconciliation, realmId: realm_id,
+    }, { actorId: refreshActor.id, startedAt });
+
     res.status(200).json({
+      invoiceRefresh,
       invoices: mappedInvoices,
       customers: mappedCustomers,
       creditMemos: mappedCreditMemos,
@@ -330,6 +351,6 @@ export default async function handler(req, res) {
 
   } catch (err) {
     console.error('QB sync error:', err);
-    res.status(500).json({ error: 'Failed to fetch from QuickBooks: ' + err.message });
+    res.status(err.status || 503).json({ error: err.code ? err.message : 'QuickBooks refresh could not be confirmed. Retry to read the saved result.', ...(err.code ? { code: err.code } : {}) });
   }
 }

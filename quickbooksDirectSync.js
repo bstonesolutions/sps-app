@@ -12,7 +12,7 @@ export function quickBooksInvoiceSyncEligibility(invoice, client) {
   if (!["draft", "sent", "overdue"].includes(text(invoice?.status).toLowerCase()) || invoice?.payment || invoice?.partial || invoice?.payments?.length || invoice?.paidDate || invoice?.paidAt) {
     return { eligible: false, reason: "Review payments or invoice status in the editor" };
   }
-  if (invoice?.qbNeedsReview || invoice?.qbReviewRequired || invoice?.qbConflict || invoice?.qbRemoteChangesPending || invoice?.qbPendingRemote || invoice?.qbPendingRemoteInvoice || invoice?.qbDuplicate || invoice?.qbSyncConflict) {
+  if (invoice?.qbWriteReview || invoice?.qbNeedsReview || invoice?.qbReviewRequired || invoice?.qbConflict || invoice?.qbRemoteChangesPending || invoice?.qbPendingRemote || invoice?.qbPendingRemoteInvoice || invoice?.qbDuplicate || invoice?.qbSyncConflict) {
     return { eligible: false, reason: "Review the QuickBooks changes in the editor" };
   }
   if (invoice?.qbAccountingExcluded) return { eligible: false, reason: "Excluded from QuickBooks accounting" };
@@ -114,9 +114,9 @@ export async function syncInvoiceToQuickBooks({ invoice, client, invoicing, pers
   let writeStarted = false;
   let confirmedResult = null;
   let intent = "";
-  const persist = async (mutate) => {
+  const persist = async (mutate, options) => {
     if (typeof persistInvoice !== "function") throw new Error("SPS cannot confirm invoice changes right now. Nothing was sent to QuickBooks.");
-    const confirmed = await persistInvoice(invoice.id, mutate);
+    const confirmed = await persistInvoice(invoice.id, mutate, options);
     if (!confirmed || text(confirmed.id) !== text(invoice.id)) throw new Error("SPS could not confirm this invoice. Close this panel and try again.");
     return confirmed;
   };
@@ -132,7 +132,7 @@ export async function syncInvoiceToQuickBooks({ invoice, client, invoicing, pers
   });
   try {
     submitted = await persist((current) => confirmQuickBooksSyncCandidate(current, invoice, client, invoicing, { draftsOnly }));
-    const payload = buildQuickBooksInvoicePayload(submitted, client, invoicing);
+    const payload = buildQuickBooksInvoicePayload(submitted, client, invoicing, { metadataBase: submitted });
     intent = quickBooksInvoiceIntentSignature(payload);
     writeStarted = true;
     const { response, data } = await request(submitted.qbId ? "update-invoice" : "create-invoice", payload);
@@ -149,12 +149,24 @@ export async function syncInvoiceToQuickBooks({ invoice, client, invoicing, pers
       return { status: "uncertain", message: "QuickBooks changed. Review this invoice in the editor" };
     }
     if (!response.ok || data.error) {
-      if (data.createOutcomeUnknown) throw new Error(data.error || "The QuickBooks response was interrupted.");
+      if (data.createOutcomeUnknown || data.updateOutcomeUnknown) throw new Error(data.error || "The QuickBooks response was interrupted.");
       await saveFailure({ error: data.error || "QuickBooks rejected this invoice.", code: data.code }, {}, false).catch(() => {});
       return { status: "failed", message: data.error || "QuickBooks rejected this invoice" };
     }
     if (data.success !== true || !text(data.qbId)) throw new Error("QuickBooks returned an incomplete response. Review before retrying.");
     confirmedResult = data;
+    if (data.invoiceRefresh) {
+      // The server already saved accounting. Adopt its full receipt without
+      // comparing the refreshed target with the pre-request draft or writing a
+      // second whole ledger that would manufacture a race conflict.
+      const confirmed = await persist(null, { invoiceRefresh: data.invoiceRefresh,
+        expectedQuickBooksId: data.qbId, expectedInvoice: submitted });
+      return confirmed.qbNeedsReview || confirmed.qbWriteReview
+        ? { status: "uncertain", message: "In QuickBooks. A saved change still needs review", invoice: confirmed }
+        : { status: "synced", message: "In QuickBooks. No customer message sent", invoice: confirmed };
+    }
+    if (data.appSyncPending) return { status: "uncertain", serverConfirmed: true,
+      message: "Saved in QuickBooks. Refresh SPS before trying another sync" };
     const confirmed = await persist((current) => applyConfirmedQuickBooksSync(current, submitted, data, client, invoicing));
     return confirmed.qbNeedsReview
       ? { status: "uncertain", message: "In QuickBooks. Changes found during syncing need review", invoice: confirmed }
@@ -163,6 +175,8 @@ export async function syncInvoiceToQuickBooks({ invoice, client, invoicing, pers
     // A preflight rejection happens before any accounting write; leave the newer
     // SPS record exactly as it is and require a fresh review.
     if (!writeStarted) return { status: "failed", message: error?.message || "Review the invoice before syncing" };
+    if (confirmedResult?.invoiceRefresh) return { status: "uncertain", serverConfirmed: true,
+      message: "Saved in QuickBooks. Refresh SPS to confirm this invoice before syncing again" };
     const linkedUpdate = !!submitted.qbId;
     const extras = confirmedResult ? {
       qbId: confirmedResult.qbId,

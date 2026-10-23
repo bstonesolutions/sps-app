@@ -18,7 +18,8 @@ export function invoiceNeedsReconciliationReview(invoice, options = {}) {
   const status = normalizedStatus(invoice, options.effectiveStatus);
 
   return (
-    invoice.qbNeedsReview === true
+    !!invoice.qbWriteReview?.candidateId
+    || invoice.qbNeedsReview === true
     || invoice.qbSyncStatus === "missing-remote"
     || (
       !asText(invoice.qbId)
@@ -43,6 +44,13 @@ export function invoiceReconciliationIssue(invoice, options = {}) {
     errorCode: asText(invoice?.qbSyncErrorCode),
     attemptedAt: asText(invoice?.qbSyncAttemptedAt),
   };
+
+  if (invoice?.qbWriteReview?.candidateId) {
+    return { code:"saved-device-change", title:"A device change is held for review",
+      reason:"The confirmed QuickBooks invoice is shown. A different version sent by a device was saved separately so it cannot replace the accounting record.",
+      nextStep:"Open this invoice to compare the saved change or keep the QuickBooks version.",
+      actionLabel:"Compare saved change", relatedActionLabel:"", relatedInvoiceId:"", qbId, ...diagnostics };
+  }
 
   if (syncStatus === "duplicate-local-qb-id") {
     return {

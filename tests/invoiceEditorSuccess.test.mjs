@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
+import { invoiceSpsMetadata, mergeInvoiceSpsMetadataResult } from "../invoiceMetadata.js";
+import { stableInvoiceReviewJSON } from "../invoiceReviewIdentity.js";
 
 const app = await readFile(new URL("../App.jsx", import.meta.url), "utf8");
 const editorStart = app.indexOf("function InvoiceEditor");
@@ -22,6 +24,12 @@ function finishHarness(overrides = {}) {
     client: { id: draft.clientId, name: "Sample client" },
     progressBaselineRef: { current: JSON.stringify(draft) },
     pendingSpsSaveRef: { current: null },
+    pendingSpsReceiptRef: { current: null },
+    pendingQuickBooksWriteRef: { current: null },
+    store: {captureIdentity: () => ({uid:"owner",generation:1}), isCurrentIdentity: identity => identity?.uid === "owner" && identity?.generation === 1},
+    invoiceSpsMetadata, mergeInvoiceSpsMetadataResult, stableInvoiceReviewJSON,
+    saveQuickBooksRecovery: () => true, clearQuickBooksRecovery: () => {},
+    QB_API: "/api/quickbooks", authHeaders: async () => ({}),
     setSpsSavePending: value => { state.spsSavePending = value; },
     onSave: async invoice => { state.saved.push(invoice); return invoice; },
     setInv: invoice => { state.inv = invoice; },
@@ -84,7 +92,9 @@ test("a current maintenance preflight rejection still prevents QB creation and t
   const state = { qbState: "idle", qbMsg: "", finishes: 0, requests: 0 };
   const deps = {
     invoiceSaveBusyRef: { current: false },
+    store: {captureIdentity: () => ({uid:"owner",generation:1})},
     pendingSpsSaveRef: { current: null },
+    pendingSpsReceiptRef: { current: null },
     progressState: "idle", qbState: "idle", selectedClientSnapshot: () => draft,
     editRevisionRef: { current: 0 }, needsCoverageCheck: true,
     setQbState: value => { state.qbState = value; }, setQbMsg: value => { state.qbMsg = value; },
@@ -114,7 +124,7 @@ test("invoice success waits for the SPS receipt and passes the editor's original
   assert.equal(state.persisted, false);
   assert.equal(state.sendStep, null);
   assert.equal(state.qbState, "sending");
-  assert.deepEqual(request, { invoice: synced, options: { confirmedSave: true, baselineJson: JSON.stringify(draft) } });
+  assert.deepEqual(request, { invoice: synced, options: { confirmedSave: true, invoiceRefresh: null, baselineJson: JSON.stringify(draft) } });
   finishReceipt(synced);
   assert.equal((await pending).ok, true);
   assert.equal(state.persisted, true);
@@ -141,7 +151,7 @@ test("Retry Save after either local save failure or QuickBooks success retries o
   const pendingSpsSaveRef = { current: checkpoint };
   const checkpoints = [];
   const dependencies = {
-    invoiceSaveBusyRef: { current: false }, pendingSpsSaveRef, progressState: "idle", qbState: "error",
+    invoiceSaveBusyRef: { current: false }, store: {captureIdentity: () => ({uid:"owner",generation:1})}, pendingSpsSaveRef, progressState: "idle", qbState: "error",
     selectedClientSnapshot() { assert.fail("Keep the confirmed accounting snapshot"); },
     setQbState() {}, setQbMsg() {},
     finishSave: async invoice => { checkpoints.push(invoice); },
@@ -151,4 +161,123 @@ test("Retry Save after either local save failure or QuickBooks success retries o
   assert.deepEqual(checkpoints, [checkpoint]);
   assert.equal(dependencies.invoiceSaveBusyRef.current, false);
   }
+});
+
+const saveIdentity = {uid:"owner",generation:1};
+const refreshed = invoice => ({ok:true, actorId:"owner", key:"sps_invoices", complete:true, beforeVersion:3,afterVersion:4,invoices:[invoice]});
+
+test("QB success without an SPS receipt freezes its identity and retries only GET sync", async () => {
+  const calls = []; let available = false;
+  const canonical = {...synced, id:"qb_sample-qb"};
+  const {state,deps,finish} = finishHarness({
+    fetch: async (url,options) => { calls.push([url,options.method]); return {ok:available,json:async()=>available ? {invoiceRefresh:refreshed(canonical)} : {error:"SPS unavailable"}}; },
+    onSave: async (invoice,options) => { assert.ok(options.invoiceRefresh); state.saved.push(invoice); return invoice; },
+  });
+  assert.equal((await finish(synced,null,{confirmed:true,identity:saveIdentity})).ok,false);
+  assert.equal(state.saved.length,0,"no generic ledger save may follow a known QB success");
+  assert.equal(state.inv.qbId,synced.qbId);
+  assert.equal(state.spsSavePending,true);
+  assert.equal(state.sendStep,null);
+  available = true;
+  assert.equal((await finish(deps.pendingSpsSaveRef.current)).ok,true);
+  assert.deepEqual(calls,[["/api/quickbooks/sync","GET"],["/api/quickbooks/sync","GET"]]);
+  assert.equal(state.inv.id,canonical.id,"follow the unique imported identity rather than duplicate it");
+  assert.equal(state.spsSavePending,false);
+  assert.equal(deps.pendingQuickBooksWriteRef.current,null);
+});
+
+test("known QB success with a receipt never performs a second accounting request", async () => {
+  const receipt=refreshed(synced);
+  const {state,finish}=finishHarness({onSave: async (invoice,options)=>{assert.equal(options.invoiceRefresh,receipt);return invoice;}});
+  assert.equal((await finish(synced,receipt,{confirmed:true,identity:saveIdentity})).ok,true);
+  assert.equal(state.requests,0);
+  assert.equal(state.inv,synced);
+});
+
+test("missing receipt recovery preserves notes and line cost using only an SPS checkpoint", async () => {
+  const canonical={...synced, notes:"Old note"};
+  const edited={...synced, notes:"Work completed at the pond",lineItems:synced.lineItems.map(line=>({...line,unitCost:25,costKnown:true}))};
+  const writes=[];
+  const {state,finish}=finishHarness({
+    progressBaselineRef:{current:JSON.stringify({...draft,notes:"Old note"})},
+    fetch:async(url,options)=>{assert.equal(options.method,"GET");return {ok:true,json:async()=>({invoiceRefresh:refreshed(canonical)})};},
+    onSave:async()=>canonical,
+    onPersistProgress:async(invoice,options)=>{writes.push([invoice,options]);return invoice;},
+  });
+  assert.equal((await finish(edited,null,{confirmed:true,identity:saveIdentity})).ok,true);
+  assert.equal(writes.length,1);
+  assert.equal(writes[0][0].notes,edited.notes);
+  assert.equal(writes[0][0].lineItems[0].unitCost,25);
+  assert.equal(writes[0][0].total,canonical.total);
+  assert.equal(writes[0][1].baselineJson,JSON.stringify(canonical));
+  assert.equal(state.inv.notes,edited.notes);
+});
+
+test("missing receipt recovery cannot adopt a different account or ambiguous QB identity", async () => {
+  for(const kind of ["account","duplicate","missing"]) {
+    const canonical=kind==="duplicate"?[synced,{...synced,id:"alias"}]:[];
+    const {state,finish}=finishHarness({
+      fetch:async()=>({ok:true,json:async()=>({invoiceRefresh:{...refreshed(synced),invoices:canonical}})}),
+      ...(kind==="account"?{store:{isCurrentIdentity:()=>false}}:{}),
+    });
+    assert.equal((await finish(synced,null,{confirmed:true,identity:saveIdentity})).ok,false);
+    assert.equal(state.saved.length,0);
+    assert.equal(state.sendStep,null);
+  }
+});
+
+test("a remaining saved proposal stays in review after QB confirmation", async () => {
+  const canonical={...synced,qbWriteReview:{candidateId:"12",reason:"unconfirmed-accounting-change"}};
+  const {state,finish}=finishHarness({onSave:async()=>canonical});
+  const result=await finish(synced,refreshed(canonical),{confirmed:true,identity:saveIdentity});
+  assert.equal(result.reviewRequired,true);
+  assert.equal(state.sendStep,null);
+  assert.equal(state.closed,0);
+  assert.equal(state.inv.qbWriteReview.candidateId,"12");
+  assert.match(state.qbMsg,/separate saved SPS change/);
+});
+
+test("a confirmed accounting recovery remains journaled until its SPS save is verified", async () => {
+  let journal=null; let clears=0;
+  const {deps,finish}=finishHarness({
+    saveQuickBooksRecovery:value=>{journal=structuredClone(value);return true;},
+    clearQuickBooksRecovery:()=>{clears++;},
+    fetch:async()=>({ok:false,json:async()=>({error:"Offline"})}),
+  });
+  assert.equal((await finish(synced,null,{confirmed:true,identity:saveIdentity})).ok,false);
+  assert.equal(journal.invoice.qbId,synced.qbId);
+  assert.equal(journal.baselineJson,JSON.stringify(draft));
+  assert.equal(clears,0);
+  assert.equal(deps.pendingQuickBooksWriteRef.current.durable,true);
+});
+
+test("a recovery journal failure tells the owner to keep the editor open", async () => {
+  const {state,finish}=finishHarness({saveQuickBooksRecovery:()=>false,fetch:async()=>{throw new Error("Offline");}});
+  await finish(synced,null,{confirmed:true,identity:saveIdentity});
+  assert.match(state.qbMsg,/Keep this editor open/);
+  assert.equal(state.sendStep,null);
+});
+
+test("reopening a recovered imported invoice finds only its own account's exact QB journal", () => {
+  const start=app.indexOf("  useEffect(() => {",app.indexOf("  const clearQuickBooksRecovery =",editorStart));
+  const end=app.indexOf("  const loadReviewInvoiceNumbers",start);
+  const effect=app.slice(start,end);
+  const ownKey="sps_invoice_editor_qb_recovery:owner:new:all";
+  const records=new Map([[ownKey,JSON.stringify({uid:"owner",invoice:synced,baselineJson:JSON.stringify(draft)})],
+    ["sps_invoice_editor_qb_recovery:other:new:all",JSON.stringify({uid:"other",invoice:{...synced,notes:"other account"}})]]);
+  const storage={get length(){return records.size;},key:index=>[...records.keys()][index],getItem:key=>records.get(key)||null};
+  const state={};
+  const deps={billingReview:false,invoice:{...synced,id:"qb_sample-qb"},store:{captureIdentity:()=>saveIdentity},
+    quickBooksRecoveryKeyRef:{current:"sps_invoice_editor_qb_recovery:owner:qb_sample-qb"},localStorage:storage,
+    pendingQuickBooksWriteRef:{current:null},pendingSpsSaveRef:{current:null},useEffect:fn=>fn(),
+    setInv:value=>{state.inv=value;},setSpsSavePending:value=>{state.pending=value;},setQbState(){},setQbMsg(){}};
+  new Function(...Object.keys(deps),effect)(...Object.values(deps));
+  assert.equal(deps.quickBooksRecoveryKeyRef.current,ownKey);
+  assert.equal(deps.pendingQuickBooksWriteRef.current.needsRefresh,true);
+  assert.deepEqual(state.inv,synced);
+  assert.equal(state.pending,true);
+  records.delete(ownKey);state.inv=null;
+  deps.quickBooksRecoveryKeyRef.current="sps_invoice_editor_qb_recovery:owner:qb_sample-qb";
+  new Function(...Object.keys(deps),effect)(...Object.values(deps));
+  assert.equal(state.inv,null,"another account's journal is never restored");
 });

@@ -10,7 +10,8 @@ import {
 import { mapQuickBooksInvoice } from "./invoice-mapper.js";
 import { buildUsTxnTaxDetail } from "./qb-tax.js";
 import { getValidAccessToken, QB_API_BASE, setCors } from "./qb-store.js";
-import { requireUser } from "../_auth.js";
+import { requireCapability } from "../_staff-auth.js";
+import { confirmedQuickBooksWriteResponse } from "../_quickbooks-invoice-write-receipt.js";
 import { quickBooksMaintenanceGuard } from "./maintenance-guard.js";
 import { invoiceServiceDescriptionIssue, formatInvoiceServiceLineDescription } from "../../invoiceServiceDescription.js";
 import { BILLING_REVIEW_CREATE_CONTEXT } from "../_billing-review-context.js";
@@ -25,7 +26,7 @@ export default async function handler(req, res) {
   }
 
   // Require an authenticated caller before any privileged QuickBooks work.
-  const _u = await requireUser(req, res);
+  const _u = await requireCapability(req, res, "invoiceCreate", "creating invoices in QuickBooks");
   if (!_u) return;
 
   let { invoice } = req.body;
@@ -290,7 +291,10 @@ export default async function handler(req, res) {
     const created = await createRes.json();
     qbId = created?.Invoice?.Id;
     if (!qbId) throw new Error("QuickBooks returned no invoice ID");
-    if (directClaim) await settleDirectInvoiceAccountingClaim(directClaim, { state: "created", qbId: String(qbId) });
+    if (directClaim) {
+      try { await settleDirectInvoiceAccountingClaim(directClaim, { state: "created", qbId: String(qbId) }); }
+      catch (claimError) { console.error("QB invoice created but its SPS claim needs recovery:", claimError.message); }
+    }
     let paymentLink = created?.Invoice?.InvoiceLink || null;
     let canonicalInvoice = created?.Invoice || null;
 
@@ -304,7 +308,7 @@ export default async function handler(req, res) {
         const getRes = await fetch(`${base}/invoice/${qbId}?minorversion=65`, { headers });
         if (getRes.ok) {
           const got = await getRes.json();
-          canonicalInvoice = got?.Invoice || canonicalInvoice;
+          if (String(got?.Invoice?.Id || "") === String(qbId)) canonicalInvoice = got.Invoice;
           paymentLink = canonicalInvoice?.InvoiceLink || paymentLink;
         }
       } catch (linkErr) {
@@ -312,6 +316,9 @@ export default async function handler(req, res) {
       }
     }
 
+    const appReceipt = await confirmedQuickBooksWriteResponse({ quickBooksInvoice: canonicalInvoice, expectedQuickBooksId: qbId,
+      sourceInvoice: invoice, trustedSource: reviewContext?.canonicalInvoice,
+      actorId: _u.id, action: "quickbooks-create", realmId: realm_id });
     return res.status(200).json({
       qbId,
       paymentLink: paymentLink || webLink(qbId),
@@ -322,6 +329,7 @@ export default async function handler(req, res) {
       qbRequestId,
       hasOnlineLink: !!paymentLink,
       success: true,
+      ...appReceipt,
     });
 
   } catch (err) {
@@ -334,7 +342,8 @@ export default async function handler(req, res) {
         paymentLink: webLink(qbId),
         hasOnlineLink: false,
         success: true,
-        warning: "Invoice created, but the payment link could not be confirmed.",
+        appSyncPending: true,
+        warning: "QuickBooks created the invoice. Refresh SPS to confirm its details; do not create it again.",
       });
     }
     if (createWriteStarted) {

@@ -59,14 +59,17 @@ function quickBooksTokenRow() {
   }];
 }
 
-function installAuthAndTokenMocks(routeFetch) {
+function installAuthAndTokenMocks(routeFetch, { canonicalFailure = false, teamRole = "owner" } = {}) {
   let reviewClaims = [];
   let reviewVersion = 1;
+  let invoiceValues = [];
+  let invoiceVersion = 1;
   globalThis.fetch = async (url, options = {}) => {
     const href = String(url);
     if (href === "https://supabase.test/auth/v1/user") {
       return jsonResponse({ id: "owner-1", email: "owner@example.test" });
     }
+    if (href.includes("key=eq.sps_team")) return jsonResponse([{ value: JSON.stringify([{ id: "staff-owner", email: "owner@example.test", role: teamRole }]) }]);
     if (href.startsWith("https://supabase.test/rest/v1/qb_tokens")) {
       return jsonResponse(quickBooksTokenRow());
     }
@@ -74,15 +77,25 @@ function installAuthAndTokenMocks(routeFetch) {
       const operation = JSON.parse(options.body).p_operations.find(row => row.key === "sps_billing_reviews");
       if (operation.expected_version !== reviewVersion) return jsonResponse([{ applied: false, outcome: "conflict" }]);
       reviewClaims = JSON.parse(operation.value); reviewVersion += 1;
-      return jsonResponse([{ applied: true, outcome: "applied", current_versions: { sps_billing_reviews: reviewVersion, sps_invoices: 1 } }]);
+      return jsonResponse([{ applied: true, outcome: "applied", current_versions: { sps_billing_reviews: reviewVersion, sps_invoices: invoiceVersion } }]);
+    }
+    if (href.endsWith("/rpc/sps_invoice_canonical_cas")) {
+      if (canonicalFailure) return jsonResponse({ error: "unavailable" }, 503);
+      const body = JSON.parse(options.body);
+      if (body.p_expected_version !== invoiceVersion) return jsonResponse([{ applied: false, outcome: "conflict", current_version: invoiceVersion }]);
+      invoiceValues = JSON.parse(body.p_value); invoiceVersion++;
+      return jsonResponse([{ applied: true, outcome: "applied", current_version: invoiceVersion, value: invoiceValues }]);
     }
     if (href.startsWith("https://supabase.test/rest/v1/app_state?")) {
       return jsonResponse(Object.entries({
         sps_clients: [{ id: "client-42", qbId: "42", name: "Generic Client" }],
-        sps_invoices: [], sps_schedule: [],
+        sps_invoices: invoiceValues, sps_schedule: [],
         sps_maintenance_billing: { version: 2, policies: {}, allocations: {} },
         sps_billing_reviews: reviewClaims,
-      }).map(([key, value]) => ({ key, value: JSON.stringify(value), version: key === "sps_billing_reviews" ? reviewVersion : 1 })));
+      }).filter(([key]) => {
+        const query = new URL(href).searchParams.get("key") || "";
+        return query.startsWith("eq.") ? query.slice(3) === key : !query.startsWith("in.(") || query.slice(4, -1).split(",").includes(key);
+      }).map(([key, value]) => ({ key, value: JSON.stringify(value), version: key === "sps_billing_reviews" ? reviewVersion : key === "sps_invoices" ? invoiceVersion : 1 })));
     }
     return routeFetch(href, options);
   };
@@ -117,6 +130,33 @@ function existingInvoice() {
       },
     }],
   };
+}
+
+for (const [operation, handler] of [["create", createInvoiceHandler], ["update", updateInvoiceHandler]]) {
+  test(`${operation} stays successful after QB accepted it even when shared SPS persistence fails`, async () => {
+    const before = existingInvoice(); let writes = 0;
+    installAuthAndTokenMocks(async (href, options = {}) => {
+      if (href.includes("/customer/42")) return jsonResponse({ Customer: { Id: "42" } });
+      if (href.includes("/invoice/1964?")) return jsonResponse({ Invoice: before });
+      if (href.includes("/invoice?") && options.method === "POST") { writes++; return jsonResponse({ Invoice: before }); }
+      throw new Error(`Unexpected fetch: ${href}`);
+    }, { canonicalFailure: true });
+    const out = mockResponse();
+    await handler(authenticatedRequest({ invoice: { spsInvoiceId: "local-1964", clientId: "client-42", clientName: "Generic Client", qbCustomerId: "42",
+      ...(operation === "update" ? { qbId: "1964", qbBaseContentFingerprint: fingerprintQuickBooksInvoiceContent(before) } : {}),
+      number: "1964", date: "2026-07-27", dueDate: "2026-08-11", taxRate: 0,
+      lineItems: [{ id: "line-1", qbLineId: "22", qbItemRef: { value: "8" }, description: "Repair visit", qty: "1", unitPrice: "1417", kind: "service" }],
+    } }), out);
+    assert.equal(out.statusCode, 200); assert.equal(out.body.success, true); assert.equal(out.body.appSyncPending, true);
+    assert.equal(out.body.qbId, "1964"); assert.equal(writes, 1); assert.equal(out.body.invoiceRefresh, undefined);
+    assert.match(out.body.warning, /do not create or record it again/);
+  });
+  test(`${operation} requires invoiceCreate staff permission before contacting QuickBooks`, async () => {
+    let calls = 0;
+    installAuthAndTokenMocks(async () => { calls++; throw new Error("unexpected QB request"); }, { teamRole: "viewer" });
+    const out = mockResponse(); await handler(authenticatedRequest({ invoice: { id: "local", qbId: "1964" } }), out);
+    assert.equal(out.statusCode, 403); assert.equal(calls, 0);
+  });
 }
 
 for (const [operation, handler] of [["create", createInvoiceHandler], ["update", updateInvoiceHandler]]) {
@@ -158,6 +198,8 @@ for (const [operation, handler] of [["create", createInvoiceHandler], ["update",
     assert.equal(written.Line[1].Amount, 50);
     assert.equal(written.Line[1].SalesItemLineDetail.Qty, 2);
     assert.equal(res.body.invoice.lineItems[0].desc, "Monthly pond service - April 2026");
+    assert.equal(res.body.invoiceRefresh.actorId, "owner-1");
+    assert.ok(res.body.invoiceRefresh.invoices.some(row => row.id === "performed-april" && row.qbId === "1964"));
   });
 
   for (const [state, line, expectedCode] of [

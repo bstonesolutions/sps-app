@@ -150,6 +150,7 @@ test("update endpoint returns review-required 409 before writing when QuickBooks
     if (href.includes("/auth/v1/user")) {
       return jsonResponse({ id: "owner-1", email: "owner@example.com" });
     }
+    if (href.includes("key=eq.sps_team")) return jsonResponse([{ value: JSON.stringify([{ email: "owner@example.com", role: "owner" }]) }]);
     if (href.includes("/rest/v1/qb_tokens")) {
       return jsonResponse([{
         id: "default",
@@ -191,7 +192,8 @@ test("update endpoint returns review-required 409 before writing when QuickBooks
 test("update endpoint requires a synced base before it can replace invoice lines", async () => {
   globalThis.fetch = async (url) => {
     const href = String(url);
-    if (href.includes("/auth/v1/user")) return jsonResponse({ id: "owner-1" });
+    if (href.includes("/auth/v1/user")) return jsonResponse({ id: "owner-1", email: "owner@example.com" });
+    if (href.includes("key=eq.sps_team")) return jsonResponse([{ value: JSON.stringify([{ email: "owner@example.com", role: "owner" }]) }]);
     if (href.includes("/rest/v1/qb_tokens")) {
       return jsonResponse([{
         realm_id: "realm-1",
@@ -224,7 +226,8 @@ test("update endpoint proceeds when the current QuickBooks content still matches
   let reviewVersion = 1;
   globalThis.fetch = async (url, options = {}) => {
     const href = String(url);
-    if (href.includes("/auth/v1/user")) return jsonResponse({ id: "owner-1" });
+    if (href.includes("/auth/v1/user")) return jsonResponse({ id: "owner-1", email: "owner@example.com" });
+    if (href.includes("key=eq.sps_team")) return jsonResponse([{ value: JSON.stringify([{ email: "owner@example.com", role: "owner" }]) }]);
     if (href.includes("/rest/v1/app_state?")) {
       return jsonResponse(Object.entries({
         sps_clients: [{ id: "client-42", qbId: existing.CustomerRef.value, name: "Generic Client" }],

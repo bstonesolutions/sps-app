@@ -2,6 +2,7 @@
 // The browser supplies identity and intent only. It never supplies accounting
 // contents, a roster snapshot, or an expected version for this privileged write.
 import { APP_STATE_SERVICE_KEY, APP_STATE_SUPABASE_URL, readAppStateVersioned, withAppStateRequestDeadline } from "./_app-state.js";
+import { invoiceAuthorityRpc } from "./_invoice-write-candidates.js";
 import { mapQuickBooksInvoice } from "./quickbooks/invoice-mapper.js";
 import { escapeQuickBooksQueryLiteral, fetchAllQuickBooksQueryPages } from "./quickbooks/sync-helpers.js";
 import { rankQuickBooksInvoiceCandidates, resolveInvoiceReconciliationReview } from "../invoiceReconciliationActions.js";
@@ -171,6 +172,7 @@ export async function patchReviewedInvoice({ invoiceId, beforeInvoice, invoice, 
 
 export async function resolveInvoiceReviewOnServer(body, { actorId, base, headers,
   fetchImpl = globalThis.fetch, readInvoiceState = readAppStateVersioned, patchInvoice = patchReviewedInvoice,
+  readCandidates = invoiceId => invoiceAuthorityRpc("sps_invoice_write_candidates_read", {p_invoice_id:invoiceId}),
   now = () => new Date().toISOString() } = {}) {
   const request = validateInvoiceReviewResolutionRequest(body);
   if (!text(actorId)) throw failure("INVOICE_REVIEW_UNAUTHORIZED", "Sign in before resolving this invoice.", 401);
@@ -208,6 +210,20 @@ export async function resolveInvoiceReviewOnServer(body, { actorId, base, header
     if (request.action === "keep-sps-only" && priorResolution?.action === "keep-sps-only"
       && !text(beforeInvoice.qbId) && text(priorResolution.formerQbId)) {
       invoice.qbReviewResolution.formerQbId = text(priorResolution.formerQbId);
+    }
+    // A deliberate choice retires exactly the held proposal captured by this
+    // reviewed record. Plan the next marker before hashing the response; SQL
+    // validates and applies this same transition under the target CAS lock.
+    if (!confirmedReplay && ["retry-linked", "match-remote"].includes(request.action) && text(beforeInvoice.qbWriteReview?.candidateId)) {
+      const heldId = text(beforeInvoice.qbWriteReview.candidateId);
+      const candidates = await readCandidates(request.invoiceId);
+      if (!Array.isArray(candidates) || !candidates.some(row => text(row.id) === heldId && text(row.invoice_id) === request.invoiceId && !row.resolved_at)) {
+        throw failure("INVOICE_REVIEW_PROPOSAL_CHANGED", "The held change could not be verified. Refresh this invoice before choosing a version.");
+      }
+      const remaining = candidates.filter(row => text(row.id) !== heldId && text(row.invoice_id) === request.invoiceId && !row.resolved_at)
+        .sort((a,b) => BigInt(a.id) > BigInt(b.id) ? -1 : 1)[0];
+      delete invoice.qbWriteReview;
+      if (remaining) invoice.qbWriteReview = {candidateId:text(remaining.id), reason:remaining.reason, savedAt:remaining.created_at};
     }
     // Evidence such as total-match can become true only because the first
     // resolution succeeded. Do not turn that bookkeeping difference into a

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { mergeStoredState } from '../stateMerge.js';
 import { reconcileQuickBooksInvoice } from '../quickbooksInvoiceReconciliation.js';
+import { mergeQuickBooksInvoiceRefresh } from '../api/_quickbooks-invoice-refresh.js';
 
 const source=fs.readFileSync(new URL('../App.jsx',import.meta.url),'utf8');
 function between(start,end){const a=source.indexOf(start),b=source.indexOf(end,a);assert.ok(a>=0&&b>a,`Expected App block ${start}`);return source.slice(a,b);}
@@ -42,18 +43,25 @@ const syncSource=between('  const handleQBSync = async','  // Push a new invoice
 function syncHarness({currentClients=[],capturedClients=[],invoices=[],receiptError=null}={}){
   const clientRef={current:currentClients},invoicesRef={current:invoices};
   const writes=[],summaries=[],banners=[],localValues=new Map();let clientWriteCount=0;
-  const handle=new Function('clientsRef','clients','invoicesRef','persistClientsExact','persistInvoicesExact','storeReceiptIssue','reconcileQuickBooksInvoice','effectiveStatus','setQbAccounting','localStorage','perms','setPayBanner','console',`${syncSource}\nreturn handleQBSync;`)(
-    clientRef,capturedClients,invoicesRef,async()=>{clientWriteCount++;throw new Error('Unrelated client changes need review');},
-    async rows=>{writes.push(structuredClone(rows));return receiptError?{ok:false,error:new Error(receiptError)}:{ok:true,parsedValue:structuredClone(rows)};},
-    receipt=>receipt?.ok?null:receipt?.error?.message||'Invoice save failed',reconcileQuickBooksInvoice,effectiveStatus,
-    summary=>summaries.push(summary),{setItem:(k,v)=>localValues.set(k,v)}, {isAdmin:true},banner=>banners.push(banner), {log(){},error(){}}
+  const fakeStore={captureIdentity:()=>({uid:'owner',generation:1}),acceptInvoiceRefreshSnapshot:async(receipt)=>{
+    if(receiptError)return {ok:false,error:new Error(receiptError)};
+    assert.equal(receipt.actorId,'owner');writes.push(structuredClone(receipt.invoices));
+    return {ok:true,parsedValue:structuredClone(receipt.invoices)};
+  }};
+  const handleImpl=new Function('clientsRef','invoicesRef','store','adoptInvoicesDisplay','storeReceiptIssue','setQbAccounting','localStorage','perms','setPayBanner','console',`${syncSource}\nreturn handleQBSync;`)(
+    clientRef,invoicesRef,fakeStore,()=>{},receipt=>receipt?.ok?null:receipt?.error?.message||'Invoice display failed',
+    summary=>summaries.push(summary),{setItem:(k,v)=>localValues.set(k,v)}, {isAdmin:true},banner=>banners.push(banner),{log(){},error(){}}
   );
+  const handle=async(qbInvoices,qbCustomers,payload)=>{
+    const plan=mergeQuickBooksInvoiceRefresh(invoicesRef.current,currentClients,{...payload,invoices:qbInvoices,customers:qbCustomers});
+    return handleImpl(qbInvoices,qbCustomers,{...payload,invoiceRefresh:{ok:true,actorId:'owner',key:'sps_invoices',complete:true,invoices:plan.invoices,beforeVersion:1,afterVersion:2}});
+  };
   return {handle,clientRef,invoicesRef,writes,summaries,banners,localValues,get clientWriteCount(){return clientWriteCount;}};
 }
 const remoteInvoice=overrides=>({qbId:'5225',qbCustomerId:'qb-primary',number:'2058',clientName:'Neri',date:'09/01/2026',dueDate:'09/15/2026',status:'Paid',total:350,balance:0,taxAmount:0,subTotal:350,lineItems:[{id:'qb-line',qbLineId:'1',desc:'September service',qty:'1',unitPrice:'350',taxable:false}],...overrides});
 const complete={reconciliation:{pagination:{invoices:{complete:true}},fetchedAt:'2026-10-22T12:00:00Z'},accounting:{complete:true,outstandingTotal:0},realmId:'company'};
 
-test('actual QB sync uses newest client ref and saves invoices despite an unrelated client conflict',async()=>{
+test('actual QB sync adopts server matched invoices despite an unrelated client conflict',async()=>{
   const current=Object.freeze({id:'client-current',name:'Neri',qbId:'qb-primary',email:'neri@example.test'});
   const captured={id:'wrong-stale-client',name:'Neri',qbId:'qb-primary',email:'neri@example.test'};
   const h=syncHarness({currentClients:Object.freeze([current]),capturedClients:[captured],invoices:[invoice]});
@@ -66,7 +74,7 @@ test('actual QB sync uses newest client ref and saves invoices despite an unrela
   assert.equal(h.summaries.length,1);assert.equal(h.invoicesRef.current[0].clientId,current.id);
 });
 
-test('duplicate QB customer profiles map invoices to one client without changing its primary QB id',async()=>{
+test('conflicting QB customer identity stays unassigned instead of changing the client primary QB id',async()=>{
   const client=Object.freeze({id:'neri',name:'Neri',email:'neri@example.test',qbId:'qb-primary'});
   const h=syncHarness({currentClients:Object.freeze([client])});
   const result=await h.handle([
@@ -75,7 +83,7 @@ test('duplicate QB customer profiles map invoices to one client without changing
     {qbId:'qb-primary',name:'Neri',email:'neri@example.test'},
     {qbId:'qb-duplicate',name:'Neri duplicate',email:'neri@example.test'},
   ],complete);
-  assert.equal(result.ok,true);assert.deepEqual(result.invoices.map(row=>row.clientId),['neri','neri']);
+  assert.equal(result.ok,true);assert.deepEqual(result.invoices.map(row=>row.clientId),['neri',null]);
   assert.equal(client.qbId,'qb-primary');assert.equal(h.clientWriteCount,0);
 });
 

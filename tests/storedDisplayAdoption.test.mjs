@@ -35,12 +35,90 @@ function mountHook(key, initial) {
   function render() { cursor = 0; dirty = false; output = hook(key, initial); }
   return { get result() { return output; }, async settle() { for (let pass = 0; pass < 15; pass++) { if (dirty) render(); while (effects.length) effects.shift()(); await tick(); } }, dispose() { slots.forEach(slot => slot?.cleanup?.()); } };
 }
-function database(value) {
+function database(value, key = "sps_clients") {
   const state = { value: json(value), version: 1, calls: 0 };
-  supabase.from = () => ({ select(columns) { const builder = { eq() { return builder; }, in() { return builder; }, async maybeSingle() { return { data: { key: "sps_clients", value: state.value, version: state.version }, error: null }; }, then(resolve, reject) { return Promise.resolve({ data: [{ key: "sps_clients", value: state.value, version: state.version }], error: null }).then(resolve, reject); } }; return builder; } });
+  supabase.from = () => ({ select(columns) { const builder = { eq() { return builder; }, in() { return builder; }, async maybeSingle() { return { data: { key, value: state.value, version: state.version }, error: null }; }, then(resolve, reject) { return Promise.resolve({ data: [{ key, value: state.value, version: state.version }], error: null }).then(resolve, reject); } }; return builder; } });
   supabase.rpc = async (_name, args) => { state.calls++; if (args.p_expected_version !== state.version) return { data: [{ applied: false, current_version: state.version }], error: null }; state.value = args.p_value; state.version++; return { data: [{ applied: true, current_version: state.version }], error: null }; };
   return state;
 }
+
+for (const unstaged of [false, true]) {
+  test(`actual invoice hook adopts fresh paid B around A conflict without restaging accounting${unstaged ? ' and keeps an unstaged edit' : ''}`, async () => {
+    const uid = `hook-invoice-refresh-${unstaged}`, key = 'sps_invoices';
+    const a = { id: 'a', qbId: '1', notes: 'Before A', total: 100, balance: 100, status: 'Sent' };
+    const b = { id: 'b', qbId: '2', notes: 'Before B', total: 200, balance: 200, status: 'Sent' };
+    const base = [a, b], local = [{ ...a, notes: 'Local A' }, b], office = { ...a, notes: 'Office A' };
+    const db = database(base, key); store.setUser(uid); await store.initialize();
+    const h = mountHook(key, []);
+    try {
+      await h.settle(); db.value = json([office, b]); db.version = 2;
+      h.result[1](local); await h.settle();
+      assert.equal(store.listConflicts()[0]?.key, key);
+      const retained = localValues.get(`sps_pending_writes:${uid}`), writes = db.calls;
+      const paid = { ...b, status: 'Paid', balance: 0 }; db.value = json([office, paid]); db.version = 3;
+      const receipt = await store.acceptInvoiceRefreshSnapshot({ ok: true, actorId: uid, key, complete: true,
+        invoices: [office, paid], beforeVersion: 2, afterVersion: 3 }, store.captureIdentity());
+      assert.equal(receipt.ok, true);
+      if (unstaged) h.result[1](current => current.map(item => item.id === 'a' ? { ...item, visitNote: 'Typed during refresh' } : item));
+      h.result[4](receipt.parsedValue); await h.settle();
+      assert.deepEqual(h.result[0].find(item => item.id === 'b'), paid);
+      assert.equal(h.result[0].find(item => item.id === 'a').notes, 'Local A');
+      assert.equal(db.calls, writes, 'an existing A conflict cannot trigger a new whole-ledger accounting write');
+      if (!unstaged) assert.equal(localValues.get(`sps_pending_writes:${uid}`), retained);
+      else assert.equal(JSON.parse(JSON.parse(localValues.get(`sps_pending_writes:${uid}`))[key].localValue)[0].visitNote, 'Typed during refresh');
+    } finally { h.dispose(); }
+  });
+}
+
+test('actual invoice hook keeps canonical paid accounting over a retained old fee and review flag without autosaving the projection', async () => {
+  const uid = 'hook-invoice-authority', key = 'sps_invoices';
+  const line = { id: 'service', desc: 'October maintenance', qty: '1', unitPrice: '100.00', amount: 100 };
+  const before = { id: 'a', qbId: '1', notes: 'Before', total: 100, balance: 100, status: 'Overdue', lineItems: [line], qbSyncStatus: 'synced' };
+  const stale = { ...before, notes: 'Local', locallyEdited: true, qbSyncStatus: 'dirty', lateFeeAppliedAt: '2026-10-22',
+    lineItems: [line, { id: 'lf_a_2026-10-22', desc: 'Late Fee', qty: '1', unitPrice: '5.00', amount: 5, taxable: false, isLateFee: true, kind: 'lateFee' }] };
+  const db = database([before], key); store.setUser(uid); await store.initialize();
+  const h = mountHook(key, []);
+  try {
+    await h.settle(); db.value = json([{ ...before, notes: 'Office' }]); db.version = 2;
+    h.result[1]([stale]); await h.settle();
+    const retained = localValues.get(`sps_pending_writes:${uid}`), writes = db.calls;
+    const paid = { ...before, notes: 'Office', status: 'Paid', balance: 0,
+      qbReviewResolution: { resolvedAt: '2026-10-22T15:00:00Z', confirmedResultHash: 'saved-result' }, locallyEdited: false };
+    db.value = json([paid]); db.version = 3;
+    const receipt = await store.acceptInvoiceRefreshSnapshot({ ok: true, actorId: uid, key, complete: true,
+      invoices: [paid], beforeVersion: 2, afterVersion: 3 }, store.captureIdentity());
+    assert.equal(receipt.ok, true); h.result[4](receipt.parsedValue); await h.settle();
+    assert.equal(h.result[0][0].status, 'Paid'); assert.equal(h.result[0][0].balance, 0);
+    assert.deepEqual(h.result[0][0].lineItems, [line]); assert.equal(h.result[0][0].qbSyncStatus, 'synced');
+    assert.equal(h.result[0][0].notes, 'Local'); assert.equal(db.calls, writes);
+    assert.equal(localValues.get(`sps_pending_writes:${uid}`), retained, 'display adoption cannot turn a reviewed fee into new local work');
+  } finally { h.dispose(); }
+});
+
+test('a later note edit cannot erase a genuine held accounting proposal after canonical display adoption', async () => {
+  const uid = 'hook-invoice-hidden-proposal', key = 'sps_invoices';
+  const before = { id: 'a', qbId: '1', notes: 'Before', total: 100, balance: 100, status: 'Sent' };
+  const proposed = { ...before, notes: 'Local', total: 150, balance: 150 };
+  const db = database([before], key); store.setUser(uid); await store.initialize();
+  const h = mountHook(key, []);
+  try {
+    await h.settle(); db.value = json([{ ...before, notes: 'Office' }]); db.version = 2;
+    h.result[1]([proposed]); await h.settle();
+    const canonical = { ...before, status: 'Paid', balance: 0, notes: 'Office',
+      qbWriteReview: { candidateId: 'held', reason: 'different-finance', savedAt: '2026-10-22T15:00:00Z' } };
+    db.value = json([canonical]); db.version = 3;
+    const receipt = await store.acceptInvoiceRefreshSnapshot({ ok: true, actorId: uid, key, complete: true,
+      invoices: [canonical], beforeVersion: 2, afterVersion: 3 }, store.captureIdentity());
+    assert.deepEqual(receipt.confirmedParsedValue, [canonical]);
+    h.result[4](receipt.parsedValue); await h.settle();
+    assert.equal(h.result[0][0].total, 100);
+    h.result[1](current => current.map(invoice => ({ ...invoice, visitNote: 'New genuine note' }))); await h.settle();
+    const retained = JSON.parse(JSON.parse(localValues.get(`sps_pending_writes:${uid}`))[key].localValue)[0];
+    assert.equal(retained.total, 150, 'the hidden proposal remains recoverable');
+    assert.equal(retained.visitNote, 'New genuine note');
+    assert.equal(JSON.parse((await store.get(key)).value)[0].total, 100, 'canonical accounting remains visible');
+  } finally { h.dispose(); }
+});
 for (const unstaged of [false, true]) {
   test(`actual stored-state hook adopts report projection without restaging it${unstaged ? " and preserves an unstaged edit" : ""}`, async () => {
     const uid = `hook-display-${unstaged}`, key = "sps_clients";

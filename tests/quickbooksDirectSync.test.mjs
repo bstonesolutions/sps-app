@@ -44,7 +44,7 @@ test("direct action blocks paid, partial, void, protected and unresolved records
   for (const patch of [
     { status: "Paid" }, { status: "Void" }, { payment: { amount: 20 } }, { partial: true }, { payments: [{ amount: 20 }] }, { paidDate: "9/8/2026" },
     { qbSpsOnly: true }, { qbSyncStatus: "sps-only" }, { qbCreateOutcomeUnknown: true },
-    { qbNeedsReview: true }, { qbReviewRequired: true }, { qbSyncConflict: {} },
+    { qbWriteReview: { candidateId: "1" } }, { qbNeedsReview: true }, { qbReviewRequired: true }, { qbSyncConflict: {} },
     { qbRemoteChangesPending: true }, { qbPendingRemote: true }, { qbDuplicate: true }, { qbAccountingExcluded: true }, { lineItems: [] }, { number: "" },
   ]) assert.equal(quickBooksInvoiceSyncEligibility({ ...linked(), ...patch }, client).eligible, false, JSON.stringify(patch));
 });
@@ -234,6 +234,45 @@ test("QuickBooks success followed by failed SPS confirmation remains visibly unc
   assert.equal(h.current.qbId, "QB-100");
   assert.equal(h.current.qbSyncStatus, "local-save-unconfirmed");
   assert.equal(h.current.qbNeedsReview, true);
+});
+
+test("server-confirmed receipts bypass the old content comparison and generic second write", async () => {
+  const original = linked();
+  const canonical = { ...original, total: 100, qbSyncToken: "2", qbContentFingerprint: "revision-2", status: "Paid", balance: 0 };
+  const receipt = { ok: true, actorId: "owner", key: "sps_invoices", complete: true, invoices: [canonical], beforeVersion: 1, afterVersion: 2 };
+  let calls = 0, writes = 0;
+  const result = await syncInvoiceToQuickBooks({ invoice: original, client, invoicing: {},
+    persistInvoice: async (id, mutate, options) => {
+      calls++;
+      if (!options) { writes++; return mutate(original); }
+      assert.equal(mutate, null);
+      assert.equal(options.invoiceRefresh, receipt);
+      assert.equal(options.expectedQuickBooksId, "QB-100");
+      assert.deepEqual(options.expectedInvoice, original);
+      return canonical;
+    },
+    request: async () => ({ ...success(original), data: { ...success(original).data, invoiceRefresh: receipt } }),
+  });
+  assert.equal(result.status, "synced"); assert.equal(result.invoice.status, "Paid");
+  assert.equal(calls, 2); assert.equal(writes, 1);
+});
+
+test("remote success with pending or failed receipt adoption never becomes another generic financial write", async () => {
+  for (const mode of ["pending", "adoption-failed", "proposal"]) {
+    const original = linked();
+    let saves = 0, requests = 0;
+    const data = { ...success(original).data, ...(mode === "pending" ? { appSyncPending: true } : { invoiceRefresh: { invoices: [original] } }) };
+    const result = await syncInvoiceToQuickBooks({ invoice: original, client, invoicing: {},
+      persistInvoice: async (id, mutate, options) => {
+        saves++;
+        if (!options) return mutate(original);
+        if (mode === "adoption-failed") throw new Error("Disk unavailable");
+        return { ...original, qbWriteReview: { candidateId: "18" } };
+      }, request: async () => { requests++; return { response: { ok: true, status: 200 }, data }; },
+    });
+    assert.equal(result.status, "uncertain", mode);
+    assert.equal(requests, 1); assert.equal(saves, mode === "pending" ? 1 : 2);
+  }
 });
 
 test("payment history created during a sync is retained for review", () => {

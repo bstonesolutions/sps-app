@@ -1,6 +1,7 @@
 // Delete only the reviewed, unpaid invoice. QuickBooks stays authoritative for
 // its current balance, content revision, and deletion receipt.
 import { getValidAccessToken, QB_API_BASE, setCors } from "./qb-store.js";
+import { authorizeConfirmedInvoiceDeletion } from "../_invoice-write-candidates.js";
 import { requireCapability } from "../_staff-auth.js";
 import { readAppStatesVersioned } from "../_app-state.js";
 import { invoiceBulkDeleteEligibility } from "../../invoiceBulkDeletion.js";
@@ -24,7 +25,8 @@ export default async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
-  if (!await requireCapability(req, res, "invoiceDelete", "invoice deletion")) return;
+  const actor = await requireCapability(req, res, "invoiceDelete", "invoice deletion");
+  if (!actor) return;
 
   const qbId = text(req.body?.qb_id);
   const reviewedInvoice = req.body?.reviewed_invoice;
@@ -68,10 +70,16 @@ export default async function handler(req, res) {
   let deleteStarted = false;
   try {
     const response = await fetch(`${base}/invoice/${encodeURIComponent(qbId)}?minorversion=65`, { headers });
-    if (response.status === 404) return res.status(200).json({ success: true, alreadyGone: true });
+    if (response.status === 404) {
+      await authorizeConfirmedInvoiceDeletion(canonical, actor.id);
+      return res.status(200).json({ success: true, alreadyGone: true });
+    }
     if (!response.ok) {
       const issue = fault(await response.text());
-      if (issue.code === "610") return res.status(200).json({ success: true, alreadyGone: true });
+      if (issue.code === "610") {
+        await authorizeConfirmedInvoiceDeletion(canonical, actor.id);
+        return res.status(200).json({ success: true, alreadyGone: true });
+      }
       return res.status(502).json({ error: `Could not read the invoice from QuickBooks${issue.message ? `: ${issue.message}` : "."}`, code: "quickbooks_read_failed" });
     }
     const existing = (await response.json())?.Invoice;
@@ -112,8 +120,10 @@ export default async function handler(req, res) {
     if (text(receipt?.Id) !== qbId || text(receipt?.status).toLowerCase() !== "deleted") {
       return res.status(502).json({ success: false, outcomeUnknown: true, code: "quickbooks_delete_unconfirmed", error: "QuickBooks did not return a confirmed deletion. Keep the SPS invoice and retry to check its current state." });
     }
+    await authorizeConfirmedInvoiceDeletion(canonical, actor.id);
     return res.status(200).json({ success: true });
-  } catch (_) {
+  } catch (error) {
+    if (error.code?.startsWith("INVOICE_")) return res.status(error.status || 503).json({ success:false, code:error.code, error:error.message });
     return res.status(502).json({ success: false, outcomeUnknown: deleteStarted, code: deleteStarted ? "quickbooks_delete_unconfirmed" : "quickbooks_read_failed", error: deleteStarted
       ? "The connection ended before QuickBooks confirmed deletion. Keep the SPS invoice and retry to check its current state."
       : "The invoice could not be checked in QuickBooks. Nothing was deleted." });

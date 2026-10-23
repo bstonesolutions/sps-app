@@ -323,3 +323,26 @@ test("HTTP resolution uses only current server data and the narrow service RPC",
   assert.equal(res.statusCode, 200, JSON.stringify(res.body)); assert.equal(res.body.ok, true); assert.equal(writes.length, 1);
   assert.equal(writes[0].p_actor_id, "owner-1"); assert.equal(res.body.invoice.total, 110); assert.equal(res.body.beforeVersion, 7);
 });
+
+
+test("a QuickBooks choice resolves only its captured held proposal and preserves replay hash", async () => {
+  const invoice={...local(),qbWriteReview:{candidateId:"12",reason:"unconfirmed-accounting-change",savedAt:"2026-10-22T18:00:00Z"}};
+  const f=fixture({invoice});
+  f.dependencies.readCandidates=async()=>[
+    {id:12,invoice_id:invoice.id,reason:"unconfirmed-accounting-change",created_at:"2026-10-22T18:00:00Z"},
+    {id:10,invoice_id:invoice.id,reason:"unconfirmed-accounting-change",created_at:"2026-10-21T18:00:00Z"},
+  ];
+  const body=request({},invoice),receipt=await resolveInvoiceReviewOnServer(body,f.dependencies);
+  assert.equal(receipt.invoice.qbWriteReview.candidateId,"10");
+  assert.equal(receipt.invoice.qbReviewResolution.confirmedResultHash,createHash("sha256").update(stableInvoiceReviewResultJSON(receipt.invoice)).digest("hex"));
+  f.dependencies.readCandidates=async()=>{throw Error("replay must not resolve the next proposal")};
+  const repeated=await resolveInvoiceReviewOnServer(body,f.dependencies);
+  assert.equal(repeated.replayed,true);assert.deepEqual(repeated.invoice,receipt.invoice);
+});
+test("the last held proposal clears only after an explicit verified QuickBooks choice", async () => {
+  const invoice={...local(),qbWriteReview:{candidateId:"12",reason:"unconfirmed-accounting-change",savedAt:"2026-10-22T18:00:00Z"}};
+  const f=fixture({invoice});
+  f.dependencies.readCandidates=async()=>[{id:12,invoice_id:invoice.id,reason:"unconfirmed-accounting-change",created_at:"2026-10-22T18:00:00Z"}];
+  const receipt=await resolveInvoiceReviewOnServer(request({},invoice),f.dependencies);
+  assert.equal(receipt.invoice.qbWriteReview,undefined);
+});

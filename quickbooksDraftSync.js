@@ -1,5 +1,6 @@
 import { isQuickBooksManagedInvoice } from "./invoiceBulkActions.js";
 import { formatInvoiceServiceLineDescription, invoiceServiceDescriptionIssue } from "./invoiceServiceDescription.js";
+import { invoiceSpsMetadata } from "./invoiceMetadata.js";
 
 const text = (value) => String(value == null ? "" : value).trim();
 const number = (value, fallback = 0) => {
@@ -55,10 +56,13 @@ export function partitionQuickBooksDraftSelection(invoices, resolveClient = () =
   return { ready, skipped };
 }
 
-export function buildQuickBooksInvoicePayload(invoice, client, invoicing, { today = new Date() } = {}) {
+export function buildQuickBooksInvoicePayload(invoice, client, invoicing, { today = new Date(), metadataBase } = {}) {
   const fallbackDate = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
   return {
     spsInvoiceId: invoice?.id,
+    spsMetadata: invoiceSpsMetadata(invoice),
+    ...(metadataBase && typeof metadataBase === "object" ? { spsMetadataBase: invoiceSpsMetadata(metadataBase) } : {}),
+    qbWriteCandidateId: invoice?.qbWriteReview?.candidateId || undefined,
     clientId: client?.id ?? invoice?.clientId ?? null,
     source: invoice?.source,
     autoPeriod: invoice?.autoPeriod,

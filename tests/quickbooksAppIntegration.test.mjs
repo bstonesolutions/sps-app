@@ -2,20 +2,20 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
 
+const refreshSource = await readFile(new URL("../api/_quickbooks-invoice-refresh.js", import.meta.url), "utf8");
 const source = await readFile(new URL("../App.jsx", import.meta.url), "utf8");
 const accountingSource = await readFile(new URL("../invoiceAccountingSummary.js", import.meta.url), "utf8");
 const quickBooksDraftSyncSource = await readFile(new URL("../quickbooksDraftSync.js", import.meta.url), "utf8");
 
-test("linked invoice pulls use the conflict-safe QuickBooks reconciler", () => {
-  assert.match(source, /import\s+\{[\s\S]*?reconcileQuickBooksInvoice[\s\S]*?\}\s+from\s+"\.\/quickbooksInvoiceReconciliation"/);
-  assert.match(source, /applyQuickBooksInvoiceSaveResult/);
-  assert.match(source, /return reconcileQuickBooksInvoice\(iv,\s*qi\)/);
-  assert.match(source, /qbBaseContentFingerprint:\s*qi\.qbContentFingerprint/);
-  assert.match(source, /qbHasUnsupportedLines:\s*!!qi\.qbHasUnsupportedLines/);
-  assert.doesNotMatch(source, /filter\(iv => iv\.source !== "quickbooks"\)/);
-  assert.match(source, /preferredByQbId/);
-  assert.match(source, /qbSyncStatus:\s*"duplicate-local-qb-id"/);
-  assert.doesNotMatch(source, /const kept = prevList\.filter/);
+test("linked invoice pulls adopt the server receipt without another device ledger write", () => {
+  const start=source.indexOf("const handleQBSync ="), end=source.indexOf("// Push a new invoice to QuickBooks",start);
+  const handler=source.slice(start,end);
+  assert.match(handler,/acceptInvoiceRefreshSnapshot/);
+  assert.match(handler,/adoptInvoicesDisplay/);
+  assert.doesNotMatch(handler,/persistInvoicesExact|store\.set|setInvoices\(/);
+  assert.match(refreshSource,/reconcileQuickBooksInvoice/);
+  assert.match(refreshSource,/duplicate-local-qb-id/);
+  assert.doesNotMatch(refreshSource,/const kept = prevList\.filter/);
 });
 
 test("authoritative linked snapshots use QuickBooks totals until the editor changes them", () => {
@@ -66,7 +66,7 @@ test("QuickBooks refresh is throttled and resumes without reloading the app", ()
 
 test("QuickBooks refresh compares the latest invoice snapshot and never emits payment pushes", () => {
   assert.match(source, /const invoicesRef = useRef\(invoices\);\s*invoicesRef\.current = invoices;/);
-  assert.match(source, /\(invoicesRef\.current \|\| \[\]\)\.forEach/);
+  assert.match(source, /const priorInvoices = invoicesRef\.current \|\| \[\]/);
   const syncStart = source.indexOf("const handleQBSync =");
   const syncEnd = source.indexOf("// Push a new invoice to QuickBooks", syncStart);
   assert.ok(syncStart >= 0 && syncEnd > syncStart, "expected the QuickBooks sync handler block");

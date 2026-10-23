@@ -112,7 +112,10 @@ export async function resolveConfirmedInvoiceReview({
   }
   await adoptInvoices(accepted.parsedValue, { confirmedInvoice: { before: expectedInvoice, after: canonical } });
   assertCurrent(receipt, canonical);
-  if (!isResolved(canonical)) {
+  const heldChoiceResolved = !!text(expectedInvoice.qbWriteReview?.candidateId)
+    && text(expectedInvoice.qbWriteReview.candidateId) !== text(canonical.qbWriteReview?.candidateId)
+    && isResolved({...canonical, qbWriteReview:undefined});
+  if (!isResolved(canonical) && !heldChoiceResolved) {
     throw failure(accepted.superseded
       ? "A newer invoice change still needs review. Your saved QuickBooks choice did not overwrite that newer work."
       : "This invoice still needs review. Reopen it to inspect the remaining issue.", receipt, { superseded: accepted.superseded === true });

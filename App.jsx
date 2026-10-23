@@ -29,6 +29,7 @@ import { invoiceServiceDescriptionIssue, invoiceHasMaintenanceServiceLines, form
 import { invoiceDescription, invoiceMatchesSearch, invoiceListDate, invoiceDateInRange, sortInvoiceList, INVOICE_LIST_SORT_OPTIONS } from "./invoiceListView";
 import { resolveConfirmedInvoiceReview } from "./invoiceReviewClient";
 import { stableInvoiceReviewJSON } from "./invoiceReviewIdentity";
+import { invoiceSpsMetadata, mergeInvoiceSpsMetadataResult, invoiceCheckpointMatches } from "./invoiceMetadata";
 import { deliverSelectedInvoices } from "./invoiceBulkDelivery";
 import { assertInvoiceDeliveryCoverage, invoiceDeliveryIdentity, invoiceDeliveryLine } from "./invoiceDeliveryCoverage";
 import { deleteSelectedInvoiceDrafts, invoiceBulkDeleteEligibility, invoiceDeletionReviewMatches, partitionInvoiceBulkDeletion, unlinkUnpaidInvoiceCoverage } from "./invoiceBulkDeletion";
@@ -1873,7 +1874,7 @@ function useStoredState(key, initial) {
     projectedBase.current = projection;
     setValue(current => {
       const merged = mergeStoredState(key, priorDisplayBase, JSON.stringify(current), projection, { prefer: "local" });
-      let display = merged.value === undefined ? current : JSON.parse(store.projectDisplay(key, merged.value, projection));
+      let display = merged.value === undefined ? current : JSON.parse(store.projectDisplay(key, merged.value, projection, { baseValue: priorDisplayBase }));
       // An explicit accounting choice retires only the version the owner reviewed.
       // Preserve any edit made while its receipt was arriving, including React work
       // that has not reached the store yet.
@@ -19043,6 +19044,8 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   const progressBaselineRef = useRef(invoice ? JSON.stringify(invoice) : "");
   const invoiceSaveBusyRef = useRef(false);
   const pendingSpsSaveRef = useRef(null);
+  const pendingSpsReceiptRef = useRef(null);
+  const pendingQuickBooksWriteRef = useRef(null);
   const [spsSavePending, setSpsSavePending] = useState(false);
   const editRevisionRef = useRef(0);
   const [progressState, setProgressState] = useState("idle"); // idle | saving | saved | changed | error
@@ -19069,6 +19072,44 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   const [reviewNextNumber, setReviewNextNumber] = useState("");
   const [reviewNumbersLoading, setReviewNumbersLoading] = useState(false);
   const [reviewNumbersError, setReviewNumbersError] = useState("");
+  const quickBooksRecoveryKeyRef = useRef(`sps_invoice_editor_qb_recovery:${store.captureIdentity().uid || "signed-out"}:${invoice?.id || `new:${presetClientId || "all"}`}`);
+  const saveQuickBooksRecovery = (accounting) => {
+    const value = JSON.stringify({ uid: accounting.identity.uid, invoice: accounting.invoice, baselineJson: accounting.baselineJson });
+    try {
+      localStorage.setItem(quickBooksRecoveryKeyRef.current, value);
+      return localStorage.getItem(quickBooksRecoveryKeyRef.current) === value;
+    } catch (_) { return false; }
+  };
+  const clearQuickBooksRecovery = () => {
+    try { localStorage.removeItem(quickBooksRecoveryKeyRef.current); } catch (_) {}
+  };
+  useEffect(() => {
+    if (billingReview) return;
+    try {
+      const identity = store.captureIdentity();
+      let saved = JSON.parse(localStorage.getItem(quickBooksRecoveryKeyRef.current) || "null");
+      // A recovered first create can acquire the canonical qb_<id> SPS key.
+      // Find its original journal by the exact QB identity on a later reopen.
+      if (!saved && identity.uid && invoice?.qbId) {
+        const prefix = `sps_invoice_editor_qb_recovery:${identity.uid}:`;
+        const matches = [];
+        for (let index = 0; index < localStorage.length; index++) {
+          const key = localStorage.key(index);
+          if (!key?.startsWith(prefix)) continue;
+          try {
+            const candidate = JSON.parse(localStorage.getItem(key) || "null");
+            if (candidate?.uid === identity.uid && String(candidate.invoice?.qbId || "") === String(invoice.qbId)) matches.push({ key, candidate });
+          } catch (_) {}
+        }
+        if (matches.length === 1) { saved = matches[0].candidate; quickBooksRecoveryKeyRef.current = matches[0].key; }
+      }
+      if (!saved || !identity.uid || saved.uid !== identity.uid || !saved.invoice?.id || !saved.invoice?.qbId) return;
+      pendingQuickBooksWriteRef.current = { ...saved, identity, needsRefresh: true, recoverMetadata: true };
+      pendingSpsSaveRef.current = saved.invoice;
+      setInv(saved.invoice); setSpsSavePending(true); setQbState("error");
+      setQbMsg("QuickBooks saved this invoice. Retry SPS save to refresh its confirmed copy and recover your notes and visit details.");
+    } catch (_) {}
+  }, []);
   const loadReviewInvoiceNumbers = async () => {
     if (reviewLocked || reviewBusyRef.current || reviewNumbersLoading || typeof onLoadInvoiceNumbers !== "function") return;
     setReviewNumbersLoading(true);
@@ -19277,6 +19318,31 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     : null;
   const canCompareQuickBooksVersions = inv.qbSyncStatus === "conflict" || !!inv.qbPendingRemoteInvoice;
   const editorQuickBooksVersion = inv.qbPendingRemoteInvoice || null;
+  const editingHeldInvoice = !!inv.qbWriteReview?.candidateId && inv.locallyEdited === true && !canCompareQuickBooksVersions;
+
+  const loadHeldInvoiceChange = async () => {
+    if (!inv.qbWriteReview?.candidateId || qbReviewLoading) return;
+    setQbReviewLoading(true); setQbReviewError("");
+    try {
+      const response = await fetch(`${QB_API}/sync`, {
+        method: "POST", headers: await authHeaders({"Content-Type":"application/json"}),
+        body: JSON.stringify({mode:"invoice-write-proposal", invoiceId:inv.id, candidateId:inv.qbWriteReview.candidateId}),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok || !data.invoice) throw new Error(data.error || "The saved change could not be loaded.");
+      if (!data.proposal?.invoice || data.proposal.reason === "unconfirmed-delete") {
+        setInv(current => ({...current, qbPendingRemoteInvoice:data.invoice}));
+        setQbReviewError("A device requested removal without a confirmed QuickBooks deletion. Keep the QuickBooks version here, or use Delete invoice to review a deletion.");
+        return;
+      }
+      const held = data.proposal.invoice, saved = data.invoice;
+      setInv({...held, id:saved.id, qbId:saved.qbId, qbCustomerId:saved.qbCustomerId,
+        qbContentFingerprint:saved.qbContentFingerprint, qbBaseContentFingerprint:saved.qbContentFingerprint,
+        qbWriteReview:saved.qbWriteReview, qbPendingRemoteInvoice:saved,
+        qbNeedsReview:true, qbSyncStatus:"conflict", locallyEdited:true});
+    } catch (error) { setQbReviewError(error.message || "The saved change could not be loaded."); }
+    finally { setQbReviewLoading(false); }
+  };
 
   const loadQuickBooksReview = async () => {
     if (!inv.qbId || qbReviewLoading) return;
@@ -19367,26 +19433,96 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   };
 
   // Keep single-invoice and bulk-draft QuickBooks writes on one payload contract.
-  const buildQbPayload = (prepared = inv) => buildQuickBooksInvoicePayload(prepared, client, invoicing);
+  const buildQbPayload = (prepared = inv) => {
+    let metadataBase = null;
+    try { metadataBase = JSON.parse(progressBaselineRef.current || "null"); } catch (_) {}
+    return buildQuickBooksInvoicePayload(prepared, client, invoicing, {metadataBase});
+  };
 
   // Save the invoice. If QuickBooks is connected, sync automatically (no extra button).
   // B9-2: persist, then stay in-flow and offer the client-notification step (when
   // there's a client + line items); otherwise just close.
-  const finishSave = async (finalInv) => {
+  const finishSave = async (finalInv, invoiceRefresh = null, accountingResult = null) => {
+    if (accountingResult?.confirmed) {
+      pendingQuickBooksWriteRef.current = {
+        invoice: finalInv, identity: accountingResult.identity,
+        baselineJson: progressBaselineRef.current,
+        needsRefresh: !invoiceRefresh, recoverMetadata: !invoiceRefresh,
+      };
+      // This account-scoped recovery journal never enters the shared invoice
+      // ledger. Retain the confirmed identity and metadata across editor reloads.
+      pendingQuickBooksWriteRef.current.durable = saveQuickBooksRecovery(pendingQuickBooksWriteRef.current);
+    }
+    if (invoiceRefresh) pendingSpsReceiptRef.current = invoiceRefresh;
     // Keep a confirmed accounting identity even if the separate SPS save fails.
     // Retrying this editor must update that invoice, never create another one.
     if (finalInv.qbId) setInv(finalInv);
     const attemptedInvoice = pendingSpsSaveRef.current;
     if (!attemptedInvoice) pendingSpsSaveRef.current = finalInv;
     try {
-      const result = await onSave(finalInv, { confirmedSave: true, baselineJson: progressBaselineRef.current, ...(attemptedInvoice ? { attemptedInvoice } : {}) });
-      const confirmed = result?.invoice || result;
+      const accounting = pendingQuickBooksWriteRef.current;
+      if (accounting && !store.isCurrentIdentity(accounting.identity)) throw new Error("The signed-in account changed. Reopen invoices in the original account to recover this save.");
+      if (accounting?.needsRefresh) {
+        // QuickBooks already accepted this write. A retry only reads accounting
+        // and its server-saved SPS receipt, never repeats create/update/payment.
+        const response = await fetch(`${QB_API}/sync`, { method: "GET", headers: await authHeaders() });
+        const data = await response.json();
+        if (!store.isCurrentIdentity(accounting.identity)) throw new Error("The signed-in account changed while recovering this invoice.");
+        if (!response.ok || !data.invoiceRefresh?.ok) throw new Error(data.error || "The confirmed QuickBooks invoice is still waiting for SPS. Retry to refresh its saved copy.");
+        const matches = (data.invoiceRefresh.invoices || []).filter(row => String(row.qbId || "") === String(accounting.invoice.qbId || ""));
+        if (!accounting.invoice.qbId || matches.length !== 1) throw new Error("The saved QuickBooks invoice could not be matched uniquely in SPS. Refresh invoices before editing again.");
+        // A first create whose SPS receipt failed may be imported under qb_<id>.
+        // Follow the unique confirmed QB identity instead of creating an alias.
+        finalInv = matches[0];
+        pendingSpsReceiptRef.current = data.invoiceRefresh;
+        accounting.needsRefresh = false;
+      }
+      if (accounting && !pendingSpsReceiptRef.current) throw new Error("The saved QuickBooks invoice needs a confirmed SPS refresh.");
+      if (accounting && pendingSpsReceiptRef.current) {
+        const matches = pendingSpsReceiptRef.current.invoices.filter(row => String(row.qbId || "") === String(accounting.invoice.qbId || ""));
+        if (matches.length !== 1) throw new Error("The saved invoice identity could not be confirmed.");
+        finalInv = matches[0];
+      }
+      const result = await onSave(finalInv, { confirmedSave: true, invoiceRefresh: pendingSpsReceiptRef.current, baselineJson: progressBaselineRef.current, ...(attemptedInvoice ? { attemptedInvoice } : {}) });
+      let confirmed = result?.invoice || result;
       if (!confirmed || confirmed.id !== finalInv.id || result?.ok === false) throw new Error(result?.error || "The invoice save was not confirmed.");
+      if (accounting?.recoverMetadata) {
+        let original = {};
+        try { original = JSON.parse(accounting.baselineJson || "{}"); } catch (_) {}
+        const desired = invoiceSpsMetadata(accounting.invoice);
+        // Import bookkeeping belongs to the canonical record. The owner's
+        // notes, visit links and line costs still need their original baseline.
+        delete desired.source; delete desired.createdAt;
+        const metadata = mergeInvoiceSpsMetadataResult(confirmed, {
+          lineItems: confirmed.lineItems, spsMetadata: desired, spsMetadataBase: invoiceSpsMetadata(original),
+        });
+        if (metadata.conflicts.length) {
+          progressBaselineRef.current = JSON.stringify(confirmed);
+          pendingSpsSaveRef.current = null; pendingSpsReceiptRef.current = null; pendingQuickBooksWriteRef.current = null;
+          setSpsSavePending(false); setInv(metadata.proposedInvoice); setIsPersisted(true);
+          setQbState("error"); setQbMsg("QuickBooks is saved. Another device changed the invoice notes or visit details. Your version is shown here for review before saving progress.");
+          return { ok: false, reviewRequired: true, invoice: confirmed };
+        }
+        if (stableInvoiceReviewJSON(metadata.invoice) !== stableInvoiceReviewJSON(confirmed)) {
+          if (typeof onPersistProgress !== "function") throw new Error("QuickBooks is saved, but its notes and visit details still need saving. Keep this editor open.");
+          const saved = await onPersistProgress(metadata.invoice, { baselineJson: JSON.stringify(confirmed) });
+          if (!saved || stableInvoiceReviewJSON(saved) !== stableInvoiceReviewJSON(metadata.invoice)) throw new Error("SPS could not verify the recovered notes and visit details. Keep this editor open and retry.");
+          confirmed = saved;
+        }
+      }
       progressBaselineRef.current = JSON.stringify(confirmed);
       pendingSpsSaveRef.current = null;
+      pendingSpsReceiptRef.current = null;
+      pendingQuickBooksWriteRef.current = null;
+      clearQuickBooksRecovery();
       setSpsSavePending(false);
       setInv(confirmed);
       setIsPersisted(true);
+      if (confirmed.qbWriteReview) {
+        setQbState("error");
+        setQbMsg("QuickBooks is saved. Review the separate saved SPS change before sending this invoice.");
+        return { ok: false, reviewRequired: true, invoice: confirmed };
+      }
       setQbState("done");
       setQbMsg("");
       setCoverageError("");
@@ -19396,7 +19532,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     } catch (error) {
       setSpsSavePending(true);
       setQbState("error");
-      setQbMsg(`${finalInv.qbId ? "QuickBooks saved this invoice, but SPS could not confirm its saved copy. " : "SPS could not confirm this invoice save. "}${error?.message || "Try again."} Your changes are still here. Retry Save to finish.`);
+      setQbMsg(`${finalInv.qbId ? "QuickBooks saved this invoice, but SPS could not confirm its saved copy. " : "SPS could not confirm this invoice save. "}${error?.message || "Try again."} ${pendingQuickBooksWriteRef.current?.durable === false ? "Keep this editor open because this device could not save its recovery copy. " : "Your changes are still here. "}Retry Save to finish.`);
       return { ok: false, error };
     }
   };
@@ -19563,6 +19699,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         throw new Error("SPS could not verify this invoice checkpoint.");
       }
       progressBaselineRef.current = JSON.stringify(confirmed);
+      clearQuickBooksRecovery();
       setIsPersisted(true);
       if (editRevisionRef.current === revisionAtStart) {
         setInv(confirmed);
@@ -19583,6 +19720,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     let baseInv = pendingSpsSaveRef.current || selectedClientSnapshot();
     if (!baseInv) return;
     invoiceSaveBusyRef.current = true;
+    const saveIdentity = store.captureIdentity();
     setQbState("sending");
     setQbMsg("");
     try {
@@ -19693,7 +19831,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         && originalCreateIntent !== currentCreateIntent
       );
       if (!changedAfterUnknownCreate) {
-        await finishSave(applyQuickBooksInvoiceSaveResult(baseInv, result));
+        await finishSave(applyQuickBooksInvoiceSaveResult(baseInv, result), result.invoiceRefresh, { confirmed: true, identity: saveIdentity });
         return;
       }
 
@@ -19841,7 +19979,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           ...data,
           qbId: data.qbId || inv.qbId,
           paymentLink: data.paymentLink || inv.paymentLink,
-        }));
+        }), data.invoiceRefresh, { confirmed: true, identity: saveIdentity });
     } catch (err) {
       if (createAttempted) await rememberUnknownCreate({ error: err?.message || "QuickBooks could not be reached." });
       else {
@@ -19879,35 +20017,39 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
       <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
         {billingReview && <p style={{ margin: 0, paddingLeft: 12, borderLeft: `3px solid ${T.primary}`, color: T.textMuted, fontSize: 13, lineHeight: 1.5 }}>{reviewLocked ? "This confirmation is being checked. Retry sync to finish the same invoice." : "Edit the work and charges, then confirm to create the invoice in QuickBooks. No invoice number is assigned yet."}</p>}
         {!billingReview && editorNeedsReview && (
-          <div style={{ background: hexA("#D97706", 0.08), border: `1px solid ${hexA("#D97706", 0.3)}`, borderRadius: 13, padding: 13 }}>
-            <div style={{ color: "#B45309", fontSize: 13.5, fontWeight: 800 }}>
-              {editorReviewIssue?.title || "Invoice needs reconciliation review"}
+          <div style={{ background: T.surface, borderLeft: `3px solid ${T.primary}`, padding: "2px 0 2px 16px" }}>
+            <div style={{ color: T.text, fontSize: 18, fontWeight: 800 }}>
+              {editingHeldInvoice ? "Editing the held change" : editorReviewIssue?.title || "Invoice needs reconciliation review"}
             </div>
-            <div style={{ color: T.textMuted, fontSize: 12, lineHeight: 1.5, marginTop: 4 }}>
-              {editorReviewIssue?.reason || "SPS kept this invoice unchanged because its QuickBooks link could not be confirmed safely."}
-              {editorReviewIssue?.nextStep && <><br /><b style={{ color: T.text }}>Next:</b> {editorReviewIssue.nextStep}</>}
+            <div style={{ color: T.textMuted, fontSize: 14, lineHeight: 1.5, marginTop: 4 }}>
+              {editingHeldInvoice ? "Your held changes are open below. Review the lines and save to update QuickBooks. The confirmed invoice stays unchanged until you save." : inv.qbWriteReview?.candidateId && editorQuickBooksVersion ? "Compare the held device change with the confirmed invoice before choosing what to keep." : editorReviewIssue?.reason || "SPS kept this invoice unchanged because its QuickBooks link could not be confirmed safely."}
+              {editorReviewIssue?.nextStep && !editorQuickBooksVersion && !editingHeldInvoice && <><br /><b style={{ color: T.text }}>Next:</b> {editorReviewIssue.nextStep}</>}
             </div>
             {editorReviewIssue?.lastError && (
-              <div style={{ color: "#B91C1C", fontSize: 12, lineHeight: 1.45, marginTop: 8 }}>
+              <div style={{ color: "#B91C1C", fontSize: 13, lineHeight: 1.45, marginTop: 8 }}>
                 <b>Last sync error{editorReviewIssue.errorCode ? ` · ${editorReviewIssue.errorCode}` : ""}:</b> {editorReviewIssue.lastError}
               </div>
             )}
-            {qbReviewError && <div style={{ color: "#B91C1C", fontSize: 12, fontWeight: 650, marginTop: 8 }}>{qbReviewError}</div>}
+            {qbReviewError && <div style={{ color: "#B91C1C", fontSize: 13, fontWeight: 650, marginTop: 8 }}>{qbReviewError}</div>}
+            {inv.qbWriteReview?.candidateId && !canCompareQuickBooksVersions && !editingHeldInvoice && <button type="button" onClick={loadHeldInvoiceChange} disabled={qbReviewLoading}
+              style={{marginTop:12, padding:"10px 14px", border:0, borderRadius:8, background:T.primary, color:"#fff", fontFamily:"inherit", fontSize:14, fontWeight:750}}>
+              {qbReviewLoading ? "Loading saved change" : "Compare saved change"}
+            </button>}
             {canCompareQuickBooksVersions && (
-              <div style={{ color: T.text, fontSize: 11.5, lineHeight: 1.45, marginTop: 8, fontWeight: 650 }}>
+              <div style={{ color: T.text, fontSize: 13, lineHeight: 1.45, marginTop: 8, fontWeight: 650 }}>
                 Choose a version before editing. Invoice fields are temporarily locked so unsaved draft changes cannot be discarded during reconciliation.
               </div>
             )}
             {editorQuickBooksVersion && (
               <div data-invoice-reconciliation-comparison style={{ display: "grid", gridTemplateColumns: narrowInvoice ? "1fr" : "repeat(2, minmax(0, 1fr))", gap: 8, marginTop: 10 }}>
                 {[
-                  ["SPS now", inv.status || "—", editorInvoiceTotals.total, editorInvoiceTotals.balance, (inv.lineItems || []).length],
+                  [inv.qbWriteReview?.candidateId ? "Held device change" : "SPS now", inv.status || "—", editorInvoiceTotals.total, editorInvoiceTotals.balance, (inv.lineItems || []).length],
                   ["QuickBooks", editorQuickBooksVersion.status || "—", editorQuickBooksVersion.total, editorQuickBooksVersion.balance, (editorQuickBooksVersion.lineItems || []).length],
                 ].map(([heading, status, total, balance, lineCount]) => (
-                  <div key={heading} style={{ minWidth: 0, padding: "9px 10px", borderRadius: 10, background: heading === "QuickBooks" ? hexA("#2CA01C", 0.07) : T.surface, border: `1px solid ${heading === "QuickBooks" ? hexA("#2CA01C", 0.2) : T.border}` }}>
-                    <div style={{ fontSize: 10, fontWeight: 850, color: heading === "QuickBooks" ? "#237A18" : T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>{heading}</div>
-                    <div style={{ marginTop: 4, fontSize: 11.5, color: T.textMuted }}>{status} · {lineCount} line{lineCount === 1 ? "" : "s"}</div>
-                    <div style={{ marginTop: 4, fontSize: 12, color: T.text }}><b>${(Number(total) || 0).toFixed(2)}</b> total · ${(Number(balance) || 0).toFixed(2)} open</div>
+                  <div key={heading} style={{ minWidth: 0, padding: "9px 10px", borderRadius: 10, background: heading === "QuickBooks" ? hexA(T.primary, 0.035) : T.surface, border: `1px solid ${heading === "QuickBooks" ? hexA(T.primary, 0.2) : T.border}` }}>
+                    <div style={{ fontSize: 11, fontWeight: 850, color: heading === "QuickBooks" ? T.primary : T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>{heading}</div>
+                    <div style={{ marginTop: 4, fontSize: 13, color: T.textMuted }}>{status} · {lineCount} line{lineCount === 1 ? "" : "s"}</div>
+                    <div style={{ marginTop: 4, fontSize: 13, color: T.text }}><b>${(Number(total) || 0).toFixed(2)}</b> total · ${(Number(balance) || 0).toFixed(2)} open</div>
                   </div>
                 ))}
                 <div style={{ gridColumn: "1 / -1", color: T.textMuted, fontSize: 11, lineHeight: 1.45 }}>
@@ -19918,24 +20060,24 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
             {canCompareQuickBooksVersions && <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
               {!inv.qbPendingRemoteInvoice ? (
                 <button type="button" onClick={loadQuickBooksReview} disabled={qbReviewLoading}
-                  style={{ border: "none", borderRadius: 10, padding: "9px 12px", background: T.primary, color: "#fff", fontSize: 12, fontWeight: 800, cursor: qbReviewLoading ? "default" : "pointer", fontFamily: "inherit", opacity: qbReviewLoading ? 0.65 : 1 }}>
+                  style={{ border: "none", borderRadius: 10, padding: "9px 12px", background: T.primary, color: "#fff", fontSize: 13, fontWeight: 800, cursor: qbReviewLoading ? "default" : "pointer", fontFamily: "inherit", opacity: qbReviewLoading ? 0.65 : 1 }}>
                   {qbReviewLoading ? "Loading…" : "Load QuickBooks version"}
                 </button>
               ) : (
                 <>
                   <button type="button" onClick={loadQuickBooksReview} disabled={qbReviewLoading}
-                    style={{ border: `1px solid ${T.border}`, borderRadius: 10, padding: "9px 12px", background: T.surface, color: T.text, fontSize: 12, fontWeight: 750, cursor: "pointer", fontFamily: "inherit" }}>
+                    style={{ border: `1px solid ${T.border}`, borderRadius: 10, padding: "9px 12px", background: T.surface, color: T.text, fontSize: 13, fontWeight: 750, cursor: "pointer", fontFamily: "inherit" }}>
                     Check QuickBooks again
                   </button>
                   <button type="button" onClick={useQuickBooksReview} disabled={qbReviewLoading}
-                    style={{ border: "none", borderRadius: 10, padding: "9px 12px", background: T.primary, color: "#fff", fontSize: 12, fontWeight: 800, cursor: qbReviewLoading ? "default" : "pointer", fontFamily: "inherit", opacity: qbReviewLoading ? 0.65 : 1 }}>
+                    style={{ border: "none", borderRadius: 10, padding: "9px 12px", background: T.primary, color: "#fff", fontSize: 13, fontWeight: 800, cursor: qbReviewLoading ? "default" : "pointer", fontFamily: "inherit", opacity: qbReviewLoading ? 0.65 : 1 }}>
                     {qbReviewLoading ? "Saving choice…" : "Use QuickBooks version"}
                   </button>
                   <button type="button" onClick={keepSpsReview}
-                    style={{ border: `1px solid ${T.border}`, borderRadius: 10, padding: "9px 12px", background: T.surface, color: T.text, fontSize: 12, fontWeight: 750, cursor: "pointer", fontFamily: "inherit" }}>
+                    style={{ border: `1px solid ${T.border}`, borderRadius: 10, padding: "9px 12px", background: T.surface, color: T.text, fontSize: 13, fontWeight: 750, cursor: "pointer", fontFamily: "inherit" }}>
                     Keep SPS edits
                   </button>
-                  <div style={{ width: "100%", color: T.textMuted, fontSize: 12, lineHeight: 1.5 }}>Keep SPS edits unlocks this form. Review the charges, then save to update QuickBooks.</div>
+                  <div style={{ width: "100%", color: T.textMuted, fontSize: 14, lineHeight: 1.5 }}>Keep SPS edits unlocks this form. Review the charges, then save to update QuickBooks.</div>
                 </>
               )}
             </div>}
@@ -21495,7 +21637,14 @@ function MarkPaidModal({ invoice, client, onSave, onClose }) {
         });
         const d = await r.json().catch(() => ({}));
         if (!r.ok) { setErr("QuickBooks: " + (d.error || "couldn't record the payment.")); setBusy(false); return; }
-      } catch (_) { setErr("Couldn't reach QuickBooks."); setBusy(false); return; }
+        if (d.invoiceRefresh) {
+          const confirmed = d.invoiceRefresh.invoices?.find(row => String(row.id) === String(invoice.id));
+          if (!confirmed) throw new Error("Payment was recorded. Refresh QuickBooks to display the saved invoice.");
+          await onSave(confirmed, {confirmedSave:true, invoiceRefresh:d.invoiceRefresh});
+          onClose(); return;
+        }
+        if (d.appSyncPending) { setErr("Payment was recorded in QuickBooks. Refresh invoices to recover its saved balance before entering another payment."); setBusy(false); return; }
+      } catch (error) { setErr(error.message || "The payment response was interrupted. Check QuickBooks before retrying this payment."); setBusy(false); return; }
     }
     markLocal(qb);
   };
@@ -21869,14 +22018,14 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onPersis
           {doc}
           {reportBlock && <div style={{ marginTop: 14 }}>{reportBlock}</div>}
         </div>
-        {markPaid && <MarkPaidModal invoice={invoice} client={client} onSave={(upd) => { onSave(upd); setMarkPaid(false); }} onClose={() => setMarkPaid(false)} />}
+        {markPaid && <MarkPaidModal invoice={invoice} client={client} onSave={async (upd, options) => { await onSave(upd, options); setMarkPaid(false); }} onClose={() => setMarkPaid(false)} />}
       </div>
     );
   }
   return (
     <>
       <Modal title={invoice.number} onClose={onClose}>{body}</Modal>
-      {markPaid && <MarkPaidModal invoice={invoice} client={client} onSave={(upd) => { onSave(upd); setMarkPaid(false); }} onClose={() => setMarkPaid(false)} />}
+      {markPaid && <MarkPaidModal invoice={invoice} client={client} onSave={async (upd, options) => { await onSave(upd, options); setMarkPaid(false); }} onClose={() => setMarkPaid(false)} />}
     </>
   );
 }
@@ -24044,14 +24193,45 @@ function BatchInvoiceModal({ clients, invoices, invoicing, maintenanceLedger = n
       };
       n++;
       if (qbIsConnected()) {
+        let quickBooksConfirmed = false;
         try {
           const r = await fetch(`${QB_API}/create-invoice`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ invoice: qbPayload(inv, c) }) });
           const d = await r.json().catch(() => ({}));
-          if (d && d.error) { if (!String(d.code || "").startsWith("maintenance-")) onSave(inv); results.push({ id: c.id, name: c.name, ok: false, error: d.error, ...(String(d.code || "").startsWith("maintenance-") ? { held: true } : { invoice: inv }) }); setProgress([...results]); continue; }
+          if (!r.ok || d.error) {
+            const held = String(d.code || "").startsWith("maintenance-");
+            if (!held) await onSave(d.createOutcomeUnknown ? { ...inv, qbCreateOutcomeUnknown: true, qbNeedsReview: true, qbSyncStatus: "create-outcome-unknown" } : inv, { confirmedSave: true });
+            results.push({ id: c.id, name: c.name, ok: false, error: d.error || "QuickBooks did not confirm this invoice", ...(held ? { held: true } : { invoice: inv }) });
+            setProgress([...results]); continue;
+          }
+          if (d.success !== true || !d.qbId) throw new Error("QuickBooks returned an incomplete result. Check QuickBooks before creating this invoice again.");
+          quickBooksConfirmed = true;
           inv = applyQuickBooksInvoiceSaveResult(inv, d);
-        } catch (_) { onSave(inv); results.push({ id: c.id, name: c.name, ok: false, error: "couldn't reach QuickBooks", invoice: inv }); setProgress([...results]); continue; }
+          if (d.appSyncPending || !d.invoiceRefresh) {
+            results.push({ id: c.id, name: c.name, ok: false, held: true, invoice: inv,
+              error: "Saved in QuickBooks. Refresh SPS before creating or sending this invoice again" });
+            setProgress([...results]); continue;
+          }
+          const confirmed = await onSave(inv, { confirmedSave: true, invoiceRefresh: d.invoiceRefresh });
+          if (!confirmed || String(confirmed.id) !== String(inv.id) || String(confirmed.qbId) !== String(d.qbId)) throw new Error("SPS could not confirm this invoice");
+          inv = confirmed;
+        } catch (error) {
+          if (!quickBooksConfirmed) {
+            try { await onSave({ ...inv, qbCreateOutcomeUnknown: true, qbNeedsReview: true, qbSyncStatus: "create-outcome-unknown" }, { confirmedSave: true }); } catch (_) {}
+          }
+          results.push({ id: c.id, name: c.name, ok: false, held: true, invoice: inv,
+            error: quickBooksConfirmed ? "Saved in QuickBooks. Refresh SPS before creating or sending this invoice again" : (error?.message || "Connection interrupted. Check QuickBooks before creating this invoice again") });
+          setProgress([...results]); continue;
+        }
+      } else {
+        try {
+          const confirmed = await onSave(inv, { confirmedSave: true });
+          if (!confirmed || String(confirmed.id) !== String(inv.id)) throw new Error("SPS could not confirm this invoice");
+          inv = confirmed;
+        } catch (error) {
+          results.push({ id: c.id, name: c.name, ok: false, invoice: inv, error: error?.message || "SPS could not save this invoice" });
+          setProgress([...results]); continue;
+        }
       }
-      onSave(inv);
       results.push({ id: c.id, name: c.name, ok: true, invoice: inv });
       setProgress([...results]);
     }
@@ -42441,7 +42621,6 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
   const handleQBSync = async (qbInvoices, qbCustomers, syncPayload = {}) => {
     const reconciliation = syncPayload?.reconciliation || null;
     const accounting = syncPayload?.accounting || reconciliation?.accounting || null;
-    const invoiceSnapshotComplete = reconciliation?.pagination?.invoices?.complete === true;
     const accountingSnapshot = accounting
       ? {
         ...accounting,
@@ -42453,178 +42632,24 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
         fetchedAt: reconciliation?.fetchedAt || new Date().toISOString(),
       }
       : null;
-    // Build client lookup maps from current clients snapshot
-    const currentClients = clientsRef.current || [];
-
-    // Match QB customers to clients by NAME, with email as a SECONDARY key ONLY for emails that are
-    // UNIQUE to one client. A shared email (e.g. the owner's, set on several clients to receive a
-    // copy) is NOT a match key — it would cross-attribute their invoices to one client. So a unique
-    // email still links a client whose QB name differs slightly, while shared emails fall to name.
-    const qbIdToClientId = {};
-    const nameToClientId = {};
-    const emailToClientId = {};
-    const emailCounts = {};
-    const nameCounts = {};
-    const qbIdCounts = {};
-    currentClients.forEach(c => {
-      const qbId = c.qbId == null ? "" : String(c.qbId).trim();
-      if (qbId) qbIdCounts[qbId] = (qbIdCounts[qbId] || 0) + 1;
-      const n = (c.name || "").toLowerCase().trim();
-      if (n) nameCounts[n] = (nameCounts[n] || 0) + 1;
-      const e = (c.email || "").toLowerCase().trim();
-      if (e) emailCounts[e] = (emailCounts[e] || 0) + 1;
-    });
-    currentClients.forEach(c => {
-      const qbId = c.qbId == null ? "" : String(c.qbId).trim();
-      if (qbId && qbIdCounts[qbId] === 1) qbIdToClientId[qbId] = c.id;
-      const n = (c.name || "").toLowerCase().trim();
-      if (n && nameCounts[n] === 1) nameToClientId[n] = c.id;
-      const e = (c.email || "").toLowerCase().trim();
-      if (e && emailCounts[e] === 1) emailToClientId[e] = c.id; // unique emails only
-    });
-
-    // Match QB customers to SPS clients
-    (qbCustomers || []).forEach(qc => {
-      if (qbIdCounts[String(qc.qbId || "").trim()] > 1) return;
-      const nameKey  = (qc.name  || "").toLowerCase().trim();
-      const emailKey = (qc.email || "").toLowerCase().trim();
-      const matchId  = qbIdToClientId[String(qc.qbId || "").trim()] || nameToClientId[nameKey] || emailToClientId[emailKey];
-      if (matchId) {
-        qbIdToClientId[qc.qbId] = matchId;
-      }
-    });
-
-    // Map QB invoices to SPS format with clientId resolved
-    const newInvoices = qbInvoices.map(qi => {
-      // Try qbCustomerId match first, then clientName match
-      const clientId = qbIdCounts[String(qi.qbCustomerId || "").trim()] > 1 ? null : qbIdToClientId[qi.qbCustomerId]
-        || nameToClientId[(qi.clientName || "").toLowerCase().trim()]
-        || null;
-
-      return {
-        id:         `qb_${qi.qbId}`,
-        qbId:       qi.qbId,
-        qbSyncToken: qi.qbSyncToken || null,
-        qbLastUpdatedTime: qi.qbLastUpdatedTime || null,
-        qbContentFingerprint: qi.qbContentFingerprint || "",
-        qbBaseContentFingerprint: qi.qbContentFingerprint || "",
-        qbTaxCodeRef: qi.qbTaxCodeRef || null,
-        qbCustomerId: qi.qbCustomerId || "",
-        number:     qi.number,
-        clientId,
-        clientName: qi.clientName,
-        date:       qi.date,
-        dueDate:    qi.dueDate,
-        status:     qi.status,
-        items:      (qi.lines || []).map(l => ({
-          description: l.description,
-          qty:         l.qty,
-          rate:        l.rate,
-          amount:      l.amount,
-        })),
-        // Editable line items + tax rate so a synced invoice can be opened,
-        // edited, and pushed back to QuickBooks without losing its lines.
-        lineItems:  qi.lineItems || [],
-        taxRate:    qi.taxRate || 0,
-        discountType: qi.discountType || "",
-        discount: qi.discount || "",
-        qbHasUnsupportedLines: !!qi.qbHasUnsupportedLines,
-        qbUnsupportedLineTypes: qi.qbUnsupportedLineTypes || [],
-        // If QB already carries a late-fee line, flag it so auto-apply won't add a second.
-        ...(qi.lateFeeAppliedAt ? { lateFeeAppliedAt: qi.lateFeeAppliedAt } : {}),
-        total:      String(qi.total),
-        balance:    qi.balance,
-        taxAmount:  qi.taxAmount,   // QB's authoritative sales tax + subtotal so reports match QB
-        subTotal:   qi.subTotal,
-        // Build 15, Item 3 — richer QB reporting fields (sent/paid dates, email state, partial).
-        qbEmailStatus:  qi.qbEmailStatus || "NotSet",
-        ...(qi.sentDate ? { sentDate: qi.sentDate } : {}),
-        qbDeliveryType: qi.qbDeliveryType || null,
-        ...(qi.paidDate ? { paidDate: qi.paidDate } : {}),
-        partial:        !!qi.partial,
-        ...(qi.paymentLink ? { paymentLink: qi.paymentLink } : {}),
-        source:     "quickbooks",
-        qbAuthoritative: true,
-        qbSyncStatus: "synced",
-        locallyEdited: false,
-        createdAt:  Date.now(),
-      };
-    });
-
-    // Merge — dedupe by QB id. An invoice created in-app and pushed to QuickBooks already
-    // lives locally WITH its payment link; the pull-sync used to add a second `qb_<id>`
-    // copy (no link) so the client saw two invoices — one payable, one inert. Instead,
-    // fold the QB snapshot INTO the existing local record (keeping its id + payment link),
-    // and only add QB invoices that have no local twin (created directly in QuickBooks).
-    // Build 15, Item 6 — detect a payment that just landed (was unpaid, now Paid) for the
-    // in-app banner the owner sees while using the app. (Out-of-app push is the Edge Function.)
-    let _newlyPaid = null;
-    (invoicesRef.current || []).forEach(iv => {
-      if (!iv.qbId) return;
-      const qi = newInvoices.find(n => String(n.qbId) === String(iv.qbId));
-      if (!qi) return;
-      const wasPaid = effectiveStatus(iv) === "Paid" || iv.status === "Paid";
-      if (!wasPaid && qi.status === "Paid") _newlyPaid = { clientName: iv.clientName || qi.clientName || "A client", amount: "$" + ((Number(qi.total) || 0).toFixed(2)), number: qi.number || iv.number, invoiceId: iv.id };
-    });
-    const finalInvoices = (() => {
-      const prevList = invoicesRef.current || [];
-      const usedQbIds = new Set();
-      // Choose one record per QB id as the reconciliation target. Any older duplicate stays
-      // visible and is fenced for review below — sync must never silently discard SPS data.
-      const preferredByQbId = new Map();
-      prevList.forEach(iv => {
-        if (!iv.qbId) return;
-        const key = String(iv.qbId);
-        const existing = preferredByQbId.get(key);
-        if (!existing || (existing.source === "quickbooks" && iv.source !== "quickbooks")) {
-          preferredByQbId.set(key, iv);
-        }
-      });
-      const merged = prevList.map(iv => {
-        if (!iv.qbId) return iv;
-        const preferred = preferredByQbId.get(String(iv.qbId));
-        if (preferred && preferred !== iv) {
-          return {
-            ...iv,
-            qbNeedsReview: true,
-            qbSyncStatus: "duplicate-local-qb-id",
-            qbDuplicateOfId: preferred.id || "",
-          };
-        }
-        const qi = newInvoices.find(n => String(n.qbId) === String(iv.qbId));
-        if (!qi) {
-          if (!invoiceSnapshotComplete) return iv;
-          return {
-            ...iv,
-            qbNeedsReview: true,
-            qbSyncStatus: "missing-remote",
-            qbMissingSince: iv.qbMissingSince || reconciliation?.fetchedAt || new Date().toISOString(),
-          };
-        }
-        usedQbIds.add(String(iv.qbId));
-        // QuickBooks is authoritative for customer-facing accounting fields after
-        // a clean pull. Preserve SPS-only costs, estimate/visit links, notes and
-        // the local id while adopting every current QB line. Explicit pending
-        // SPS edits are fenced for review rather than overwritten.
-        try {
-          return reconcileQuickBooksInvoice(iv, qi);
-        } catch (error) {
-          console.error("QB invoice reconciliation failed:", error);
-          return { ...iv, qbNeedsReview: true, qbSyncStatus: "conflict" };
-        }
-      });
-      const fresh = newInvoices.filter(n => !usedQbIds.has(String(n.qbId)));
-      return [...merged, ...fresh];
-    })();
-
-    // Invoice matching belongs on the invoice. Pulling accounting must not rewrite
-    // the client roster, switch a client's primary QB identity to a duplicate, or
-    // wait for an unrelated client-profile conflict to be resolved.
-    const invoiceReceipt = await persistInvoicesExact(finalInvoices);
-    const invoiceIssue = storeReceiptIssue(invoiceReceipt, "Saving refreshed invoices");
+    // The backend has already reconciled this read. Adopting its receipt is not
+    // another device edit and must not flush unrelated pending invoice changes.
+    const identity = store.captureIdentity();
+    const invoiceReceipt = await store.acceptInvoiceRefreshSnapshot(syncPayload.invoiceRefresh, identity);
+    const invoiceIssue = storeReceiptIssue(invoiceReceipt, "Displaying refreshed invoices");
     if (invoiceIssue) throw new Error(invoiceIssue);
-    const confirmedInvoices = invoiceReceipt.parsedValue || finalInvoices;
+    const confirmedInvoices = invoiceReceipt.parsedValue;
+    if (!Array.isArray(confirmedInvoices)) throw new Error("The saved invoice snapshot could not be displayed. Retry QuickBooks refresh.");
+    const priorInvoices = invoicesRef.current || [];
+    let _newlyPaid = null;
+    for (const next of confirmedInvoices) {
+      const prior = priorInvoices.find(row => String(row.id) === String(next.id));
+      if (prior && prior.status !== "Paid" && next.status === "Paid") {
+        _newlyPaid = { clientName: next.clientName || "A client", amount: "$" + (Number(next.total) || 0).toFixed(2), number: next.number, invoiceId: next.id };
+      }
+    }
     invoicesRef.current = confirmedInvoices;
+    adoptInvoicesDisplay(confirmedInvoices);
 
     // Publish summaries only after the invoice snapshot has been confirmed.
     if (accountingSnapshot) {
@@ -42638,11 +42663,11 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     // sessions can observe the same historical transition, and APNs collapse IDs are not durable
     // deduplication. A server-authoritative payment observer owns that notification path.
     // Log match stats
-    const matched = newInvoices.filter(iv => iv.clientId).length;
-    console.log(`QB Sync: ${newInvoices.length} invoices, ${matched} matched to clients`);
+    const matched = confirmedInvoices.filter(iv => iv.clientId).length;
+    console.log(`QB Sync: ${confirmedInvoices.length} saved invoices, ${matched} matched to clients`);
     return {
       ok: true,
-      clients: currentClients,
+      clients: clientsRef.current || [],
       invoices: confirmedInvoices,
       receipts: { invoices: invoiceReceipt },
     };
@@ -43442,7 +43467,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       const confirmed = Array.isArray(confirmedInvoices)
         ? confirmedInvoices.find((entry) => String(entry?.id || "") === targetId)
         : null;
-      if (!confirmed || JSON.stringify(confirmed) !== JSON.stringify(nextInvoice)) {
+      if (!invoiceCheckpointMatches(nextInvoice, confirmed)) {
         throw new Error("SPS could not verify the saved invoice progress. QuickBooks was not changed.");
       }
       invoicesRef.current = confirmedInvoices;
@@ -43456,8 +43481,20 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
   // confirmed by the database before the UI can claim that QuickBooks is linked.
   // The mutator receives the freshest invoice so a batch cannot overwrite edits
   // that another employee saved while QuickBooks was processing an earlier row.
-  const handlePersistInvoiceMutation = async (invoiceId, mutate) => {
+  const handlePersistInvoiceMutation = async (invoiceId, mutate, options = {}) => {
     const targetId = String(invoiceId || "").trim();
+    if (targetId && options.invoiceRefresh) {
+      const receipt = await store.acceptInvoiceRefreshSnapshot(options.invoiceRefresh, store.captureIdentity());
+      const issue = storeReceiptIssue(receipt, "Displaying the saved QuickBooks invoice");
+      if (issue) throw new Error(issue);
+      const confirmed = receipt.confirmedParsedValue?.find(row => String(row.id) === targetId);
+      if (!confirmed || String(confirmed.qbId || "") !== String(options.expectedQuickBooksId || "")) {
+        throw new Error("QuickBooks saved this invoice, but SPS could not confirm its identity. Refresh invoices before syncing again.");
+      }
+      invoicesRef.current = receipt.parsedValue;
+      adoptInvoicesDisplay(receipt.parsedValue, { confirmedInvoice: { before: options.expectedInvoice, after: confirmed } });
+      return confirmed;
+    }
     if (!targetId || typeof mutate !== "function") {
       throw new Error("The invoice update could not be prepared.");
     }
@@ -43525,6 +43562,17 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
 
   const handleSaveInvoice = (inv, options = {}) => {
     if (options.confirmedSave) return (async () => {
+      if (options.invoiceRefresh) {
+        const receipt = await store.acceptInvoiceRefreshSnapshot(options.invoiceRefresh, store.captureIdentity());
+        const issue = storeReceiptIssue(receipt, "Displaying the saved invoice");
+        if (issue) throw new Error(issue);
+        const confirmedRows = receipt.confirmedParsedValue;
+        const confirmed = Array.isArray(confirmedRows) && confirmedRows.find(row => String(row.id) === String(inv.id));
+        if (!confirmed || String(confirmed.qbId || "") !== String(inv.qbId || "")) throw new Error("The saved invoice identity could not be confirmed. Refresh QuickBooks before retrying.");
+        invoicesRef.current = receipt.parsedValue;
+        adoptInvoicesDisplay(receipt.parsedValue, { confirmedInvoice: {before: inv, after: confirmed} });
+        return confirmed;
+      }
       // Source reservations can save immediately before this callback, before
       // React rerenders. Read the store's current list rather than that old frame.
       const latest = await store.get("sps_invoices");

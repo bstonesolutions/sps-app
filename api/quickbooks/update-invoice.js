@@ -13,7 +13,8 @@ import {
   mapQuickBooksInvoice,
 } from "./invoice-mapper.js";
 import { buildUsTxnTaxDetail } from "./qb-tax.js";
-import { requireUser } from "../_auth.js";
+import { requireCapability } from "../_staff-auth.js";
+import { confirmedQuickBooksWriteResponse } from "../_quickbooks-invoice-write-receipt.js";
 import { quickBooksMaintenanceGuard } from "./maintenance-guard.js";
 import { invoiceServiceDescriptionIssue, formatInvoiceServiceLineDescription } from "../../invoiceServiceDescription.js";
 import { reserveDirectInvoiceAccountingClaim } from "../_billing-review-claims.js";
@@ -25,7 +26,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const _u = await requireUser(req, res);
+  const _u = await requireCapability(req, res, "invoiceCreate", "updating invoices in QuickBooks");
   if (!_u) return;
 
   let { invoice } = req.body;
@@ -49,6 +50,8 @@ export default async function handler(req, res) {
 
   // Tokens are read server-side from the store (never passed by the client).
   let access_token, realm_id;
+  let updateWriteStarted = false;
+  let updateConfirmed = false;
   try {
     ({ access_token, realm_id } = await getValidAccessToken());
   } catch (e) {
@@ -249,6 +252,7 @@ export default async function handler(req, res) {
     }
 
     await reserveDirectInvoiceAccountingClaim({ ...invoice, number: invoice.number || existing.DocNumber }, { requestKey: `update:${invoice.qbId}`, mode: "update" });
+    updateWriteStarted = true;
     const updRes = await fetch(`${base}/invoice?minorversion=65`, {
       method: "POST",
       headers,
@@ -262,17 +266,21 @@ export default async function handler(req, res) {
       // not-found phrase here can refer to an inactive/missing ItemRef, tax code,
       // or customer—not the invoice itself. Never reinterpret an update fault as
       // permission to create a second invoice.
-      const responseStatus = updRes.status >= 400 && updRes.status < 500 ? 422 : 502;
+      const knownRejected = updRes.status >= 400 && updRes.status < 500 && updRes.status !== 408;
+      const responseStatus = knownRejected ? 422 : 502;
       return res.status(responseStatus).json({
-        error: "QuickBooks rejected the update: " + readableQbError(err),
+        error: knownRejected ? "QuickBooks rejected the update: " + readableQbError(err)
+          : "The QuickBooks update could not be confirmed. Check QuickBooks before retrying.",
         details: err,
-        code: "QB_INVOICE_UPDATE_REJECTED",
+        code: knownRejected ? "QB_INVOICE_UPDATE_REJECTED" : "QB_INVOICE_UPDATE_UNKNOWN",
+        ...(!knownRejected ? { updateOutcomeUnknown: true } : {}),
       });
     }
 
-    const result = await updRes.json();
-    const qbId = result?.Invoice?.Id || invoice.qbId;
-    let canonicalInvoice = result?.Invoice || null;
+    updateConfirmed = true;
+    const result = await updRes.json().catch(() => ({}));
+    const qbId = invoice.qbId;
+    let canonicalInvoice = String(result?.Invoice?.Id || "") === String(qbId) ? result.Invoice : null;
     // Re-read the stored invoice so the client receives the fingerprint of what
     // QuickBooks actually accepted (including generated line ids/tax details),
     // not a projection of our request.
@@ -280,7 +288,7 @@ export default async function handler(req, res) {
       const canonicalRes = await fetch(`${base}/invoice/${qbId}?minorversion=65`, { headers });
       if (canonicalRes.ok) {
         const canonicalData = await canonicalRes.json();
-        canonicalInvoice = canonicalData?.Invoice || canonicalInvoice;
+        if (String(canonicalData?.Invoice?.Id || "") === String(qbId)) canonicalInvoice = canonicalData.Invoice;
       }
     } catch (_) {
       // The update itself succeeded. Keep the successful response and require a
@@ -291,16 +299,23 @@ export default async function handler(req, res) {
       ? fingerprintQuickBooksInvoiceContent(canonicalInvoice)
       : null;
 
+    const appReceipt = await confirmedQuickBooksWriteResponse({ quickBooksInvoice: canonicalInvoice, expectedQuickBooksId: invoice.qbId,
+      sourceInvoice: invoice, actorId: _u.id, action: "quickbooks-update", realmId: realm_id,
+      candidateId: invoice.qbWriteCandidateId });
     return res.status(200).json({
       qbId,
       paymentLink,
       qbContentFingerprint,
       invoice: canonicalInvoice?.Line ? mapQuickBooksInvoice(canonicalInvoice) : null,
       success: true,
+      ...appReceipt,
     });
 
   } catch (err) {
     console.error("QB update invoice error:", err.message);
+    if (updateConfirmed) return res.status(200).json({ success: true, qbId: invoice.qbId,
+      appSyncPending: true, warning: "QuickBooks saved the invoice. Refresh SPS to confirm its details before editing again." });
+    if (updateWriteStarted) return res.status(502).json({ error: "The QuickBooks update could not be confirmed. Check QuickBooks before retrying.", updateOutcomeUnknown: true });
     return res.status(500).json({ error: err.message });
   }
 }

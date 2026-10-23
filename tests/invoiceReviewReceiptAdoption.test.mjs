@@ -190,7 +190,8 @@ test('a pending addition whose old baseline lacks the now-saved target is rebase
   db.value=json([invoice,remoteOther]);db.version=2;
   await store.set(key,json([localTarget,localOther]),{baseValue:json([other])});
   const result=await accept(receipt({beforeVersion:2,afterVersion:3}),localTarget);
-  assert.equal(result.ok,true);assert.deepEqual(result.parsedValue,[paid,localOther]);
+  assert.equal(result.ok,true);assert.deepEqual(result.parsedValue.find(item=>item.id===invoice.id),paid);
+  assert.deepEqual(result.parsedValue.find(item=>item.id===other.id),localOther);
   const base=JSON.parse(pending(uid).baseValue);
   assert.deepEqual(base.find(item=>item.id===invoice.id),paid);
   assert.deepEqual(base.find(item=>item.id===other.id),other);

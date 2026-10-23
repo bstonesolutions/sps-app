@@ -19,6 +19,7 @@ test("public create refuses canonical review identity even with spoofed trusted 
   globalThis.fetch = async url => {
     const href = String(url); seen.push(href);
     if (href.endsWith("/auth/v1/user")) return response({ id: "owner", email: "owner@example.test" });
+    if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify([{ email: "owner@example.test", role: "owner" }]) }]);
     if (href.includes("/app_state?")) return response([{ key: "sps_billing_reviews", version: 1, value: JSON.stringify([{ id: "review-1", recordType: "billing-review", reviewState: "pending" }]) }]);
     throw new Error(`Unexpected request ${href}`);
   };
@@ -36,6 +37,7 @@ test("recovery posts the saved QB wire payload without rebuilding customers, ite
   globalThis.fetch = async (url, options = {}) => {
     const href = String(url); calls.push({ href, method: options.method || "GET", body: options.body });
     if (href.endsWith("/auth/v1/user")) return response({ id: "owner", email: "owner@example.test" });
+    if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify([{ email: "owner@example.test", role: "owner" }]) }]);
     if (href.includes("/qb_tokens?")) return response(tokens);
     if (href.includes("/invoice?") || href.includes("/invoice/qb-1?")) return response({ Invoice: { ...wire, Id: "qb-1", TotalAmt: 10, Balance: 10 } });
     throw new Error(`Forbidden recovery lookup ${href}`);

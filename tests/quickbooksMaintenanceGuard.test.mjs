@@ -33,6 +33,7 @@ function install({ clients = [client], invoices = [sourceInvoice], billing = led
     const href = String(url);
     calls.push({ href, method: options.method || "GET", body: options.body });
     if (href.endsWith("/auth/v1/user")) return response({ id: "owner", email: "owner@example.test" });
+    if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify([{ email: "owner@example.test", role: "owner" }]) }]);
     if (href.endsWith("/rpc/sps_app_state_batch_cas")) {
       const operation = JSON.parse(options.body).p_operations.find(row => row.key === "sps_billing_reviews");
       if (operation.expected_version !== reviewVersion) return response([{ applied: false, outcome: "conflict" }]);
@@ -249,7 +250,7 @@ test("explicit repair-only charges do not depend on coverage availability, while
     await createInvoice(request(buildQuickBooksInvoicePayload({ ...draft(), lineItems: [{ ...serviceLine, desc: description }] }, client, {})), result);
     assert.equal(result.statusCode, 200, description);
     assert.equal(qbWrites(calls).length, 1);
-    assert.equal(calls.some(call => call.href.includes("/rest/v1/app_state?") && !call.href.includes("key=in.(sps_billing_reviews,sps_invoices)")), false);
+    assert.equal(calls.some(call => call.href.includes("/rest/v1/app_state?") && !call.href.includes("key=eq.sps_team") && !call.href.includes("key=in.(sps_billing_reviews,sps_invoices)")), false);
   }
   for (const line of [{ ...serviceLine, desc: "Services" }, { ...serviceLine, desc: "Services", sourceStopId: "stop-a" }, { ...serviceLine, desc: "Services", billingMode: "one-off" }]) {
     const calls = install({ stateFailure: true });

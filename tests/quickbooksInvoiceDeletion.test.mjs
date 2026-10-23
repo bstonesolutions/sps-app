@@ -25,6 +25,7 @@ function install({ invoice = canonical(), existing = remote(), team = [{ email: 
     if (href.endsWith("/auth/v1/user")) return response({ id: "owner", email: "owner@example.test" });
     if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
     if (href.includes("/rest/v1/app_state?")) return response(Object.entries(state).map(([key, value]) => ({ key, value: JSON.stringify(value), version })));
+    if (href.endsWith("/rpc/sps_invoice_authorize_delete")) return response([{authorized:true,outcome:"authorized"}]);
     if (href.includes("/rest/v1/qb_tokens")) return response([{ id: "default", realm_id: "realm-1", access_token: "access", refresh_token: "refresh", expires_at: "2099-01-01T00:00:00Z" }]);
     if (href.includes("/invoice/qb-1?")) {
       if (mutateAfterRead) version += 1;

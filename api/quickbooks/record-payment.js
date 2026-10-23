@@ -4,7 +4,8 @@
 // method, and a reference (e.g. check #). The app never moves money — this only
 // writes the payment record so QuickBooks reflects how + where it was paid.
 import { getValidAccessToken, QB_API_BASE, setCors } from "./qb-store.js";
-import { requireUser } from "../_auth.js";
+import { requireCapability } from "../_staff-auth.js";
+import { confirmedQuickBooksWriteResponse } from "../_quickbooks-invoice-write-receipt.js";
 
 export default async function handler(req, res) {
   setCors(res);
@@ -16,10 +17,13 @@ export default async function handler(req, res) {
   const amt = Number(amount) || 0;
   if (amt <= 0) return res.status(400).json({ error: "Amount must be greater than zero" });
 
-  const _u = await requireUser(req, res);
+  const _u = await requireCapability(req, res, "invoiceMarkPaid", "recording invoice payments");
   if (!_u) return;
 
   let access_token, realm_id;
+  let paymentWriteStarted = false;
+  let paymentConfirmed = false;
+  let paymentId = null;
   try {
     ({ access_token, realm_id } = await getValidAccessToken());
   } catch (e) {
@@ -72,14 +76,30 @@ export default async function handler(req, res) {
       ...(reference ? { PaymentRefNum: String(reference).slice(0, 21) } : {}),
     };
 
+    paymentWriteStarted = true;
     const payRes = await fetch(`${base}/payment?minorversion=65`, { method: "POST", headers, body: JSON.stringify(payment) });
     if (!payRes.ok) {
       const t = await payRes.text();
-      return res.status(500).json({ error: "QuickBooks rejected the payment: " + readErr(t) });
+      const knownRejected = payRes.status >= 400 && payRes.status < 500 && payRes.status !== 408;
+      return res.status(knownRejected ? 422 : 502).json({ error: knownRejected ? "QuickBooks rejected the payment: " + readErr(t)
+        : "The payment result could not be confirmed. Check QuickBooks before retrying so it is not recorded twice.",
+        ...(!knownRejected ? { paymentOutcomeUnknown: true } : {}) });
     }
-    const result = await payRes.json();
-    return res.status(200).json({ success: true, paymentId: result?.Payment?.Id || null });
+    paymentConfirmed = true;
+    const result = await payRes.json().catch(() => ({}));
+    paymentId = result?.Payment?.Id || null;
+    let canonicalInvoice = null;
+    try {
+      const current = await fetch(`${base}/invoice/${encodeURIComponent(qbId)}?minorversion=65`, { headers });
+      if (current.ok) canonicalInvoice = (await current.json())?.Invoice || null;
+    } catch (_) { /* The payment already succeeded. The next refresh recovers its balance. */ }
+    const appReceipt = await confirmedQuickBooksWriteResponse({ quickBooksInvoice: canonicalInvoice, expectedQuickBooksId: qbId,
+      invoiceId: req.body?.spsInvoiceId, actorId: _u.id, action: "quickbooks-payment", realmId: realm_id });
+    return res.status(200).json({ success: true, paymentId, ...appReceipt });
   } catch (err) {
+    if (paymentConfirmed) return res.status(200).json({ success: true, paymentId, appSyncPending: true,
+      warning: "QuickBooks recorded the payment. Refresh SPS to update the balance; do not record the payment again." });
+    if (paymentWriteStarted) return res.status(502).json({ error: "The payment result could not be confirmed. Check QuickBooks before retrying so it is not recorded twice.", paymentOutcomeUnknown: true });
     return res.status(500).json({ error: err.message || "Failed to record payment" });
   }
 }
