@@ -26,7 +26,9 @@ import { findScheduledStopForEstimate, scheduleApprovedEstimate } from "./estima
 import { findInvoiceDeletionReferences, invoiceDeletionBlockedMessage, unlinkInvoiceDeletionReferences } from "./invoiceDeletionGuard";
 import { applySafeBulkInvoiceEdits, invoiceSelectionForVisible, pruneInvoiceSelection, summarizeSelectedInvoices } from "./invoiceBulkActions";
 import { invoiceServiceDescriptionIssue, invoiceHasMaintenanceServiceLines, formatInvoiceServiceLineDescription } from "./invoiceServiceDescription";
-import { invoiceDescription, invoiceMatchesSearch, invoiceListDate, sortInvoiceList, INVOICE_LIST_SORT_OPTIONS } from "./invoiceListView";
+import { invoiceDescription, invoiceMatchesSearch, invoiceListDate, invoiceDateInRange, sortInvoiceList, INVOICE_LIST_SORT_OPTIONS } from "./invoiceListView";
+import { resolveConfirmedInvoiceReview } from "./invoiceReviewClient";
+import { stableInvoiceReviewJSON } from "./invoiceReviewIdentity";
 import { deliverSelectedInvoices } from "./invoiceBulkDelivery";
 import { assertInvoiceDeliveryCoverage, invoiceDeliveryIdentity, invoiceDeliveryLine } from "./invoiceDeliveryCoverage";
 import { deleteSelectedInvoiceDrafts, invoiceBulkDeleteEligibility, invoiceDeletionReviewMatches, partitionInvoiceBulkDeletion, unlinkUnpaidInvoiceCoverage } from "./invoiceBulkDeletion";
@@ -1864,14 +1866,25 @@ function useStoredState(key, initial) {
   // A server-confirmed stop refresh can coexist with unresolved edits in this section. Adopt its
   // display projection without autosaving it as a new whole-section edit. The functional update
   // preserves React changes that have not reached their save effect yet.
-  const adoptStoredDisplay = useCallback((nextValue) => {
+  const adoptStoredDisplay = useCallback((nextValue, { confirmedInvoice } = {}) => {
     const projection = JSON.stringify(nextValue);
     const priorDisplayBase = lastPersisted.current;
     lastPersisted.current = projection;
     projectedBase.current = projection;
     setValue(current => {
       const merged = mergeStoredState(key, priorDisplayBase, JSON.stringify(current), projection, { prefer: "local" });
-      return merged.value === undefined ? current : JSON.parse(store.projectDisplay(key, merged.value, projection));
+      let display = merged.value === undefined ? current : JSON.parse(store.projectDisplay(key, merged.value, projection));
+      // An explicit accounting choice retires only the version the owner reviewed.
+      // Preserve any edit made while its receipt was arriving, including React work
+      // that has not reached the store yet.
+      if (key === "sps_invoices" && confirmedInvoice && Array.isArray(current) && Array.isArray(display)) {
+        const { before, after } = confirmedInvoice;
+        const target = current.find(entry => String(entry?.id) === String(before?.id));
+        if (target && stableInvoiceReviewJSON(target) === stableInvoiceReviewJSON(before)) {
+          display = display.map(entry => String(entry?.id) === String(after?.id) ? after : entry);
+        }
+      }
+      return display;
     });
   }, [key]);
   return [value, setValue, loaded, persistExact, adoptStoredDisplay];
@@ -4526,6 +4539,9 @@ function applyLateFees(invoices, invoicing, todayISO) {
   const today = new Date(new Date().toDateString());
   let changed = false;
   const next = (invoices || []).map(inv => {
+    // A cached overdue status is not permission to change QuickBooks charges.
+    // Its current fees and payment state arrive through the accounting pull.
+    if (inv.qbId != null && String(inv.qbId).trim()) return inv;
     if (inv.lateFeeAppliedAt) return inv;                       // already applied (flag)
     if (!Array.isArray(inv.lineItems) || inv.lineItems.length === 0) return inv;
     if (hasLateFeeLine(inv, labelLc)) return inv;               // already applied (line item)
@@ -4543,15 +4559,6 @@ function applyLateFees(invoices, invoicing, todayISO) {
       ...inv,
       lineItems: [...inv.lineItems, feeLine],
       lateFeeAppliedAt: todayISO,
-      // A late fee changes the customer-facing line set. For an invoice already
-      // linked to QuickBooks, stop trusting the old QB totals and fence the next
-      // pull until the owner deliberately pushes or reviews the local change.
-      ...(inv.qbId ? {
-        locallyEdited: true,
-        qbAuthoritative: false,
-        qbPendingLocalEdits: true,
-        qbSyncStatus: "pending-push",
-      } : {}),
     };
   });
   return { invoices: changed ? next : invoices, changed };
@@ -19301,7 +19308,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
       // chooses which accounting version to keep; do not manufacture another pending-push conflict.
       setInv(current => ({
         ...current,
-        qbPendingRemoteInvoice: remote,
+        qbPendingRemoteInvoice: { ...remote, reviewInspectionKey: crypto.randomUUID() },
         qbNeedsReview: true,
         qbRemoteChangesPending: true,
       }));
@@ -19321,6 +19328,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         action: "retry-linked",
         quickBooksInvoice: inv.qbPendingRemoteInvoice,
         eligibleCandidateCount: 1,
+        inspectionKey: inv.qbPendingRemoteInvoice?.reviewInspectionKey || "",
       };
       const resolved = onResolveReview
         ? await onResolveReview(inv.id, options)
@@ -19915,14 +19923,19 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
                 </button>
               ) : (
                 <>
+                  <button type="button" onClick={loadQuickBooksReview} disabled={qbReviewLoading}
+                    style={{ border: `1px solid ${T.border}`, borderRadius: 10, padding: "9px 12px", background: T.surface, color: T.text, fontSize: 12, fontWeight: 750, cursor: "pointer", fontFamily: "inherit" }}>
+                    Check QuickBooks again
+                  </button>
                   <button type="button" onClick={useQuickBooksReview} disabled={qbReviewLoading}
-                    style={{ border: "none", borderRadius: 10, padding: "9px 12px", background: "#2CA01C", color: "#fff", fontSize: 12, fontWeight: 800, cursor: qbReviewLoading ? "default" : "pointer", fontFamily: "inherit", opacity: qbReviewLoading ? 0.65 : 1 }}>
+                    style={{ border: "none", borderRadius: 10, padding: "9px 12px", background: T.primary, color: "#fff", fontSize: 12, fontWeight: 800, cursor: qbReviewLoading ? "default" : "pointer", fontFamily: "inherit", opacity: qbReviewLoading ? 0.65 : 1 }}>
                     {qbReviewLoading ? "Saving choice…" : "Use QuickBooks version"}
                   </button>
                   <button type="button" onClick={keepSpsReview}
                     style={{ border: `1px solid ${T.border}`, borderRadius: 10, padding: "9px 12px", background: T.surface, color: T.text, fontSize: 12, fontWeight: 750, cursor: "pointer", fontFamily: "inherit" }}>
-                    Keep SPS and replace QuickBooks…
+                    Keep SPS edits
                   </button>
+                  <div style={{ width: "100%", color: T.textMuted, fontSize: 12, lineHeight: 1.5 }}>Keep SPS edits unlocks this form. Review the charges, then save to update QuickBooks.</div>
                 </>
               )}
             </div>}
@@ -24246,10 +24259,10 @@ function InvoiceReconciliationReviewQueue({
   return (
     <Modal title="Invoice reconciliation" onClose={onClose} maxWidth={760}>
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-        <div style={{ padding: "12px 14px", borderRadius: 13, background: hexA(T.warning, 0.08), border: `1px solid ${hexA(T.warning, 0.25)}` }}>
-          <div style={{ fontSize: 13.5, fontWeight: 800, color: T.text }}>Nothing in this queue was deleted</div>
-          <div style={{ fontSize: 12, lineHeight: 1.5, color: T.textMuted, marginTop: 3 }}>
-            These SPS records are kept outside the QuickBooks headline total until their links are confirmed. Open one to review it; SPS will not resolve or discard it automatically.
+        <div style={{ padding: "2px 0 2px 14px", borderLeft: `3px solid ${T.primary}` }}>
+          <div style={{ fontSize: 18, fontWeight: 800, color: T.text }}>Review one invoice at a time</div>
+          <div style={{ fontSize: 13, lineHeight: 1.6, color: T.textMuted, marginTop: 5 }}>
+            Check the current QuickBooks invoice, then choose Use QuickBooks version to save it in SPS. Other invoice edits stay in place. Your records are retained and nothing is sent to a client.
           </div>
         </div>
 
@@ -24298,13 +24311,10 @@ function InvoiceReconciliationReviewQueue({
               && inspection
               && !inspection.error
               && issue.code !== "conflict"
-              && (
-                issue.code === "duplicate-local-qb-id"
-                || (
-                  inspection?.linkedStatus !== "found"
-                  && !inspection?.safeCandidate
-                )
-              )
+              && issue.code !== "duplicate-local-qb-id"
+              && !invoice.qbPendingRemoteInvoice
+              && inspection?.linkedStatus !== "found"
+              && !inspection?.safeCandidate
             );
             const confirmingSpsOnly = spsOnlyConfirmationId === String(invoice.id || "");
             const resolutionError = resolutionErrors[String(invoice.id || "")] || "";
@@ -24353,8 +24363,8 @@ function InvoiceReconciliationReviewQueue({
                       ["SPS now", invoice.number || "—", invoice._status || invoice.status || "—", invoice._total, invoice._balance, (invoice.lineItems || []).length],
                       ["QuickBooks", inspectionInvoice.number || "—", inspectionInvoice.status || "—", inspectionInvoice.total, inspectionInvoice.balance, (inspectionInvoice.lineItems || []).length],
                     ].map(([heading, number, status, total, balance, lineCount]) => (
-                      <div key={heading} style={{ minWidth: 0, padding: "10px 11px", borderRadius: 11, background: heading === "QuickBooks" ? hexA("#2CA01C", 0.07) : T.surfaceAlt, border: `1px solid ${heading === "QuickBooks" ? hexA("#2CA01C", 0.18) : T.border}` }}>
-                        <div style={{ fontSize: 10, fontWeight: 850, color: heading === "QuickBooks" ? "#237A18" : T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>{heading}</div>
+                      <div key={heading} style={{ minWidth: 0, padding: "10px 11px", borderRadius: 11, background: heading === "QuickBooks" ? hexA(T.primary, 0.035) : T.surfaceAlt, border: `1px solid ${heading === "QuickBooks" ? hexA(T.primary, 0.2) : T.border}` }}>
+                        <div style={{ fontSize: 10, fontWeight: 850, color: heading === "QuickBooks" ? T.primary : T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>{heading}</div>
                         <div style={{ marginTop: 5, fontSize: 12.5, fontWeight: 800, color: T.text }}>Invoice {number}</div>
                         <div style={{ marginTop: 3, fontSize: 11.5, color: T.textMuted, lineHeight: 1.45 }}>{status} · {lineCount} line{lineCount === 1 ? "" : "s"}</div>
                         <div style={{ marginTop: 5, fontSize: 12, color: T.text }}><b>{moneyFmt(total)}</b> total · {moneyFmt(balance)} open</div>
@@ -24368,7 +24378,7 @@ function InvoiceReconciliationReviewQueue({
                 )}
                 {resolutionError && <div role="alert" style={{ marginTop: 8, color: "#B42318", fontSize: 11.5, fontWeight: 650 }}>{resolutionError}</div>}
 
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
+                <details style={{ marginTop: 10, color: T.textMuted, fontSize: 11 }}><summary style={{ cursor: "pointer" }}>Record details</summary><div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
                   <span title={String(invoice.id || "")} style={{ maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", borderRadius: 8, padding: "4px 7px", background: T.surfaceAlt, color: T.textMuted, fontSize: 10.5, fontWeight: 700 }}>
                     SPS ID: {invoice.id || "Unavailable"}
                   </span>
@@ -24382,6 +24392,7 @@ function InvoiceReconciliationReviewQueue({
                   )}
                 </div>
 
+                </details>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 11 }}>
                   <button
                     type="button"
@@ -24398,9 +24409,10 @@ function InvoiceReconciliationReviewQueue({
                         action: inspection.linkedStatus === "found" ? "retry-linked" : "match-remote",
                         quickBooksInvoice: inspectionInvoice,
                         eligibleCandidateCount: 1,
+                        inspectionKey: inspection.inspectionKey,
                       })}
                       disabled={isResolving}
-                      style={{ border: "none", borderRadius: 10, padding: "9px 12px", background: "#2CA01C", color: "#fff", fontSize: 12, fontWeight: 800, cursor: isResolving ? "default" : "pointer", fontFamily: "inherit", opacity: isResolving ? 0.65 : 1 }}
+                      style={{ border: "none", borderRadius: 10, padding: "11px 14px", background: T.primary, color: "#fff", fontSize: 13, fontWeight: 800, cursor: isResolving ? "default" : "pointer", fontFamily: "inherit", opacity: isResolving ? 0.65 : 1 }}
                     >
                       {isResolving ? "Saving choice…" : inspection.linkedStatus === "found" ? "Use QuickBooks version" : "Link exact QuickBooks match"}
                     </button>
@@ -24408,7 +24420,7 @@ function InvoiceReconciliationReviewQueue({
                   <button
                     type="button"
                     onClick={() => onReview(invoice)}
-                    style={{ border: "none", borderRadius: 10, padding: "9px 12px", background: T.primary, color: "#fff", fontSize: 12, fontWeight: 800, cursor: "pointer", fontFamily: "inherit" }}
+                    style={{ border: `1px solid ${T.border}`, borderRadius: 10, padding: "11px 14px", background: T.surface, color: T.text, fontSize: 13, fontWeight: 750, cursor: "pointer", fontFamily: "inherit" }}
                   >
                     {canManage ? issue.actionLabel : "View invoice"}
                   </button>
@@ -24440,7 +24452,7 @@ function InvoiceReconciliationReviewQueue({
                       <button type="button" onClick={() => setSpsOnlyConfirmationId("")} style={{ border: `1px solid ${T.border}`, borderRadius: 9, padding: "8px 10px", background: T.surface, color: T.text, fontSize: 11.5, fontWeight: 750, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
                       <button
                         type="button"
-                        onClick={() => resolveInvoice(invoice, { action: "keep-sps-only", acknowledged: true })}
+                        onClick={() => resolveInvoice(invoice, { action: "keep-sps-only", acknowledged: true, inspectionKey: inspection.inspectionKey })}
                         style={{ border: "none", borderRadius: 9, padding: "8px 10px", background: T.warning, color: "#fff", fontSize: 11.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit" }}
                       >
                         Confirm SPS-only
@@ -24845,7 +24857,7 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok || data.error) throw new Error(data.error || "QuickBooks could not inspect this invoice.");
-      setReviewInspections((current) => ({ ...current, [key]: data }));
+      setReviewInspections((current) => ({ ...current, [key]: { ...data, inspectionKey: crypto.randomUUID() } }));
     } catch (error) {
       setReviewInspections((current) => ({
         ...current,
@@ -24932,11 +24944,7 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
     if (dateRange === "last_month")  { const lm = new Date(now.getFullYear(), now.getMonth()-1, 1); return d.getMonth() === lm.getMonth() && d.getFullYear() === lm.getFullYear(); }
     if (dateRange === "this_year")   return d.getFullYear() === now.getFullYear();
     if (dateRange === "custom") {
-      const from = dateFrom ? new Date(dateFrom) : null;
-      const to   = dateTo   ? new Date(dateTo)   : null;
-      if (from && d < from) return false;
-      if (to   && d > to)   return false;
-      return true;
+      return invoiceDateInRange(d, dateFrom, dateTo);
     }
     return true;
   };
@@ -40322,6 +40330,8 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
 
   // Persistent data — survives reloads and app updates
   const [clients, setClients, lc, persistClientsExact, adoptClientsDisplay] = useStoredState("sps_clients", []);
+  const clientsRef = useRef(clients);
+  clientsRef.current = clients;
   const legacyMediaHealth = useMemo(() => inspectLegacyMediaHealth(clients), [clients]);
   // Live-sync a client's communication/notification preferences onto THIS device the moment they
   // change them in their portal — no manual reload. We subscribe to the shared sps_clients row and
@@ -42444,7 +42454,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       }
       : null;
     // Build client lookup maps from current clients snapshot
-    const currentClients = clients || [];
+    const currentClients = clientsRef.current || [];
 
     // Match QB customers to clients by NAME, with email as a SECONDARY key ONLY for emails that are
     // UNIQUE to one client. A shared email (e.g. the owner's, set on several clients to receive a
@@ -42455,14 +42465,18 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     const emailToClientId = {};
     const emailCounts = {};
     const nameCounts = {};
+    const qbIdCounts = {};
     currentClients.forEach(c => {
-      if (c.qbId != null && String(c.qbId).trim()) qbIdToClientId[String(c.qbId).trim()] = c.id;
+      const qbId = c.qbId == null ? "" : String(c.qbId).trim();
+      if (qbId) qbIdCounts[qbId] = (qbIdCounts[qbId] || 0) + 1;
       const n = (c.name || "").toLowerCase().trim();
       if (n) nameCounts[n] = (nameCounts[n] || 0) + 1;
       const e = (c.email || "").toLowerCase().trim();
       if (e) emailCounts[e] = (emailCounts[e] || 0) + 1;
     });
     currentClients.forEach(c => {
+      const qbId = c.qbId == null ? "" : String(c.qbId).trim();
+      if (qbId && qbIdCounts[qbId] === 1) qbIdToClientId[qbId] = c.id;
       const n = (c.name || "").toLowerCase().trim();
       if (n && nameCounts[n] === 1) nameToClientId[n] = c.id;
       const e = (c.email || "").toLowerCase().trim();
@@ -42470,23 +42484,20 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     });
 
     // Match QB customers to SPS clients
-    const updatedClients = currentClients.map(c => ({ ...c }));
     (qbCustomers || []).forEach(qc => {
+      if (qbIdCounts[String(qc.qbId || "").trim()] > 1) return;
       const nameKey  = (qc.name  || "").toLowerCase().trim();
       const emailKey = (qc.email || "").toLowerCase().trim();
       const matchId  = qbIdToClientId[String(qc.qbId || "").trim()] || nameToClientId[nameKey] || emailToClientId[emailKey];
       if (matchId) {
         qbIdToClientId[qc.qbId] = matchId;
-        // Tag the matching client with their QB ID
-        const idx = updatedClients.findIndex(c => c.id === matchId);
-        if (idx >= 0) updatedClients[idx] = { ...updatedClients[idx], qbId: qc.qbId };
       }
     });
 
     // Map QB invoices to SPS format with clientId resolved
     const newInvoices = qbInvoices.map(qi => {
       // Try qbCustomerId match first, then clientName match
-      const clientId = qbIdToClientId[qi.qbCustomerId]
+      const clientId = qbIdCounts[String(qi.qbCustomerId || "").trim()] > 1 ? null : qbIdToClientId[qi.qbCustomerId]
         || nameToClientId[(qi.clientName || "").toLowerCase().trim()]
         || null;
 
@@ -42606,21 +42617,16 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       return [...merged, ...fresh];
     })();
 
-    // Confirm the exact canonical client and invoice snapshots before reporting a successful
-    // QuickBooks refresh. React effects and generic key flushes can race with another render and
-    // certify stale data; these receipts belong to the payloads computed immediately above.
-    const clientReceipt = await persistClientsExact(updatedClients);
-    const clientIssue = storeReceiptIssue(clientReceipt, "Saving refreshed client matches");
-    if (clientIssue) throw new Error(clientIssue);
+    // Invoice matching belongs on the invoice. Pulling accounting must not rewrite
+    // the client roster, switch a client's primary QB identity to a duplicate, or
+    // wait for an unrelated client-profile conflict to be resolved.
     const invoiceReceipt = await persistInvoicesExact(finalInvoices);
     const invoiceIssue = storeReceiptIssue(invoiceReceipt, "Saving refreshed invoices");
     if (invoiceIssue) throw new Error(invoiceIssue);
-    const confirmedClients = clientReceipt.parsedValue || updatedClients;
     const confirmedInvoices = invoiceReceipt.parsedValue || finalInvoices;
     invoicesRef.current = confirmedInvoices;
 
-    // Accounting summaries are only made visible after the client and invoice evidence that
-    // supports them has been durably confirmed.
+    // Publish summaries only after the invoice snapshot has been confirmed.
     if (accountingSnapshot) {
       setQbAccounting(accountingSnapshot);
       try { localStorage.setItem("sps_qb_accounting", JSON.stringify(accountingSnapshot)); } catch (_) {}
@@ -42636,9 +42642,9 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     console.log(`QB Sync: ${newInvoices.length} invoices, ${matched} matched to clients`);
     return {
       ok: true,
-      clients: confirmedClients,
+      clients: currentClients,
       invoices: confirmedInvoices,
-      receipts: { clients: clientReceipt, invoices: invoiceReceipt },
+      receipts: { invoices: invoiceReceipt },
     };
   };
 
@@ -43253,84 +43259,36 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     return { ok: true };
   };
 
-  const handleResolveInvoiceReview = async (invoiceId, options) => {
-    const targetId = String(invoiceId || "").trim();
-    if (!targetId) throw new Error("Choose an invoice to reconcile.");
-    const pendingConflict = store.listConflicts().find(({ key }) => key === "sps_invoices");
-    if (pendingConflict) {
-      throw new Error("Resolve the existing invoice sync conflict before choosing an accounting version.");
-    }
-
-    // A review choice replaces accounting fields in the shared invoice ledger. Finish any local
-    // invoice save first so the atomic replacement cannot be blocked by this device's own queued
-    // write or make the user re-enter a just-saved invoice. Unrelated pending work stays protected
-    // by the store's normal conflict fences.
-    const pendingWriteReceipt = await store.flushKey("sps_invoices");
-    const pendingWriteIssue = storeReceiptIssue(pendingWriteReceipt, "Saving your latest invoice changes");
-    if (pendingWriteIssue) {
-      throw new Error(`${pendingWriteIssue} The QuickBooks choice was not applied; your SPS invoice is unchanged.`);
-    }
-
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const invoiceRead = await store.refresh("sps_invoices");
-      if (!invoiceRead?.ok) {
-        throw new Error(invoiceRead?.error?.message || "The latest SPS invoices could not be loaded.");
-      }
-      let latestInvoices;
+  const handleResolveInvoiceReview = (invoiceId, options) => resolveConfirmedInvoiceReview({
+    invoiceId,
+    options,
+    store,
+    readInvoices: () => invoicesRef.current || [],
+    adoptInvoices: (values, adoption) => adoptInvoicesDisplay(values, adoption),
+    isResolved: invoice => !invoiceNeedsReconciliationReview(invoice, {
+      effectiveStatus: effectiveStatus(invoice), balance: invoiceTotals(invoice).balance,
+    }),
+    fetchReview: async body => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 55_000);
       try {
-        latestInvoices = invoiceRead.exists ? JSON.parse(invoiceRead.value || "[]") : [];
-      } catch (_) {
-        throw new Error("The shared invoice list is invalid. Nothing was changed.");
+        const response = await fetch(`${QB_API}/sync`, {
+          method: "POST",
+          headers: await authHeaders({ "Content-Type": "application/json" }),
+          signal: controller.signal,
+          body: JSON.stringify(body),
+        });
+        const receipt = await response.json().catch(() => ({}));
+        if (!response.ok || !receipt.ok) throw Object.assign(new Error(receipt.error || "SPS could not confirm the QuickBooks choice. Your invoice is still available to review."), { status: response.status, code: receipt.code });
+        return receipt;
+      } catch (error) {
+        if (error?.name === "AbortError") throw new Error("The save confirmation timed out. Try the same choice again to check its saved result.");
+        throw error;
+      } finally {
+        clearTimeout(timeout);
       }
-      if (!Array.isArray(latestInvoices)) throw new Error("The shared invoice list is invalid. Nothing was changed.");
-      const index = latestInvoices.findIndex((entry) => String(entry?.id || "") === targetId);
-      if (index < 0) throw new Error("This SPS invoice no longer exists. Refresh before reviewing it.");
-      const current = latestInvoices[index];
-      const matchedClient = (clients || []).find((candidate) => invoiceMatchesClient(current, candidate));
-      const resolutionInvoice = {
-        ...current,
-        total: invoiceTotals(current).total,
-        clientName: matchedClient?.name || current.clientName || "",
-        qbCustomerId: current.qbCustomerId || matchedClient?.qbId || matchedClient?.qbCustomerId || "",
-      };
-      const resolved = resolveInvoiceReconciliationReview(resolutionInvoice, options);
-      const nextInvoices = latestInvoices.map((entry, itemIndex) => itemIndex === index ? resolved : entry);
-      const saved = await store.replaceMany([{
-        key: "sps_invoices",
-        value: JSON.stringify(nextInvoices),
-        expectedVersion: Number(invoiceRead.version) || 0,
-      }]);
-      if (!saved?.ok) {
-        if (saved?.conflict && attempt < 2) continue;
-        const blockedByThisDevice = saved?.error?.message === "A local edit is still pending";
-        throw new Error(blockedByThisDevice
-          ? "This device is still saving an invoice change. Nothing was replaced; wait for Saved, then choose the QuickBooks version once more."
-          : saved?.conflict
-            ? "Another employee changed invoices at the same time. Refresh and try once more."
-          : (saved?.error?.message || "SPS did not confirm the reconciliation choice."));
-      }
-
-      const confirmedRead = await store.get("sps_invoices");
-      let confirmedInvoices;
-      try {
-        confirmedInvoices = confirmedRead?.value ? JSON.parse(confirmedRead.value) : nextInvoices;
-      } catch (_) {
-        confirmedInvoices = [];
-      }
-      const confirmed = Array.isArray(confirmedInvoices)
-        ? confirmedInvoices.find((entry) => String(entry?.id || "") === targetId)
-        : null;
-      if (!confirmed || invoiceNeedsReconciliationReview(confirmed, {
-        effectiveStatus: effectiveStatus(confirmed),
-        balance: invoiceTotals(confirmed).balance,
-      })) {
-        throw new Error("SPS saved the choice but could not verify that the review cleared. Refresh before trying again.");
-      }
-      setInvoices(confirmedInvoices);
-      return confirmed;
-    }
-    throw new Error("Invoices changed repeatedly on another device. Refresh and try again.");
-  };
+    },
+  });
 
   // Progress checkpoints are SPS-only. They validate completed-visit ownership,
   // replace the exact shared invoice with compare-and-swap, and read it back before

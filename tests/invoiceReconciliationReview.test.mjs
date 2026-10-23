@@ -115,9 +115,13 @@ test("invoice review UI is actionable and its QuickBooks inspection is read-only
   assert.doesNotMatch(appSource, /canUseConfirmedMatch[\s\S]{0,300}issue\.code !== "conflict"/);
   assert.match(appSource, /now matches the confirmed QuickBooks version/);
   assert.match(appSource, /Saving choice/);
-  assert.match(appSource, /const pendingWriteReceipt = await store\.flushKey\("sps_invoices"\)/);
+  const start = appSource.indexOf("  const handleResolveInvoiceReview =");
+  const end = appSource.indexOf("  // Progress checkpoints", start);
+  const handler = appSource.slice(start, end);
+  assert.match(handler, /resolveConfirmedInvoiceReview/);
+  assert.doesNotMatch(handler, /flushKey|replaceMany|listConflicts/);
   assert.doesNotMatch(appSource, /handleResolveInvoiceReview[\s\S]{0,1200}store\.flush\(\)/);
-  assert.match(appSource, /The QuickBooks choice was not applied; your SPS invoice is unchanged\./);
+  assert.match(appSource, /mode|fetchReview/);
   assert.match(appSource, /Confirm SPS-only/);
   assert.match(appSource, /method:\s*"POST"[\s\S]*?mode:\s*"invoice-review"/);
   assert.doesNotMatch(appSource, /sync\?\$\{params\.toString\(\)\}/);

@@ -77,6 +77,19 @@ export function invoiceListDate(value) {
   return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day ? date : null;
 }
 
+/** Inclusive calendar-day bounds, in the same local timezone as invoice dates. */
+export function invoiceDateInRange(value, fromValue = "", toValue = "") {
+  const date = invoiceListDate(value);
+  const from = invoiceListDate(fromValue);
+  const to = invoiceListDate(toValue);
+  if (!from && !to) return true;
+  if (!date) return false;
+  const day = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  const start = from ? new Date(from.getFullYear(), from.getMonth(), from.getDate()).getTime() : null;
+  const end = to ? new Date(to.getFullYear(), to.getMonth(), to.getDate()).getTime() : null;
+  return (start == null || day >= start) && (end == null || day <= end);
+}
+
 function finiteAmount(value) {
   if (value == null || text(value) === "") return null;
   const number = Number(value);

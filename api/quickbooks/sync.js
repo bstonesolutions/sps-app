@@ -13,15 +13,29 @@ import {
   rankQuickBooksInvoiceCandidates,
 } from "../../invoiceReconciliationActions.js";
 import { requireUser } from "../_auth.js";
+import { requireCapability } from "../_staff-auth.js";
+import { resolveInvoiceReviewOnServer, validateInvoiceReviewResolutionRequest } from "../_invoice-review-resolution.js";
 
 export default async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
 
+  // This narrow mutation authorizes staff capability independently of the
+  // legacy read-only sync route. Neither browser accounting content nor its
+  // whole invoice/client snapshots cross this boundary.
+  const resolvingReview = req.method === "POST" && req.body?.mode === "resolve-invoice-review";
+  let reviewActor = null;
+  if (resolvingReview) {
+    reviewActor = await requireCapability(req, res, "invoiceCreate", "invoice reconciliation");
+    if (!reviewActor) return;
+    try { validateInvoiceReviewResolutionRequest(req.body); }
+    catch (error) { return res.status(error.status || 400).json({ ok: false, code: error.code, error: error.message }); }
+  }
+
   // Caller-auth gate: this endpoint returns ALL invoices + customers (sensitive).
   // OPTIONS preflight is handled above and stays open. There is no GET "?check"/health
   // branch here, so gate immediately before any privileged QuickBooks work.
-  const _u = await requireUser(req, res);
+  const _u = reviewActor || await requireUser(req, res);
   if (!_u) return;
 
   // Tokens are read server-side from the store (never passed by the client).
@@ -40,6 +54,18 @@ export default async function handler(req, res) {
     'Authorization': `Bearer ${access_token}`,
     'Accept':        'application/json',
   };
+
+  if (resolvingReview) {
+    try {
+      const result = await resolveInvoiceReviewOnServer(req.body, { actorId: reviewActor.id, base, headers });
+      return res.status(200).json(result);
+    } catch (error) {
+      const status = Number.isInteger(error?.status) && error.status >= 400 && error.status < 600 ? error.status : 503;
+      return res.status(status).json({ ok: false, code: error?.code || "INVOICE_REVIEW_UNAVAILABLE",
+        error: error?.code ? error.message : "Invoice reconciliation could not be confirmed. Retry to check its saved state.",
+        ...(status === 401 ? { reconnect: true } : {}) });
+    }
+  }
 
   // Targeted invoice review. The editor previously downloaded the entire
   // QuickBooks ledger merely to inspect one flagged record. This branch is

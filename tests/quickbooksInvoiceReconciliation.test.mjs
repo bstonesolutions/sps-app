@@ -8,6 +8,50 @@ import {
   quickBooksInvoiceIntentSignature,
   reconcileQuickBooksInvoice,
 } from "../quickbooksInvoiceReconciliation.js";
+import { resolveInvoiceReconciliationReview } from "../invoiceReconciliationActions.js";
+
+test("clean QuickBooks pulls adopt the explicitly resolved current client identity", () => {
+  const local = { id: "local", qbId: "42", qbCustomerId: "old-qb", clientId: "old-sps", clientName: "Old client", lineItems: [] };
+  const remote = { qbId: "42", qbCustomerId: "new-qb", clientId: "new-sps", clientName: "New client", lineItems: [] };
+  const result = reconcileQuickBooksInvoice(local, remote);
+  assert.equal(result.clientId, "new-sps");
+  assert.equal(result.clientName, "New client");
+  assert.equal(result.qbCustomerId, "new-qb");
+  assert.equal(local.clientId, "old-sps");
+  assert.equal(reconcileQuickBooksInvoice({ ...local, clientId: null }, remote).clientId, "new-sps");
+  assert.equal(reconcileQuickBooksInvoice(local, { ...remote, clientId: 123 }).clientId, 123);
+});
+
+test("an absent or unresolved remote identity preserves a known unchanged customer mapping", () => {
+  const local = { id: "local", qbId: "42", qbCustomerId: "same-qb", clientId: "known-sps", lineItems: [] };
+  const remote = { qbId: "42", qbCustomerId: "same-qb", lineItems: [] };
+  for (const snapshot of [remote, { ...remote, clientId: null }, { ...remote, clientId: "" }, { ...remote, clientId: {} }]) {
+    assert.equal(reconcileQuickBooksInvoice(local, snapshot).clientId, "known-sps");
+  }
+  assert.equal(reconcileQuickBooksInvoice(local, { qbId: "42", lineItems: [] }).clientId, "known-sps");
+});
+
+test("a confirmed QB customer change clears a stale client id when the new mapping is unknown", () => {
+  const local = { id: "local", qbId: "42", qbCustomerId: "old-qb", clientId: "old-sps", lineItems: [] };
+  const remote = { qbId: "42", qbCustomerId: "new-qb", clientName: "New client", lineItems: [] };
+  for (const snapshot of [remote, { ...remote, clientId: null }, { ...remote, clientId: [] }]) {
+    const result = reconcileQuickBooksInvoice(local, snapshot);
+    assert.equal(result.clientId, null);
+    assert.equal(result.qbCustomerId, "new-qb");
+  }
+});
+
+test("pending edits fence client reassignment until the owner adopts the exact QB invoice", () => {
+  const local = { id: "local", qbId: "42", qbCustomerId: "old-qb", clientId: "old-sps", locallyEdited: true, lineItems: [] };
+  const remote = { qbId: "42", qbCustomerId: "new-qb", clientId: "new-sps", clientName: "New client", lineItems: [] };
+  const pending = reconcileQuickBooksInvoice(local, remote);
+  assert.equal(pending.clientId, "old-sps");
+  assert.equal(pending.qbSyncStatus, "conflict");
+  assert.equal(pending.qbPendingRemoteInvoice.clientId, "new-sps");
+  const adopted = resolveInvoiceReconciliationReview(pending, { action: "retry-linked", quickBooksInvoice: pending.qbPendingRemoteInvoice });
+  assert.equal(adopted.clientId, "new-sps");
+  assert.equal(adopted.qbCustomerId, "new-qb");
+});
 
 test("formatted service months match the right local line after QuickBooks reorders or adds lines", () => {
   const local = {

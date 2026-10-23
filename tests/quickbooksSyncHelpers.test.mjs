@@ -8,6 +8,7 @@ import {
   mapQuickBooksCreditMemo,
   mapQuickBooksPayment,
   summarizeQuickBooksAccounting,
+  QuickBooksQueryError,
 } from "../api/quickbooks/sync-helpers.js";
 
 function jsonResponse(body, status = 200) {
@@ -49,6 +50,46 @@ test("paged QuickBooks queries advance past a full page instead of silently trun
   assert.equal(result.truncated, false);
   assert.match(requestedQueries[0], /STARTPOSITION 1 MAXRESULTS 1000$/);
   assert.match(requestedQueries[1], /STARTPOSITION 1001 MAXRESULTS 1000$/);
+});
+
+const queryOptions = (fetchImpl) => ({ fetchImpl, base: "https://quickbooks.test/v3/company/test", headers: {}, entity: "Invoice" });
+
+test("malformed successful query responses cannot certify an empty ledger", async () => {
+  const malformed = [
+    null, [], {}, "not JSON object", { Fault: { Error: [] }, QueryResponse: {} },
+    { QueryResponse: null }, { QueryResponse: [] }, { QueryResponse: "bad" },
+    { QueryResponse: { Invoice: null } }, { QueryResponse: { Invoice: {} } },
+    { QueryResponse: { Invoice: [null] } }, { QueryResponse: { Invoice: [{}] } },
+    { QueryResponse: { Invoice: [{ Id: "" }] } },
+    { QueryResponse: { Customer: [] } }, { QueryResponse: { maxResults: 2 } },
+    { QueryResponse: { totalCount: 2 } }, { QueryResponse: { startPosition: "bad" } },
+  ];
+  for (const body of malformed) {
+    await assert.rejects(fetchAllQuickBooksQueryPages(queryOptions(async () => jsonResponse(body))),
+      error => error instanceof QuickBooksQueryError && error.status === 502 && error.entity === "Invoice",
+      JSON.stringify(body));
+  }
+  await assert.rejects(fetchAllQuickBooksQueryPages(queryOptions(async () => ({
+    ok: true, status: 200, async json() { throw new SyntaxError("Invalid JSON"); },
+  }))), /invalid response/);
+});
+
+test("valid empty QuickBooks query shapes still certify zero records", async () => {
+  for (const QueryResponse of [{}, { Invoice: [] }, { startPosition: 1, maxResults: 0, totalCount: 0 }]) {
+    const result = await fetchAllQuickBooksQueryPages(queryOptions(async () => jsonResponse({ QueryResponse })));
+    assert.deepEqual(result.records, []);
+    assert.equal(result.complete, true);
+    assert.equal(result.truncated, false);
+  }
+});
+
+test("a malformed later query page rejects the whole snapshot instead of returning a partial ledger", async () => {
+  let calls = 0;
+  await assert.rejects(fetchAllQuickBooksQueryPages({
+    ...queryOptions(async () => jsonResponse(++calls === 1 ? { QueryResponse: { Invoice: [{ Id: "1" }] } } : {})),
+    pageSize: 1,
+  }), /invalid response/);
+  assert.equal(calls, 2);
 });
 
 test("QuickBooks query builder keeps WHERE and ORDER BY ahead of pagination", () => {

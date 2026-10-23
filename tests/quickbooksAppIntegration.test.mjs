@@ -44,11 +44,12 @@ test("a deleted QuickBooks invoice gets a distinct stable recreation request key
   assert.match(source, /qbCreateRequestKey:\s*`\$\{inv\.id\}:recreate:\$\{inv\.qbId\}`/);
 });
 
-test("late fees on linked invoices become pending QuickBooks edits", () => {
-  assert.match(
-    source,
-    /lateFeeAppliedAt:\s*todayISO,[\s\S]*?\.\.\.\(inv\.qbId\s*\?\s*\{[\s\S]*?locallyEdited:\s*true,[\s\S]*?qbAuthoritative:\s*false,[\s\S]*?qbPendingLocalEdits:\s*true,[\s\S]*?qbSyncStatus:\s*"pending-push"/,
-  );
+test("cached linked invoices never create automatic QuickBooks charge edits", () => {
+  const start = source.indexOf("function applyLateFees(");
+  const end = source.indexOf("const nextInvoiceNumber", start);
+  const block = source.slice(start, end);
+  assert.match(block, /if \(inv\.qbId != null && String\(inv\.qbId\)\.trim\(\)\) return inv/);
+  assert.doesNotMatch(block, /qbPendingLocalEdits|pending-push/);
 });
 
 test("QuickBooks refresh is throttled and resumes without reloading the app", () => {
@@ -94,7 +95,7 @@ test("invoice conflicts, failed links, and QuickBooks-only cost gaps are visible
   assert.match(source, /editorReviewIssue\?\.title/);
   assert.match(source, /editorReviewIssue\?\.reason/);
   assert.match(source, /Use QuickBooks version/);
-  assert.match(source, /Keep SPS and replace QuickBooks/);
+  assert.match(source, /Keep SPS edits/);
   assert.match(source, /Added in QuickBooks · add its cost for accurate profit reporting/);
 });
 

@@ -9,6 +9,8 @@ const finiteNumber = (value) => {
 const toCents = (value) => Math.round(finiteNumber(value) * 100);
 const fromCents = (value) => Number((value / 100).toFixed(2));
 const sumCents = (values) => values.reduce((sum, value) => sum + toCents(value), 0);
+const object = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 
 export class QuickBooksQueryError extends Error {
   constructor(message, options = {}) {
@@ -83,9 +85,34 @@ export async function fetchAllQuickBooksQueryPages({
       );
     }
 
-    const data = await response.json().catch(() => ({}));
-    const queryResponse = data?.QueryResponse || {};
-    const page = Array.isArray(queryResponse[entity]) ? queryResponse[entity] : [];
+    // A malformed success must never masquerade as a complete empty ledger:
+    // callers use completeness to flag previously linked invoices as missing.
+    const invalidResponse = () => new QuickBooksQueryError(
+      `QuickBooks ${entity} query returned an invalid response`,
+      { status: 502, entity },
+    );
+    let data;
+    try { data = await response.json(); }
+    catch (_) { throw invalidResponse(); }
+    if (!object(data) || own(data, "Fault") || !object(data.QueryResponse)) throw invalidResponse();
+    const queryResponse = data.QueryResponse;
+    let page;
+    if (own(queryResponse, entity)) {
+      page = queryResponse[entity];
+      if (!Array.isArray(page) || page.some(record => !object(record)
+        || !["string", "number"].includes(typeof record.Id)
+        || !String(record.Id).trim()
+        || (typeof record.Id === "number" && !Number.isFinite(record.Id)))) throw invalidResponse();
+    } else {
+      // QuickBooks legitimately returns QueryResponse:{} for no matches.
+      // Another entity or a claimed nonempty result is not that empty shape.
+      if (Object.keys(queryResponse).some(key => !["startPosition", "maxResults", "totalCount"].includes(key))
+        || ["maxResults", "totalCount"].some(key => own(queryResponse, key) && queryResponse[key] !== 0)
+        || (own(queryResponse, "startPosition") && (!Number.isInteger(queryResponse.startPosition) || queryResponse.startPosition < 1))) {
+        throw invalidResponse();
+      }
+      page = [];
+    }
     records.push(...page);
     pageCount += 1;
 

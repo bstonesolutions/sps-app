@@ -1662,10 +1662,153 @@ function acceptCreatedClient(receipt, identity) {
   return run;
 }
 
+// An accounting choice confirms one invoice, not the full ledger. Adopt that exact
+// record and retire only the local intent the owner actually reviewed. Unrelated
+// drafts and conflicts keep their original three-way-merge bases and durable queue.
+function acceptInvoiceReviewResolution(receipt, identity, options = {}) {
+  const key = "sps_invoices";
+  const prior = _chains[key] || Promise.resolve();
+  const run = (async () => {
+    try { await prior; } catch (_) {}
+    if (!isCurrentIdentity(identity)) return { ok: false, staleIdentity: true };
+    const hydration = await ensureHydrate();
+    if (!hydration?.ok) return pendingDurabilityFailure(hydration?.error);
+    try { await awaitPendingDurability(); }
+    catch (error) { return pendingDurabilityFailure(error); }
+    if (!isCurrentIdentity(identity)) return { ok: false, staleIdentity: true };
+
+    const invoice = receipt?.invoice, beforeInvoice = receipt?.beforeInvoice;
+    const expected = options.expectedInvoice;
+    const before = Number(receipt?.beforeVersion), after = Number(receipt?.afterVersion);
+    const id = String(invoice?.id ?? "");
+    const isRecord = item => !!item && typeof item === "object" && !Array.isArray(item);
+    // Object key order differs between PostgreSQL JSON and JS. Compare values,
+    // retaining line order and every field rather than comparing serialization.
+    const canonical = value => Array.isArray(value) ? value.map(canonical)
+      : isRecord(value) ? Object.fromEntries(Object.keys(value).sort().map(name => [name, canonical(value[name])])) : value;
+    const equal = (left, right) => JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
+    if (receipt?.ok !== true || !isRecord(invoice) || !id || !isRecord(beforeInvoice)
+      || String(beforeInvoice.id ?? "") !== id || !isRecord(expected) || String(expected.id ?? "") !== id
+      || !Number.isSafeInteger(before) || before < 0 || !Number.isSafeInteger(after) || after < before
+      || after > before + 1 || (after === before && !equal(beforeInvoice, invoice))) {
+      return { ok: false, error: new Error("The saved invoice choice could not be verified. Check this invoice again.") };
+    }
+    const readList = (value, allowMissing = false) => {
+      const list = JSON.parse(value || "[]");
+      if (!Array.isArray(list)) throw new Error("Invalid invoice list");
+      const matches = list.filter(item => String(item?.id ?? "") === id).length;
+      if (matches > 1 || (!allowMissing && matches !== 1)) throw new Error("Invoice identity is not unique");
+      return list;
+    };
+    let displayed, confirmed;
+    try {
+      displayed = readList(_cache[key]);
+      confirmed = readList(_confirmed[key], true);
+    } catch (_) {
+      return { ok: false, serverConfirmed: true, error: new Error("The invoice choice was saved. Refresh the invoice list to display it safely.") };
+    }
+    const target = list => list.find(item => String(item?.id ?? "") === id);
+    const replace = list => list.map(item => String(item?.id ?? "") === id ? invoice : item);
+    const currentVersion = Number(_versions[key]) || 0;
+    if (currentVersion > after || (currentVersion === after && !equal(target(confirmed), invoice))) {
+      return { ok: true, superseded: true, value: _cache[key], parsedValue: displayed, invoice: target(displayed), projected: false };
+    }
+    const changedResult = () => ({
+      ok: false, serverConfirmed: true, targetChanged: true,
+      error: new Error("The QuickBooks choice was saved, but this invoice was edited again on this device. Your newer work is preserved; reopen the invoice to compare it."),
+    });
+    if (!equal(target(displayed), expected) && !equal(target(displayed), invoice)) return changedResult();
+
+    const pending = _pending[key];
+    let nextPending = pending;
+    let pendingBase, pendingLocal;
+    if (pending) {
+      if (pending.deleteIntent || pending.force) return changedResult();
+      try {
+        pendingLocal = readList(pending.localValue);
+        if (!equal(target(pendingLocal), expected) && !equal(target(pendingLocal), invoice)) return changedResult();
+        if (pending.v === 2) pendingBase = readList(pending.baseValue, true);
+      } catch (_) { return changedResult(); }
+      const lists = [displayed, confirmed, pendingLocal, ...(pendingBase ? [pendingBase] : [])];
+      const qbIds = [...new Set([invoice.qbId, beforeInvoice.qbId, expected.qbId].filter(value => value != null && String(value)).map(String))];
+      const prefixes = [`$.id:${id}`];
+      // A QB identity is safe to retire only when every stored occurrence belongs
+      // to this exact app record. A duplicate link must keep its own review.
+      for (const qbId of qbIds) {
+        if (lists.every(list => list.every(item => String(item?.qbId ?? "") !== qbId || String(item?.id ?? "") === id))) prefixes.push(`$.qb:${qbId}`);
+      }
+      // Conflict paths use printable identities, so unusual ids containing a dot
+      // or bracket can share a prefix. Keep those ambiguous paths for review.
+      const unambiguousPrefixes = prefixes.filter(prefix => lists.every(list => list.every(item => {
+        if (String(item?.id ?? "") === id) return true;
+        return [`$.id:${String(item?.id ?? "")}`, `$.qb:${String(item?.qbId ?? "")}`]
+          .every(otherPrefix => otherPrefix !== prefix && !otherPrefix.startsWith(`${prefix}.`) && !otherPrefix.startsWith(`${prefix}[`));
+      })));
+      const conflicts = (pending.conflicts || []).filter(conflict => !unambiguousPrefixes.some(prefix => (
+        conflict.path === prefix || conflict.path?.startsWith(`${prefix}.`) || conflict.path?.startsWith(`${prefix}[`)
+      )));
+      nextPending = {
+        ...pending,
+        opId: newOpId(),
+        localValue: JSON.stringify(replace(pendingLocal)),
+        ...(pendingBase ? { baseExists: true, baseValue: JSON.stringify(target(pendingBase) ? replace(pendingBase) : [...pendingBase, invoice]) } : {}),
+        conflicts,
+        status: pending.v !== 2 ? "legacy" : conflicts.length ? "conflict" : "pending",
+        updatedAt: Math.max(Date.now(), (Number(pending.updatedAt) || 0) + 1),
+      };
+      // No remaining local delta means the selected invoice was the only intent.
+      // Emptying this queue uses the store's verified two-store cleanup below.
+      if (pendingBase && !conflicts.length && equal(JSON.parse(nextPending.baseValue), JSON.parse(nextPending.localValue))) nextPending = null;
+    }
+
+    const canReconstruct = currentVersion === before && after === before + 1 && equal(target(confirmed), beforeInvoice);
+    const nextDisplay = replace(displayed);
+    // Mutate before persisting so concurrent edits queued during the disk write
+    // start from the resolved record. They receive a newer opId and stay intact.
+    if (nextPending) {
+      _pending[key] = nextPending;
+      if (nextPending.status === "conflict" || nextPending.status === "legacy") _conflicts[key] = nextPending;
+      else delete _conflicts[key];
+    } else if (pending) {
+      delete _pending[key];
+      delete _conflicts[key];
+    }
+    _cache[key] = JSON.stringify(nextDisplay);
+    _cacheAt[key] = Date.now();
+    if (canReconstruct) {
+      _confirmed[key] = JSON.stringify(replace(confirmed));
+      _versions[key] = after;
+      _exists[key] = true;
+    }
+    recalculateRetryWindow();
+    if (pending) {
+      const durability = await persistPending();
+      if (!isCurrentIdentity(identity)) return { ok: false, staleIdentity: true };
+      if (durability?.durable !== true) {
+        return { ...pendingDurabilityFailure(durability?.error), serverConfirmed: true };
+      }
+    }
+    if (!isCurrentIdentity(identity)) return { ok: false, staleIdentity: true };
+    if (canReconstruct) saveSnapshot().catch(() => {});
+    let latestDisplay;
+    try { latestDisplay = readList(_cache[key]); } catch (_) { return changedResult(); }
+    if (!equal(target(latestDisplay), invoice)) return changedResult();
+    // No forced event: the React hook must preserve edits which have not reached
+    // its save effect yet when adopting this display projection.
+    return {
+      ok: true, value: _cache[key], parsedValue: latestDisplay, invoice,
+      projected: !canReconstruct, pending: !!_pending[key],
+    };
+  })();
+  _chains[key] = run.then(() => {}, () => {});
+  return run;
+}
+
 export const store = {
   captureIdentity() { return { uid: _uid, generation: _identityVersion }; },
   isCurrentIdentity,
   acceptCreatedClient,
+  acceptInvoiceReviewResolution,
   // Display-only overlay; neither stages nor resolves the original durable local intent.
   projectDisplay(key, displayedValue, remoteValue) { return projectAcceptedReports(key, displayedValue, remoteValue); },
   setUser(uid) {

@@ -37,6 +37,30 @@ const canonicalOptionalNumber = (value, fallback = "") => {
   return Number.isFinite(number) ? String(number) : canonicalText(value);
 };
 
+const clientId = (value) => (
+  (typeof value === "string" && value.trim())
+  || (typeof value === "number" && Number.isFinite(value))
+) ? value : null;
+
+function reconcileClientIdentity(next, localInvoice, quickBooksInvoice) {
+  const resolvedId = clientId(quickBooksInvoice.clientId);
+  const previousCustomer = canonicalText(localInvoice.qbCustomerId);
+  const currentCustomer = canonicalText(quickBooksInvoice.qbCustomerId);
+  const customerChanged = !!previousCustomer && !!currentCustomer && previousCustomer !== currentCustomer;
+  if (resolvedId != null) {
+    // The caller resolved this SPS identity from its current client roster.
+    next.clientId = resolvedId;
+  } else if (customerChanged) {
+    // A targeted QB response may not carry an SPS mapping at all. Once its
+    // customer changed, retaining the former client's id would put this invoice
+    // on the wrong client's page. Keep it unassigned until a verified mapping
+    // becomes available, rather than copying an obsolete local association.
+    next.clientId = null;
+  }
+  // An incomplete roster can temporarily yield null for an unchanged customer.
+  // That is not evidence that an established SPS association should be erased.
+}
+
 const refValue = (value) => {
   if (value && typeof value === "object") return normalizedText(value.value ?? value.id ?? value.name);
   return normalizedText(value);
@@ -361,6 +385,7 @@ function pendingQuickBooksSnapshot(quickBooksInvoice) {
   for (const field of [...QUICKBOOKS_IDENTITY_FIELDS, ...QUICKBOOKS_AUTHORITY_FIELDS]) {
     if (own(quickBooksInvoice, field)) snapshot[field] = clone(quickBooksInvoice[field]);
   }
+  if (own(quickBooksInvoice, "clientId")) snapshot.clientId = clientId(quickBooksInvoice.clientId);
   snapshot.lineItems = quickBooksInvoice.lineItems.map((line, index) => lineFromQuickBooks(
     line,
     null,
@@ -458,6 +483,7 @@ export function reconcileQuickBooksInvoice(localInvoice, quickBooksInvoice) {
   for (const field of [...QUICKBOOKS_IDENTITY_FIELDS, ...QUICKBOOKS_AUTHORITY_FIELDS]) {
     if (own(quickBooksInvoice, field)) next[field] = clone(quickBooksInvoice[field]);
   }
+  reconcileClientIdentity(next, localInvoice, quickBooksInvoice);
   // QuickBooks does not know when SPS delivered an invoice by text, portal, or
   // the app's branded email. An unsent QB snapshot must not demote that local
   // delivery history back to Draft.

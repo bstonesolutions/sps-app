@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { execFileSync } from "node:child_process";
 
 import {
   invoiceDescription,
   invoiceListDate,
+  invoiceDateInRange,
   invoiceMatchesSearch,
   sortInvoiceList,
 } from "../invoiceListView.js";
@@ -63,6 +65,32 @@ test("date parsing supports local SPS and ISO calendar dates without timezone sh
   }
   for (const input of ["", "not a date", "02/30/2026", "2026-02-29", "2026-13-01", "2026-04-09Tnonsense", new Date(NaN)]) assert.equal(invoiceListDate(input), null);
   assert.equal(invoiceListDate("2024-02-29").getDate(), 29);
+});
+
+test("custom date bounds include both endpoints and every time on the ending day", () => {
+  for (const date of ["2026-10-01", "10/22/2026", new Date(2026, 9, 22, 23, 59, 59)]) {
+    assert.equal(invoiceDateInRange(date, "2026-10-01", "2026-10-22"), true);
+  }
+  for (const date of ["2026-09-30", "2026-10-23", "invalid"]) {
+    assert.equal(invoiceDateInRange(date, "2026-10-01", "2026-10-22"), false);
+  }
+  assert.equal(invoiceDateInRange("2026-10-22", "2026-10-22", "2026-10-22"), true);
+  assert.equal(invoiceDateInRange("2026-10-22", "2026-10-23", "2026-10-01"), false);
+  assert.equal(invoiceDateInRange("2026-10-22", "", "2026-10-22"), true);
+  assert.equal(invoiceDateInRange("2026-10-22", "2026-10-22", ""), true);
+  assert.equal(invoiceDateInRange(null), true);
+});
+
+test("custom date bounds remain inclusive in both positive and negative UTC offsets", () => {
+  const script = `
+    import { invoiceDateInRange } from ${JSON.stringify(new URL("../invoiceListView.js", import.meta.url).href)};
+    const dates = [new Date(2026, 9, 1), new Date(2026, 9, 22, 23, 59, 59), "2026-10-22"];
+    process.stdout.write(JSON.stringify(dates.map(date => invoiceDateInRange(date, "2026-10-01", "2026-10-22"))));
+  `;
+  for (const TZ of ["America/New_York", "Pacific/Auckland", "UTC"]) {
+    const actual = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", script], { env: { ...process.env, TZ }, encoding: "utf8" }));
+    assert.deepEqual(actual, [true, true, true], TZ);
+  }
 });
 
 test("description sorts both ways and puts missing descriptions last", () => {
