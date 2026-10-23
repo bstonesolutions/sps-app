@@ -5,6 +5,8 @@ import { describeStateConflicts, mergeStoredState, normalizeStoredValue } from "
 import { isTransientAppStateError, nextAppStateRetry } from "./appStateBackoff.js";
 import { normalizeInvoiceProjectionIntent, projectInvoiceAccountingAuthority } from "./invoiceAuthorityProjection.js";
 import { stableInvoiceReviewJSON } from "./invoiceReviewIdentity.js";
+import { buildSharedStateIntent } from "./sharedStateIntent.js";
+import { sendSharedStateIntent } from "./sharedStateWriteClient.js";
 
 const SUPABASE_URL = "https://ysqarusrewceezckawlo.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlzcWFydXNyZXdjZWV6Y2thd2xvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2MjkzODEsImV4cCI6MjA5NjIwNTM4MX0.GCX-Bt3sSoDaaF-XT2xeu4h6wR4tXO2hqOydQUkl_CQ";
@@ -51,7 +53,8 @@ const _chains = {};
 
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 const sameStored = (a, b) => a === b;
-const serverProtectedKeys = new Set(["sps_clients", "sps_completed", "sps_invoices"]);
+const serverProtectedKeys = new Set(["sps_clients", "sps_schedule", "sps_completed", "sps_invoices"]);
+const fieldIntentKeys = new Set(["sps_clients", "sps_schedule"]);
 function normalizeRemoteStoredValue(key, value) {
   const raw = normalizeStoredValue(value);
   if (!serverProtectedKeys.has(key) || typeof raw !== "string") return raw;
@@ -121,7 +124,11 @@ function throttledError(msg) {
 }
 
 function publicConflicts(conflicts) {
-  return (conflicts || []).map((item) => ({ path: item.path, kind: item.kind }));
+  return (conflicts || []).map((item) => ({
+    path: Array.isArray(item.path)
+      ? `${item.entity || "record"}[${item.entityId || "unknown"}]${item.path.length ? `.${item.path.join(".")}` : ""}` : item.path,
+    kind: item.kind,
+  }));
 }
 
 function conflictSignature(item) {
@@ -875,8 +882,9 @@ function stagePending(key, value, options = {}) {
       forceExpectedVersion: options.force && hasOwn(options, "expectedVersion")
         ? Math.max(0, Number(options.expectedVersion) || 0)
         : null,
-      status: existing.status === "conflict" && !options.force ? "conflict" : "pending",
-      conflicts: existing.status === "conflict" && !options.force ? existing.conflicts : [],
+      status: existing.status === "conflict" && !options.force && !fieldIntentKeys.has(key) ? "conflict" : "pending",
+      conflicts: existing.status === "conflict" && !options.force && !fieldIntentKeys.has(key) ? existing.conflicts : [],
+      ...(fieldIntentKeys.has(key) ? { sharedReviewConflicts: undefined, sharedResolutions: undefined } : {}),
       updatedAt: now,
     };
   } else {
@@ -979,16 +987,19 @@ function mergeEnvelopeWithRemote(key, envelope, remote, prefer = "remote") {
 
 function rebaseNewerEnvelope(key, completedEnvelope, appliedValue, appliedVersion, newer) {
   if (!newer || newer.opId === completedEnvelope.opId) return null;
-  if (newer.force) {
+  if (newer.force && !fieldIntentKeys.has(key)) {
     return { ...newer, baseExists: true, baseValue: appliedValue, baseVersion: appliedVersion, status: "pending", conflicts: [] };
   }
-  const rebased = mergeStoredState(key, completedEnvelope.localValue, newer.localValue, appliedValue, { prefer: "remote" });
+  const rebased = mergeStoredState(key, completedEnvelope.localValue, newer.localValue, appliedValue, { prefer: "local" });
   const next = {
     ...newer,
-    baseExists: true,
-    baseValue: appliedValue,
-    baseVersion: appliedVersion,
-    localValue: rebased.value,
+    // A user can type again while a reviewed choice is in flight. If that text
+    // overlaps the response, preserve its original base and exact local value.
+    // Rebasing it onto the response would either erase it or authorize a stale overwrite.
+    baseExists: rebased.conflicts.length ? newer.baseExists : true,
+    baseValue: rebased.conflicts.length ? newer.baseValue : appliedValue,
+    baseVersion: rebased.conflicts.length ? newer.baseVersion : appliedVersion,
+    localValue: rebased.conflicts.length ? newer.localValue : rebased.value,
     status: rebased.conflicts.length ? "conflict" : "pending",
     conflicts: publicConflicts(rebased.conflicts),
     updatedAt: Date.now(),
@@ -1020,6 +1031,7 @@ async function finishApplied(key, envelope, value, version, identityVersion, opt
   }
   recalculateRetryWindow();
   const pendingPersistence = await persistPending();
+  if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
   if (!pendingPersistence || pendingPersistence.durable !== true) {
     if (!hasNewerIntent) {
       _pending[key] = {
@@ -1037,6 +1049,7 @@ async function finishApplied(key, envelope, value, version, identityVersion, opt
       recalculateRetryWindow();
     }
     const restored = await persistPending();
+    if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
     const error = new Error("The change reached the server, but this device could not clear its pending copy. Keep this screen open and retry sync.");
     error.code = "pending_cleanup_unavailable";
     throttledError(error.message);
@@ -1089,6 +1102,7 @@ async function finishDeleted(key, envelope, identityVersion, options = {}) {
   }
   recalculateRetryWindow();
   const pendingPersistence = await persistPending();
+  if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
   if (!pendingPersistence || pendingPersistence.durable !== true) {
     if (!hasNewerIntent) {
       _pending[key] = {
@@ -1106,6 +1120,7 @@ async function finishDeleted(key, envelope, identityVersion, options = {}) {
       recalculateRetryWindow();
     }
     const restored = await persistPending();
+    if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
     const error = new Error("The deletion reached the server, but this device could not clear its pending copy. Keep this screen open and retry sync.");
     error.code = "pending_cleanup_unavailable";
     throttledError(error.message);
@@ -1127,6 +1142,171 @@ async function finishDeleted(key, envelope, identityVersion, options = {}) {
   if (options.notify !== false && !hasNewerIntent) notifyReconciled(key, true);
   notify("save-ok", "Saved");
   return { ok: true, value: undefined, version: 0, deleted: true };
+}
+
+// Retire only the confirmed client edit. A conflict on another client keeps its
+// original comparison base and recoverable local copy, rather than blocking this save.
+async function finishSharedClient(submitted, clientId, value, version, identityVersion) {
+  const key = "sps_clients";
+  if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+  const prior = _pending[key];
+  const actual = JSON.parse(value), pick = rows => rows.find(client => String(client?.id) === clientId);
+  const saved = pick(actual);
+  if (!saved) return commitFailure(key, submitted, new Error("This client was removed while saving. Reopen the saved client list."));
+  adoptRemote(key, { exists: true, value, version }, false);
+  if (prior?.v === 2 && prior.baseExists && !prior.deleteIntent) {
+    const base = JSON.parse(prior.baseValue), local = JSON.parse(prior.localValue);
+    const submittedClient = pick(JSON.parse(submitted.localValue));
+    const newerClient = pick(local);
+    const target = mergeStoredState(key, [submittedClient], newerClient ? [newerClient] : [], [saved], { prefer: "local" });
+    const targetRows = JSON.parse(target.value);
+    const replace = (rows, next) => rows.flatMap(client => String(client?.id) === clientId ? next : [client]);
+    const nextBase = target.conflicts.length ? prior.baseValue : JSON.stringify(replace(base, [saved]));
+    const nextLocal = target.conflicts.length ? prior.localValue : JSON.stringify(replace(local, targetRows));
+    if (stableInvoiceReviewJSON(JSON.parse(nextBase)) === stableInvoiceReviewJSON(JSON.parse(nextLocal))) {
+      delete _pending[key]; delete _conflicts[key]; _cache[key] = value;
+    } else {
+      const retained = (prior.sharedReviewConflicts || []).filter(conflict => conflict.entityId !== clientId);
+      const next = { ...prior, baseValue: nextBase, localValue: nextLocal, baseVersion: version,
+        status: retained.length ? "conflict" : "pending", conflicts: publicConflicts(retained), sharedReviewConflicts: retained,
+        sharedResolutions: undefined, retryCount: 0, retryAt: 0, updatedAt: Date.now() };
+      _pending[key] = next;
+      if (retained.length) _conflicts[key] = next; else delete _conflicts[key];
+      _cache[key] = projectAcceptedReports(key, mergeStoredState(key, nextBase, nextLocal, value, { prefer: "local" }).value, value);
+    }
+  } else {
+    // Do not clear a different legacy or destructive intent that appeared during the request.
+    _cache[key] = prior ? prior.localValue : value;
+  }
+  recalculateRetryWindow();
+  const persisted = await persistPending();
+  if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+  if (!persisted?.durable) {
+    if (!_pending[key] && prior) _pending[key] = prior;
+    await persistPending();
+    if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+    return { ...pendingDurabilityFailure(new Error("The client reached the server, but this device could not confirm its pending copy. Retry the same save.")), serverConfirmed: true };
+  }
+  saveSnapshot();
+  return { ok: true, value: _cache[key], parsedValue: JSON.parse(_cache[key]), confirmedClient: saved,
+    confirmedValue: value, version, pending: !!_pending[key] };
+}
+
+function patchClient(baselineClient, updatedClient) {
+  const key = "sps_clients", identityVersion = _identityVersion;
+  // Snapshot caller-owned form values before waiting behind any other request.
+  const baseline = structuredClone(baselineClient), updated = structuredClone(updatedClient);
+  const clientId = String(baseline?.id ?? "");
+  const priorChain = _chains[key] || Promise.resolve();
+  const run = (async () => {
+    try { await priorChain; } catch (_) {}
+    if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+    if (!clientId || String(updated?.id ?? "") !== clientId) return { ok: false, error: new Error("A unique client is required for this save.") };
+    const hydration = await ensureHydrate();
+    if (!hydration?.ok) return pendingDurabilityFailure(hydration?.error);
+    const initialized = await init();
+    if (!initialized.ok || identityVersion !== _identityVersion || !_uid) return { ...initialized, ok: false };
+    const previous = _pending[key];
+    if (previous && (previous.v !== 2 || !previous.baseExists || previous.deleteIntent)) {
+      return { ok: false, error: new Error("An older pending client copy needs review before editing this client. Your choices are still here.") };
+    }
+    let base, local;
+    try {
+      base = JSON.parse(previous?.baseValue || _confirmed[key]);
+      local = JSON.parse(previous?.localValue || _confirmed[key]);
+      if (!Array.isArray(base) || !Array.isArray(local)) throw new Error("Invalid client roster");
+      const byId = rows => rows.filter(client => String(client?.id) === clientId);
+      if (byId(base).length !== 1 || byId(local).length !== 1) throw new Error("This client is missing or duplicated. Reopen the client before saving.");
+      const baseClient = byId(base)[0], localClient = byId(local)[0];
+      const same = (a, b) => stableInvoiceReviewJSON(a) === stableInvoiceReviewJSON(b);
+      const sameRetry = previous && same(baseClient, baseline) && same(localClient, updated);
+      if (previous && !same(baseClient, localClient) && !sameRetry) {
+        return { ok: false, conflict: true, error: new Error("This client already has pending edits. Review that client's saved changes before replacing them.") };
+      }
+      const envelope = sameRetry ? previous : {
+        ...(previous || {}), v: 2, opId: newOpId(), baseExists: true,
+        baseValue: JSON.stringify(base.map(client => String(client.id) === clientId ? baseline : client)),
+        localValue: JSON.stringify(local.map(client => String(client.id) === clientId ? updated : client)),
+        baseVersion: Number(_versions[key]) || 0, deleteIntent: false, force: false,
+        status: previous?.status === "conflict" ? "conflict" : "pending",
+        conflicts: previous?.conflicts || [], sharedReviewConflicts: previous?.sharedReviewConflicts,
+        sharedResolutions: undefined, retryCount: 0, retryAt: 0, createdAt: previous?.createdAt || Date.now(), updatedAt: Date.now(),
+      };
+      _pending[key] = envelope;
+      if (envelope.status === "conflict") _conflicts[key] = envelope; else delete _conflicts[key];
+      recalculateRetryWindow();
+      _cache[key] = mergeStoredState(key, envelope.baseValue, envelope.localValue, _confirmed[key], { prefer: "local" }).value;
+      const persisted = await persistPending();
+      if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+      if (!persisted?.durable) return pendingDurabilityFailure(persisted?.error);
+      return commitSharedEnvelope(key, envelope, identityVersion, null, clientId);
+    } catch (error) { return { ok: false, error }; }
+  })();
+  _chains[key] = run.then(() => {}, () => {});
+  return run;
+}
+
+async function commitSharedEnvelope(key, envelope, identityVersion, strategy = null, targetClientId = null) {
+  if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+  if (envelope.v !== 2 || !envelope.baseExists || envelope.deleteIntent) {
+    return setConflict(key, envelope, [{ path: "$", kind: "original-fields-required" }]);
+  }
+  let intent;
+  try {
+    intent = await buildSharedStateIntent(key, JSON.parse(envelope.baseValue), JSON.parse(envelope.localValue), { operationId: envelope.opId });
+  } catch (error) { return commitFailure(key, envelope, error); }
+  if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+  if (_pending[key]?.opId !== envelope.opId) return { ok: false, superseded: true };
+  if (targetClientId !== null) intent.operations = intent.operations.filter(operation => operation.entity === "client" && operation.entityId === targetClientId);
+  const resolutions = strategy && Array.isArray(envelope.sharedReviewConflicts)
+    ? envelope.sharedReviewConflicts.flatMap(conflict => {
+      const operation = intent.operations.find(item => item.entity === conflict.entity && item.entityId === conflict.entityId
+        && JSON.stringify(item.path || []) === JSON.stringify(conflict.path || []));
+      return operation ? [{ operationId: operation.id, choice: strategy, reviewed: conflict.current }] : [];
+    })
+    : envelope.sharedResolutions;
+  if (strategy && resolutions?.length) {
+    envelope = { ...envelope, sharedResolutions: resolutions, status: "pending" };
+    _pending[key] = envelope; delete _conflicts[key];
+    const persisted = await persistPending();
+    if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+    if (!persisted?.durable) return pendingDurabilityFailure(persisted?.error);
+    if (_pending[key]?.opId !== envelope.opId) return { ok: false, superseded: true };
+  }
+  const actorId = _uid;
+  const result = await sendSharedStateIntent(intent, { getSession: () => supabase.auth.getSession(), resolutions,
+    expectedActorId: actorId, isCurrentIdentity: () => _uid === actorId && _identityVersion === identityVersion });
+  if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+  if (result.error) return commitFailure(key, envelope, result.error);
+  const receipt = result.data;
+  if (receipt?.actorId !== _uid || receipt?.key !== key || receipt?.operationId !== envelope.opId) {
+    return commitFailure(key, envelope, new Error("The save receipt did not match this account and change. Your pending work is preserved."));
+  }
+  if (receipt.ok === false && receipt.code === "shared-state-field-conflict") {
+    if (_pending[key]?.opId !== envelope.opId) return { ok: false, superseded: true };
+    const conflicts = Array.isArray(receipt.conflicts) ? receipt.conflicts : [];
+    if (!conflicts.length) return commitFailure(key, envelope, new Error("The changed fields could not be identified. Retry to read the saved record."));
+    const combined = targetClientId !== null
+      ? [...(envelope.sharedReviewConflicts || []).filter(conflict => conflict.entityId !== targetClientId), ...conflicts]
+      : conflicts;
+    return setConflict(key, { ...envelope, sharedReviewConflicts: combined, sharedResolutions: undefined }, combined);
+  }
+  const version = Number(receipt.afterVersion), before = Number(receipt.beforeVersion);
+  if (receipt.ok !== true || receipt.complete !== true || !Array.isArray(receipt.value)
+    || !Number.isSafeInteger(version) || !Number.isSafeInteger(before) || before < 1 || version < before) {
+    return commitFailure(key, envelope, new Error("The saved record could not be verified. Retry to check the same change."));
+  }
+  let value = normalizeRemoteStoredValue(key, receipt.value);
+  if (version < (Number(_versions[key]) || 0)) {
+    // A later complete snapshot already arrived. Do not roll the device back
+    // when an earlier request's response is slow.
+    value = _confirmed[key];
+    return targetClientId !== null
+      ? finishSharedClient(envelope, targetClientId, value, Number(_versions[key]), identityVersion)
+      : finishApplied(key, envelope, value, Number(_versions[key]), identityVersion);
+  }
+  return targetClientId !== null ? finishSharedClient(envelope, targetClientId, value, version, identityVersion)
+    : finishApplied(key, envelope, value, version, identityVersion);
 }
 
 async function commitKey(key, identityVersion = _identityVersion) {
@@ -1164,6 +1344,7 @@ async function commitKey(key, identityVersion = _identityVersion) {
   }
   if (!envelope) return { ok: true, value: _confirmed[key], version: Number(_versions[key]) || 0 };
   if (envelope.status === "conflict") return { ok: false, conflict: true, key, conflicts: envelope.conflicts || [] };
+  if (fieldIntentKeys.has(key)) return commitSharedEnvelope(key, envelope, identityVersion);
 
   let remote;
   if (hasOwn(_exists, key) && (_exists[key] === false || Number(_versions[key]) > 0)) {
@@ -1500,6 +1681,17 @@ async function resolveConflict(key, strategy, identityVersion = _identityVersion
   if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
   if (!_pending[key] || _pending[key].opId !== envelope.opId) return { ok: false, superseded: true };
 
+  if (fieldIntentKeys.has(key)) {
+    if ((envelope.v !== 2 || !envelope.baseExists || envelope.deleteIntent) && strategy === "remote") {
+      const remote = await readRemote(key, identityVersion);
+      if (remote.staleIdentity) return { ok: false, staleIdentity: true };
+      if (!remote.ok) return queueFailure(key, remote.error, envelope);
+      return remote.exists ? finishApplied(key, envelope, remote.value, remote.version, identityVersion)
+        : finishDeleted(key, envelope, identityVersion);
+    }
+    return commitSharedEnvelope(key, envelope, identityVersion, strategy);
+  }
+
   for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt += 1) {
     const current = _pending[key];
     if (!current || current.opId !== envelope.opId) return { ok: false, superseded: true };
@@ -1563,9 +1755,10 @@ async function verifyBatchValues(operations, identityVersion) {
   };
 }
 
-function replaceMany(changes) {
+function replaceMany(changes, options = {}) {
   if (!Array.isArray(changes) || !changes.length) return Promise.resolve({ ok: false, error: new Error("No sections to replace") });
   const identityVersion = _identityVersion;
+  const actorId = _uid, operationId = newOpId(), action = options.action;
   const seen = new Set();
   let operations;
   try {
@@ -1577,7 +1770,8 @@ function replaceMany(changes) {
         throw new Error("Invalid atomic replacement request");
       }
       seen.add(key);
-      return { key, value, expectedVersion };
+      return { key, value, expectedVersion,
+        ...(hasOwn(change, "baseValue") ? { baseValue: normalizeStoredValue(change.baseValue) } : {}) };
     });
   } catch (error) { return Promise.resolve({ ok: false, error }); }
 
@@ -1594,7 +1788,33 @@ function replaceMany(changes) {
     const blockedKey = keys.find((key) => _pending[key]);
     if (blockedKey) return { ok: false, conflict: true, conflictKey: blockedKey, error: new Error("A local edit is still pending") };
 
-    let result = await compareAndSwapBatch(operations, identityVersion);
+    const protectedBatch = operations.some(operation => fieldIntentKeys.has(operation.key));
+    let result;
+    if (protectedBatch) {
+      let requestOperations;
+      try {
+        requestOperations = await Promise.all(operations.map(async operation => {
+          if (!fieldIntentKeys.has(operation.key)) return { key: operation.key, expectedVersion: operation.expectedVersion, value: JSON.parse(operation.value) };
+          const original = hasOwn(operation, "baseValue") ? operation.baseValue
+            : Number(_versions[operation.key]) === operation.expectedVersion ? _confirmed[operation.key] : undefined;
+          if (original === undefined) throw new Error("The original records are required for this change. Reload them before trying again.");
+          const intent = await buildSharedStateIntent(operation.key, JSON.parse(original), JSON.parse(operation.value), { operationId: `${operationId}:${operation.key}` });
+          return { key: operation.key, expectedVersion: operation.expectedVersion, intent };
+        }));
+      } catch (error) { return { ok: false, error }; }
+      const response = await sendSharedStateIntent({ protocol: 1, mode: "batch", operationId, action, operations: requestOperations }, {
+        getSession: () => supabase.auth.getSession(), expectedActorId: actorId,
+        isCurrentIdentity: () => _uid === actorId && _identityVersion === identityVersion,
+      });
+      if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+      const receipt = response.data;
+      if (!response.error && receipt?.ok === true && receipt.actorId === actorId && receipt.operationId === operationId
+        && receipt.complete === true && operations.every(operation => Number.isSafeInteger(receipt.versions?.[operation.key])
+          && receipt.versions[operation.key] >= operation.expectedVersion && hasOwn(receipt.values || {}, operation.key))) {
+        result = { ok: true, applied: true, versions: receipt.versions };
+      } else result = { ok: false, conflict: response.error?.status === 409 || receipt?.code === "shared-state-field-conflict",
+        error: response.error || new Error("The atomic save receipt was not confirmed. The original records are unchanged on this device.") };
+    } else result = await compareAndSwapBatch(operations, identityVersion);
     if (result.staleIdentity) return { ok: false, staleIdentity: true };
     if (!result.ok || !result.applied) {
       // A response can be lost after PostgreSQL committed the whole transaction. Re-read every key;
@@ -1603,7 +1823,7 @@ function replaceMany(changes) {
       if (verified.staleIdentity) return { ok: false, staleIdentity: true };
       if (!verified.matched) {
         if (!result.ok) throttledError(`Save failed: ${(result.error && result.error.message) || "the atomic replacement did not complete."}`);
-        return { ok: false, conflict: !!result.ok, conflictKey: result.conflictKey || null, error: result.error };
+        return { ok: false, conflict: !!result.ok || !!result.conflict, conflictKey: result.conflictKey || null, error: result.error };
       }
       result = { ok: true, applied: true, outcome: "already-applied", versions: verified.versions };
     }
@@ -1668,7 +1888,9 @@ function replaceMany(changes) {
         notifyConflict(key, next.conflicts);
       }
     }
-    await persistPending();
+    const durability = await persistPending();
+    if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+    if (!durability?.durable) return { ...pendingDurabilityFailure(durability?.error), serverConfirmed: true };
     saveSnapshot();
     operations.forEach((operation) => { if (!_pending[operation.key]) notifyReconciled(operation.key, true); });
     notify("save-ok", "Saved");
@@ -1979,6 +2201,7 @@ export const store = {
   captureIdentity() { return { uid: _uid, generation: _identityVersion }; },
   isCurrentIdentity,
   acceptCreatedClient,
+  patchClient,
   acceptInvoiceReviewResolution,
   acceptInvoiceRefreshSnapshot,
   // Display-only overlay; neither stages nor resolves the original durable local intent.
@@ -2064,7 +2287,7 @@ export const store = {
     return run;
   },
 
-  replaceMany(changes) { return replaceMany(changes); },
+  replaceMany(changes, options) { return replaceMany(changes, options); },
 
   async remove(key, options = {}) {
     const identityVersion = _identityVersion;

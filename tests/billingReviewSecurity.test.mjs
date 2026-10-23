@@ -16,7 +16,7 @@ test("review privacy migration excludes the key before owner/staff exceptions", 
 
 test("billing review accounting and edits are owner-only with no client delivery route", () => {
   assert.match(endpoint, /authorize: requireOwner/);
-  assert.match(endpoint, /if \(!await deps\.authorize\(req, res, "billing reviews"\)\) return/);
+  assert.match(endpoint, /const actor = await deps\.authorize\(req, res, "billing reviews"\);\s+if \(!actor\) return/);
   assert.doesNotMatch(endpoint, /send-invoice|send-sms|send-notification|sendEstimate|sendSms/);
   assert.match(create, /req\[BILLING_REVIEW_CREATE_CONTEXT\]/);
   assert.doesNotMatch(create, /req\.body\.?(?:billingReviewContext|trustedCanonicalInvoice)/);

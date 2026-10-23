@@ -16,7 +16,7 @@ function harness({ reviews = [draft()], invoices = [], customCreate, inventoryNu
     sps_invoicing: { nextNumber: 1001, numberPrefix: "INV-", dueDays: 15 }, sps_maintenance_billing: { version: 2, policies: {}, allocations: {} }, ...state,
   };
   const rows = Object.fromEntries(Object.entries(values).map(([key, value]) => [key, { key, exists: true, version: 1, value: clone(value) }]));
-  const calls = { posts: [], inventories: 0, writes: [], auth: 0, reads: [] };
+  const calls = { posts: [], inventories: 0, writes: [], auth: 0, reads: [], sharedScopes: [] };
   let now = Date.parse("2026-10-05T14:00:00Z");
   let counter = 0;
   let failPromote = false;
@@ -35,6 +35,14 @@ function harness({ reviews = [draft()], invoices = [], customCreate, inventoryNu
     authorize: async (_req, res) => { calls.auth += 1; if (authorized) return { id: "owner" }; res.status(403).json({ error: "Owner access required" }); return null; },
     read: async keys => { calls.reads.push([...keys]); return Object.fromEntries(keys.map(key => [key, clone(rows[key] || { key, exists: false, version: 0, value: null })])); },
     cas: (key, version, value) => apply([{ key, expectedVersion: version, value }]), batch: apply,
+    sharedBatch: (operations, scope) => {
+      assert.equal(scope.actorId, "owner");
+      const protectedKeys = operations.filter(operation => ["sps_clients", "sps_schedule"].includes(operation.key) && !operation.checkOnly).map(operation => operation.key);
+      assert.deepEqual(Object.keys(scope.expectedCurrent).sort(), protectedKeys.sort());
+      for (const key of protectedKeys) assert.deepEqual(scope.expectedCurrent[key], rows[key].value);
+      calls.sharedScopes.push(clone(scope));
+      return apply(operations);
+    },
     inventory: async () => { calls.inventories += 1; return { realmId: "realm-1", numbers: inventoryNumbers, checkedAt: new Date(now).toISOString() }; },
     guard: async () => null, now: () => now, uuid: () => `attempt-${++counter}`,
     createInvoice: async (req, res) => {

@@ -1,6 +1,8 @@
+import { installSharedStateEndpointFixture } from "./helpers/sharedStateEndpointFixture.mjs";
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { stableInvoiceReviewJSON } from "../invoiceReviewIdentity.js";
 import { mergeStoredState } from "../stateMerge.js";
 
 if (!globalThis.CustomEvent) globalThis.CustomEvent = class extends Event { constructor(type, init) { super(type); this.detail = init?.detail; } };
@@ -15,7 +17,8 @@ idb.del = async key => { disk.delete(key); };
 const { store, supabase } = await import("../supabaseClient.js");
 globalThis.window = {};
 const original = { from: supabase.from, rpc: supabase.rpc };
-after(() => { Object.assign(idb, originalIdb); Object.assign(supabase, original); });
+let restoreEndpoint = () => {};
+after(() => { restoreEndpoint(); Object.assign(idb, originalIdb); Object.assign(supabase, original); });
 const json = JSON.stringify;
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const source = fs.readFileSync(new URL("../App.jsx", import.meta.url), "utf8");
@@ -31,7 +34,7 @@ function mountHook(key, initial) {
   function useState(initial) { const i = cursor++; if (!(i in slots)) slots[i] = initial; return [slots[i], update => { const next = typeof update === "function" ? update(slots[i]) : update; if (!Object.is(next, slots[i])) { slots[i] = next; dirty = true; } }]; }
   function useRef(initial) { const i = cursor++; return slots[i] || (slots[i] = { current: initial }); }
   function useEffect(effect, deps) { const i = cursor++; const old = slots[i]; if (!old || deps.some((value, n) => !Object.is(value, old.deps[n]))) { effects.push(() => { old?.cleanup?.(); slots[i].cleanup = effect(); }); slots[i] = { deps }; } }
-  const hook = new Function("useState", "useRef", "useEffect", "useCallback", "store", "mergeStoredState", `const DB_READ_OK = true; ${hookSource}; return useStoredState;`)(useState, useRef, useEffect, fn => fn, store, mergeStoredState);
+  const hook = new Function("useState", "useRef", "useEffect", "useCallback", "store", "mergeStoredState", "stableInvoiceReviewJSON", `const DB_READ_OK = true; ${hookSource}; return useStoredState;`)(useState, useRef, useEffect, fn => fn, store, mergeStoredState, stableInvoiceReviewJSON);
   function render() { cursor = 0; dirty = false; output = hook(key, initial); }
   return { get result() { return output; }, async settle() { for (let pass = 0; pass < 15; pass++) { if (dirty) render(); while (effects.length) effects.shift()(); await tick(); } }, dispose() { slots.forEach(slot => slot?.cleanup?.()); } };
 }
@@ -39,6 +42,7 @@ function database(value, key = "sps_clients") {
   const state = { value: json(value), version: 1, calls: 0 };
   supabase.from = () => ({ select(columns) { const builder = { eq() { return builder; }, in() { return builder; }, async maybeSingle() { return { data: { key, value: state.value, version: state.version }, error: null }; }, then(resolve, reject) { return Promise.resolve({ data: [{ key, value: state.value, version: state.version }], error: null }).then(resolve, reject); } }; return builder; } });
   supabase.rpc = async (_name, args) => { state.calls++; if (args.p_expected_version !== state.version) return { data: [{ applied: false, current_version: state.version }], error: null }; state.value = args.p_value; state.version++; return { data: [{ applied: true, current_version: state.version }], error: null }; };
+  restoreEndpoint(); restoreEndpoint = installSharedStateEndpointFixture({ store, supabase, readRow: requested => requested === key ? state : null });
   return state;
 }
 

@@ -1,3 +1,4 @@
+import { installSharedStateEndpointFixture } from "./helpers/sharedStateEndpointFixture.mjs";
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 if (!globalThis.CustomEvent) globalThis.CustomEvent = class extends Event { constructor(type, init) { super(type); this.detail = init?.detail; } };
@@ -11,7 +12,8 @@ idb.set = async (k,v) => { disk.set(k,structuredClone(v)); return k; };
 idb.del = async k => disk.delete(k);
 const { store, supabase } = await import('../supabaseClient.js');
 const original = { from: supabase.from, rpc: supabase.rpc };
-after(() => { Object.assign(idb,originalIdb); Object.assign(supabase,original); });
+let restoreEndpoint = () => {};
+after(() => { restoreEndpoint(); Object.assign(idb,originalIdb); Object.assign(supabase,original); });
 const key = 'sps_clients', json = JSON.stringify;
 const old = {id:'existing',name:'Existing client',notes:'Original',history:[]};
 const created = {id:'11223344-5566-4777-8888-99aabbccddee',name:'Cedar House',phone:'555-0100',history:[],equipment:[]};
@@ -19,6 +21,7 @@ function database(clients=[old],version=1) {
   const db = { value:json(clients),version,reads:0,writes:0,readError:null };
   supabase.from = () => ({ select() { const b = { eq() { return b; }, in() { return b; }, async maybeSingle() { db.reads++; return db.readError ? {error:db.readError} : {data:{key,value:db.value,version:db.version},error:null}; }, then(resolve,reject) { db.reads++; return Promise.resolve({data:[{key,value:db.value,version:db.version}],error:null}).then(resolve,reject); } }; return b; } });
   supabase.rpc = async (_name,args) => { db.writes++; if(args.p_expected_version!==db.version) return {data:[{applied:false,current_version:db.version}],error:null}; db.value=args.p_value; db.version++; return {data:[{applied:true,current_version:db.version}],error:null}; };
+  restoreEndpoint(); restoreEndpoint = installSharedStateEndpointFixture({ store, supabase, readRow: requested => requested === key ? db : null });
   return db;
 }
 async function setup(uid,clients=[old],version=1) { const db=database(clients,version); store.setUser(uid); await store.initialize(); await store.get(key); return db; }
@@ -50,7 +53,7 @@ test('unrelated pending conflict remains durable and unchanged after compact cre
   assert.equal(saved.ok,true); assert.equal(saved.projected,true); assert.equal(saved.parsedValue[0].notes,'Field edit');
   assert.deepEqual(saved.parsedValue[1],created); assert.deepEqual(store.listConflicts(),conflicts);
   assert.equal(local.get(`sps_pending_writes:${uid}`),pending); assert.equal(db.writes,writes); assert.equal(db.reads,reads);
-  assert.equal((await store.get(key)).version,2);
+  assert.equal((await store.get(key)).version,1,"a conflict receipt does not certify a newer complete roster");
 });
 
 test('replay cannot overwrite newer existing profile or erase its completed reports',async()=>{

@@ -45,21 +45,30 @@ function installStateFetch(initial) {
     if (target.endsWith("/auth/v1/user")) {
       return response({ id: "user-1", email: "client@example.test" });
     }
-    if (target.endsWith("/rest/v1/rpc/sps_app_state_cas")) {
+    if (target.endsWith("/rest/v1/rpc/sps_app_state_cas") || target.endsWith("/rest/v1/rpc/sps_shared_state_patch_cas")) {
       calls.cas += 1;
       const body = JSON.parse(options.body);
       const row = state.get(body.p_key);
       const actualVersion = row ? row.version : 0;
+      const protectedPatch = target.endsWith("sps_shared_state_patch_cas");
+      if (body.p_key === "sps_clients") {
+        assert.equal(protectedPatch, true, "portal client edits must use the exact-baseline service writer");
+        assert.equal(body.p_actor_id, "user-1");
+        assert.deepEqual(body.p_expected_current, row.value);
+      }
       if (actualVersion !== body.p_expected_version) {
         return response([{ applied: false, outcome: "conflict", current_version: actualVersion, changed_at: null }]);
       }
-      state.set(body.p_key, { value: JSON.parse(body.p_value), version: actualVersion + 1 });
-      return response([{ applied: true, outcome: "updated", current_version: actualVersion + 1, changed_at: null }]);
+      const value = JSON.parse(protectedPatch ? body.p_proposed : body.p_value);
+      state.set(body.p_key, { value, version: actualVersion + 1 });
+      return response([{ applied: true, outcome: "updated", current_version: actualVersion + 1, changed_at: null, value }]);
     }
-    if (target.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+    if (target.endsWith("/rest/v1/rpc/sps_shared_state_patch_batch_cas")) {
       calls.batch += 1;
       const body = JSON.parse(options.body);
       const operations = body.p_operations || [];
+      assert.equal(body.p_actor_id, "user-1");
+      assert.deepEqual(body.p_expected_current, { sps_clients: state.get("sps_clients").value });
       const conflict = operations.find((operation) => (state.get(operation.key)?.version || 0) !== operation.expected_version);
       if (conflict) {
         return response([{ applied: false, outcome: "conflict", conflict_key: conflict.key, current_versions: {} }]);
@@ -68,7 +77,9 @@ function installStateFetch(initial) {
         const currentVersion = state.get(operation.key)?.version || 0;
         state.set(operation.key, { value: JSON.parse(operation.value), version: currentVersion + 1 });
       }
-      return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
+      return response([{ applied: true, outcome: "applied", conflict_key: null,
+        current_versions: Object.fromEntries(operations.map(operation => [operation.key, state.get(operation.key).version])),
+        values: Object.fromEntries(operations.map(operation => [operation.key, state.get(operation.key).value])) }]);
     }
     if (target.includes("/rest/v1/app_state?")) {
       const parsed = new URL(target);

@@ -147,6 +147,13 @@ export function memberHasCapability(member, capability) {
       || (role === "custom" && member.perms?.canEditClients === true);
   }
 
+  if (capability === "editSchedule") {
+    const schedule = tabMode(member, "schedule");
+    if (schedule !== null) return schedule === "edit";
+    return ["full", "lead"].includes(role)
+      || (role === "custom" && member.perms?.canEditSchedule !== false);
+  }
+
   if (capability === "invoiceView") {
     const mode = tabMode(member, "invoices");
     if (mode !== null) return mode === "view" || mode === "edit";

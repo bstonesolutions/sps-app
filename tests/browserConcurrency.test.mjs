@@ -1,3 +1,4 @@
+import { installSharedStateEndpointFixture } from "./helpers/sharedStateEndpointFixture.mjs";
 import test, { after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
@@ -29,8 +30,10 @@ const { store, supabase } = await import("../supabaseClient.js");
 const originalFrom = supabase.from.bind(supabase);
 const originalRpc = supabase.rpc.bind(supabase);
 const originalRefresh = supabase.auth.refreshSession.bind(supabase.auth);
+let restoreEndpoint = () => {};
 
 afterEach(async () => {
+  restoreEndpoint(); restoreEndpoint = () => {};
   supabase.from = originalFrom;
   supabase.rpc = originalRpc;
   supabase.auth.refreshSession = originalRefresh;
@@ -132,6 +135,11 @@ function installDatabase(initialRows, options = {}) {
     }
     throw new Error(`Unexpected RPC ${name}`);
   };
+  restoreEndpoint(); restoreEndpoint = installSharedStateEndpointFixture({ store, supabase, readRow: key => rows.get(key), commit: async (key, version, value) => {
+    const result = await supabase.rpc("sps_app_state_cas", { p_key: key, p_expected_version: version, p_value: json(value) });
+    if (result.data?.[0]?.applied) await options.afterPatchCommit?.();
+    return result;
+  } });
   return {
     rows,
     get casCalls() { return casCalls; },
@@ -635,18 +643,18 @@ test("a delete is serialized behind an in-flight save", async () => {
   const started = new Promise((resolve) => { firstStarted = resolve; });
   const gate = new Promise((resolve) => { releaseFirst = resolve; });
   const db = installDatabase(
-    { sps_clients: { value: json(base), version: 1, updated_at: null } },
+    { sps_generic_clients: { value: json(base), version: 1, updated_at: null } },
     { beforeCas: async ({ call }) => { if (call === 1) { firstStarted(); await gate; } } }
   );
-  await loadAs("browser-delete-after-set", "sps_clients");
+  await loadAs("browser-delete-after-set", "sps_generic_clients");
 
-  const save = store.set("sps_clients", json([{ id: "c1", note: "B" }]), { baseValue: json(base) });
+  const save = store.set("sps_generic_clients", json([{ id: "c1", note: "B" }]), { baseValue: json(base) });
   await started;
-  const removal = store.remove("sps_clients", { force: true });
+  const removal = store.remove("sps_generic_clients", { force: true });
   releaseFirst();
   await Promise.all([save, removal]);
 
-  assert.equal(db.rows.has("sps_clients"), false);
+  assert.equal(db.rows.has("sps_generic_clients"), false);
   assert.equal(db.deleteCalls, 1);
 });
 
@@ -657,59 +665,59 @@ test("a delayed delete response cannot erase a newer recreation", async () => {
   const started = new Promise((resolve) => { deleteStarted = resolve; });
   const gate = new Promise((resolve) => { releaseDelete = resolve; });
   const db = installDatabase(
-    { sps_clients: { value: json(base), version: 1, updated_at: null } },
+    { sps_generic_clients: { value: json(base), version: 1, updated_at: null } },
     { beforeDelete: async ({ call }) => { if (call === 1) { deleteStarted(); await gate; } } }
   );
-  await loadAs("browser-set-after-delete", "sps_clients");
+  await loadAs("browser-set-after-delete", "sps_generic_clients");
 
-  const removal = store.remove("sps_clients", { force: true });
+  const removal = store.remove("sps_generic_clients", { force: true });
   await started;
-  const recreation = store.set("sps_clients", json([{ id: "c2", note: "new" }]), { baseValue: json(base) });
+  const recreation = store.set("sps_generic_clients", json([{ id: "c2", note: "new" }]), { baseValue: json(base) });
   releaseDelete();
   await Promise.all([removal, recreation]);
 
-  assert.equal(JSON.parse(db.rows.get("sps_clients").value)[0].id, "c2");
+  assert.equal(JSON.parse(db.rows.get("sps_generic_clients").value)[0].id, "c2");
   assert.deepEqual(store.listConflicts(), []);
 });
 
 test("atomic multi-section replacement applies every section together", async () => {
   const db = installDatabase({
-    sps_clients: { value: json([{ id: "old" }]), version: 3, updated_at: null },
-    sps_schedule: { value: json([{ date: "old", stops: [] }]), version: 8, updated_at: null },
+    sps_generic_clients: { value: json([{ id: "old" }]), version: 3, updated_at: null },
+    sps_generic_schedule: { value: json([{ date: "old", stops: [] }]), version: 8, updated_at: null },
   });
-  await loadAs("browser-batch-success", "sps_clients");
+  await loadAs("browser-batch-success", "sps_generic_clients");
 
   const result = await store.replaceMany([
-    { key: "sps_clients", value: json([{ id: "new" }]), expectedVersion: 3 },
-    { key: "sps_schedule", value: json([]), expectedVersion: 8 },
+    { key: "sps_generic_clients", value: json([{ id: "new" }]), expectedVersion: 3 },
+    { key: "sps_generic_schedule", value: json([]), expectedVersion: 8 },
   ]);
 
   assert.equal(result.ok, true);
-  assert.equal(JSON.parse(db.rows.get("sps_clients").value)[0].id, "new");
-  assert.deepEqual(JSON.parse(db.rows.get("sps_schedule").value), []);
+  assert.equal(JSON.parse(db.rows.get("sps_generic_clients").value)[0].id, "new");
+  assert.deepEqual(JSON.parse(db.rows.get("sps_generic_schedule").value), []);
 });
 
 test("atomic multi-section replacement changes nothing when one baseline is stale", async () => {
   const originalClients = json([{ id: "shared-newer" }]);
   const originalSchedule = json([{ date: "keep", stops: [] }]);
   const db = installDatabase({
-    sps_clients: { value: originalClients, version: 4, updated_at: null },
-    sps_schedule: { value: originalSchedule, version: 8, updated_at: null },
+    sps_generic_clients: { value: originalClients, version: 4, updated_at: null },
+    sps_generic_schedule: { value: originalSchedule, version: 8, updated_at: null },
   });
-  await loadAs("browser-batch-conflict", "sps_clients");
+  await loadAs("browser-batch-conflict", "sps_generic_clients");
 
   const result = await store.replaceMany([
-    { key: "sps_clients", value: json([{ id: "restore" }]), expectedVersion: 3 },
-    { key: "sps_schedule", value: json([]), expectedVersion: 8 },
+    { key: "sps_generic_clients", value: json([{ id: "restore" }]), expectedVersion: 3 },
+    { key: "sps_generic_schedule", value: json([]), expectedVersion: 8 },
   ]);
 
   assert.equal(result.ok, false);
-  assert.equal(result.conflictKey, "sps_clients");
-  assert.equal(db.rows.get("sps_clients").value, originalClients);
-  assert.equal(db.rows.get("sps_schedule").value, originalSchedule);
+  assert.equal(result.conflictKey, "sps_generic_clients");
+  assert.equal(db.rows.get("sps_generic_clients").value, originalClients);
+  assert.equal(db.rows.get("sps_generic_schedule").value, originalSchedule);
 });
 
-test("a guarded client save adopts preserved server history instead of the submitted snapshot", async () => {
+test("a guarded client save cannot report discarded report edits as confirmed", async () => {
   const key = "sps_clients";
   const history = [{ sid: "stop-1", completionReceiptId: "accepted-report", notes: "Saved report" }];
   const base = [{ id: "c1", notes: "Before", history }];
@@ -718,14 +726,16 @@ test("a guarded client save adopts preserved server history instead of the submi
   });
   await loadAs("guarded-client-save", key);
   const result = await store.set(key, json([{ ...base[0], notes: "Office change", history: [] }]), { baseValue: json(base) });
-  assert.equal(result.ok, true);
-  assert.deepEqual(JSON.parse(result.value)[0].history, history);
-  assert.equal(JSON.parse(result.value)[0].notes, "Office change");
-  assert.equal((await store.get(key)).value, db.rows.get(key).value);
-  assert.equal(idbValues.has("pending-v2:guarded-client-save"), false);
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "shared-state-protected-change");
+  assert.deepEqual(JSON.parse(db.rows.get(key).value)[0].history, history);
+  assert.equal(JSON.parse(db.rows.get(key).value)[0].notes, "Office change");
+  assert.ok(idbValues.get("pending-v2:guarded-client-save")?.data[key], "the unaccepted report change remains recoverable");
+  await store.refresh(key);
+  assert.deepEqual(JSON.parse((await store.get(key)).value)[0].history, history);
 });
 
-test("a guarded conflict resolution adopts the preserved report returned by the database", async () => {
+test("a guarded conflict resolution retains any report edit the database could not accept", async () => {
   const key = "sps_clients";
   const history = [{ sid: "stop-1", completionReceiptId: "accepted-report", notes: "Saved report" }];
   const base = [{ id: "c1", notes: "Before", history }];
@@ -736,13 +746,16 @@ test("a guarded conflict resolution adopts the preserved report returned by the 
   db.rows.set(key, { value: json([{ ...base[0], notes: "Remote edit" }]), version: 2 });
   assert.equal((await store.set(key, json([{ ...base[0], notes: "Local edit", history: [] }]), { baseValue: json(base) })).conflict, true);
   const result = await store.resolveConflict(key, "local");
-  assert.equal(result.ok, true);
-  assert.deepEqual(JSON.parse(result.value)[0].history, history);
-  assert.equal(JSON.parse(result.value)[0].notes, "Local edit");
-  assert.equal((await store.get(key)).value, db.rows.get(key).value);
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "shared-state-protected-change");
+  assert.deepEqual(JSON.parse(db.rows.get(key).value)[0].history, history);
+  assert.equal(JSON.parse(db.rows.get(key).value)[0].notes, "Local edit");
+  assert.ok(idbValues.get("pending-v2:guarded-client-conflict")?.data[key]);
+  await store.refresh(key);
+  assert.deepEqual(JSON.parse((await store.get(key)).value)[0].history, history);
 });
 
-test("atomic replacement adopts protected server values for both reports and completion markers", async () => {
+test("atomic replacement cannot claim protected reports or completion markers were removed", async () => {
   const history = [{ sid: "stop-1", completionReceiptId: "accepted-report", notes: "Saved report" }];
   const clients = [{ id: "c1", history }];
   const completed = { "stop-1": { v: 2, receiptId: "accepted-report" } };
@@ -753,18 +766,19 @@ test("atomic replacement adopts protected server values for both reports and com
   const result = await store.replaceMany([
     { key: "sps_clients", value: json([]), expectedVersion: 1 },
     { key: "sps_completed", value: json({}), expectedVersion: 1 },
-  ]);
-  assert.equal(result.ok, true);
+  ], { action: "restore" });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "shared-state-protected-change");
   assert.equal((await store.get("sps_clients")).value, db.rows.get("sps_clients").value);
   assert.equal((await store.get("sps_completed")).value, db.rows.get("sps_completed").value);
 });
 
-test("failed protected post-write verification retains the durable pending edit for a later retry", async () => {
+test("a failed protected save receipt retains the durable pending edit for a later retry", async () => {
   const key = "sps_clients";
   const base = [{ id: "c1", notes: "Before" }];
   let verificationFails = true;
   const db = installDatabase({ [key]: { value: json(base), version: 1 } }, {
-    beforeRead: ({ call }) => { if (verificationFails) throw new Error("Verification unavailable"); },
+    afterPatchCommit: () => { if (verificationFails) throw new Error("Verification unavailable"); },
   });
   await loadAs("guarded-save-unconfirmed", key);
   const result = await store.set(key, json([{ ...base[0], notes: "Saved on server" }]), { baseValue: json(base) });

@@ -26377,14 +26377,15 @@ async function loadSnapshots() {
     return error ? [] : (data || []);
   } catch { return []; }
 }
-async function applySnapshot(id, baselineVersions = null) {
+async function applySnapshot(id, baseline = null) {
   const { data, error } = await supabase.from("app_state_backups").select("snapshot").eq("id", id).single();
   if (error || !data) throw new Error(error?.message || "Snapshot not found");
   const snap = data.snapshot || {};
-  if (!baselineVersions) {
-    const { data: versionRows, error: versionError } = await supabase.from("app_state").select("key, version");
+  if (!baseline) {
+    const { data: versionRows, error: versionError } = await supabase.from("app_state").select("key, value, version");
     if (versionError) throw new Error(versionError.message || "Could not establish a safe restore baseline");
-    baselineVersions = Object.fromEntries((versionRows || []).map((row) => [row.key, Number(row.version) || 0]));
+    baseline = { versions: Object.fromEntries((versionRows || []).map((row) => [row.key, Number(row.version) || 0])),
+      values: Object.fromEntries((versionRows || []).map((row) => [row.key, row.value])) };
   }
   const operations = [];
   for (const key of Object.keys(snap)) {
@@ -26392,9 +26393,10 @@ async function applySnapshot(id, baselineVersions = null) {
     const json = typeof snap[key] === "string" ? snap[key] : JSON.stringify(snap[key]);
     // Build 15, Item 1 — never restore a corrupted team (no owner); it would drop the owner.
     if (!restoreTeamGuard(key, json)) { console.warn("[team-guard] skipped restoring sps_team with no owner"); continue; }
-    operations.push({ key, value: json, expectedVersion: baselineVersions[key] || 0 });
+    operations.push({ key, value: json, expectedVersion: baseline.versions[key] || 0,
+      ...(["sps_clients", "sps_schedule"].includes(key) ? { baseValue: baseline.values[key] } : {}) });
   }
-  const result = await store.replaceMany(operations);
+  const result = await store.replaceMany(operations, { action: "restore" });
   if (!result || !result.ok) throw new Error(`Restore was not applied; ${result?.conflictKey || "shared data"} changed or the atomic save failed.`);
 }
 
@@ -26567,7 +26569,7 @@ function PhotoMigration({ clients = [] }) {
         setProgress("");
         return;
       }
-      const res = await store.replaceMany([{ key: "sps_clients", value: JSON.stringify(merged), expectedVersion: baselineVersion }]);
+      const res = await store.replaceMany([{ key: "sps_clients", value: JSON.stringify(merged), expectedVersion: baselineVersion, baseValue: liveClients }], { action: "media-migration" });
       if (!res || !res.ok) throw new Error("Clients changed while files were uploading, so nothing was relinked. Retry to use the latest client records.");
       const moved = uploaded + normalized;
       setMsg({ type: "ok", text: `Moved ${moved} legacy file reference${moved === 1 ? "" : "s"} to protected Storage${failed ? ` (${failed} kept unchanged; run another inspection to retry)` : ""}. Reloading…` });
@@ -26833,14 +26835,15 @@ function BackupRestore() {
           const json = JSON.stringify(await rebuild(refData[key], cur[key], [key]));
           // Build 15, Item 1 — never restore a corrupted team (no owner); it would drop the owner.
           if (!restoreTeamGuard(key, json)) { console.warn("[team-guard] skipped restoring sps_team with no owner"); fail++; continue; }
-          operations.push({ key, value: json, expectedVersion: baselineVersions[key] || 0 });
+          operations.push({ key, value: json, expectedVersion: baselineVersions[key] || 0,
+            ...(["sps_clients", "sps_schedule"].includes(key) ? { baseValue: cur[key] } : {}) });
         }
         catch (e) {
           console.warn("Restore key failed:", key, e.message);
           throw e;
         }
       }
-      const atomicRestore = await store.replaceMany(operations);
+      const atomicRestore = await store.replaceMany(operations, { action: "restore" });
       if (!atomicRestore || !atomicRestore.ok) {
         throw new Error(`Restore was not applied; ${atomicRestore?.conflictKey || "shared data"} changed or the atomic save failed.`);
       }
@@ -26880,7 +26883,7 @@ function BackupRestore() {
     try {
       const baseline = await snapshotState("Before undo"); // so the undo is itself undoable
       if (!baseline) throw new Error("Could not create the required safety snapshot. Nothing was reverted.");
-      await applySnapshot(id, baseline.versions);
+      await applySnapshot(id, baseline);
       setMsg({ type: "ok", text: "Reverted to that snapshot. Reloading…" });
       setTimeout(() => window.location.reload(), 1500);
     } catch (e) {
@@ -42873,6 +42876,11 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
         clients, updated, baselineClient: options.baselineClient,
         billingConfirmed: options.billingConfirmed,
         hasBillingReceipt: Object.prototype.hasOwnProperty.call(options, "billingConfirmed"),
+        persistClientIntent: async ({ baselineClient, updated: nextClient }) => {
+          const receipt = await store.patchClient(baselineClient, nextClient);
+          if (receipt?.ok) adoptClientsDisplay(receipt.parsedValue);
+          return receipt;
+        },
         refreshClients: async () => {
           const receipt = await store.refresh("sps_clients");
           return { ...receipt, clients: receipt?.ok && typeof receipt.value === "string" ? JSON.parse(receipt.value) : [] };
@@ -42984,12 +42992,12 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
         const nextEstimates = latestEstimates.map((entry) => String(entry?.id || "") === estimateId ? result.estimate : entry);
         const operations = [
           { key: "sps_estimates", value: JSON.stringify(nextEstimates), expectedVersion: Number(estimateRead.version) || 0 },
-          { key: "sps_schedule", value: JSON.stringify(result.schedule), expectedVersion: Number(scheduleRead.version) || 0 },
+          { key: "sps_schedule", value: JSON.stringify(result.schedule), expectedVersion: Number(scheduleRead.version) || 0, baseValue: latestSchedule },
           // Preserve the invoice version fence without creating or numbering an invoice.
           // Concurrent confirmation or deletion must retry with the latest billing link.
           { key: "sps_invoices", value: JSON.stringify(latestInvoices), expectedVersion: Number(invoiceRead.version) || 0 },
         ];
-        const saved = await store.replaceMany(operations);
+        const saved = await store.replaceMany(operations, { action: "estimate-schedule" });
         if (!saved?.ok) {
           if (saved?.conflict && attempt < 2) continue;
           return { ok: false, error: saved?.conflict ? "Another employee changed the schedule at the same time. Try once more." : (saved?.error?.message || "The server did not confirm the scheduled stop.") };
@@ -43048,7 +43056,8 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       key,
       value: JSON.stringify(next),
       expectedVersion: baselineVersions[key] || 0,
-    })));
+      ...(["sps_clients", "sps_schedule"].includes(key) ? { baseValue: baseline.values[key] } : {}),
+    })), { action: "reset" });
     if (!resetResult || !resetResult.ok) {
       throw new Error(`Reset was not applied; ${resetResult?.conflictKey || "shared data"} changed or the atomic save failed.`);
     }
@@ -43938,6 +43947,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
             key: "sps_schedule",
             value: JSON.stringify(unlinked.schedule),
             expectedVersion: Number(scheduleRead.version) || 0,
+            baseValue: latestSchedule,
           },
           // Fence protected payments, and remove only explicitly approved unpaid links.
           {
@@ -43945,7 +43955,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
             value: unlinkJobs ? JSON.stringify(unlinkUnpaidInvoiceCoverage(target, latestLedger)) : (ledgerRead.exists ? ledgerRead.value : JSON.stringify(latestLedger)),
             expectedVersion: Number(ledgerRead.version) || 0,
           },
-        ]);
+        ], { action: "invoice-unlink" });
         if (!saved?.ok) {
           if (saved?.conflict && attempt < 2) continue;
           return deletionFailure({

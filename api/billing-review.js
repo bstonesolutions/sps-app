@@ -3,6 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { requireOwner } from "./_staff-auth.js";
 import { readAppStatesVersioned, compareAndSetAppState, compareAndSetAppStateBatch } from "./_app-state.js";
+import { compareAndSetSharedStatePatchBatch } from "./_shared-state-patch.js";
 import createQuickBooksInvoice from "./quickbooks/create-invoice.js";
 import { BILLING_REVIEW_CREATE_CONTEXT } from "./_billing-review-context.js";
 import { readQuickBooksInvoiceNumberInventory, firstUnusedInvoiceNumber, sameInvoiceNumber, normalizeBillingReviewInvoiceNumber, billingReviewInvoiceNumberChoices } from "./_billing-review-numbering.js";
@@ -130,7 +131,8 @@ export function createBillingReviewHandler(overrides = {}) {
   const deps = {
     authorize: requireOwner, read: readAppStatesVersioned, cas: compareAndSetAppState, batch: compareAndSetAppStateBatch,
     inventory: readQuickBooksInvoiceNumberInventory, guard: quickBooksMaintenanceGuard, createInvoice: createQuickBooksInvoice,
-    now: () => Date.now(), uuid: randomUUID, ...overrides,
+    now: () => Date.now(), uuid: randomUUID,
+    sharedBatch: overrides.batch || compareAndSetSharedStatePatchBatch, ...overrides,
   };
 
   async function read(keys = KEYS) {
@@ -143,11 +145,14 @@ export function createBillingReviewHandler(overrides = {}) {
     return snapshot;
   }
 
-  async function commit(snapshot, changes, fenceKeys = []) {
+  async function commit(snapshot, changes, fenceKeys = [], actorId) {
     const operations = Object.entries(changes).map(([key, value]) => ({ key, expectedVersion: snapshot[key].version || 0, value }));
     for (const key of fenceKeys) if (!Object.hasOwn(changes, key)) operations.push(snapshot[key].exists
       ? { key, expectedVersion: snapshot[key].version, checkOnly: true }
       : { key, expectedVersion: 0, value: snapshot[key].value });
+    const protectedKeys = ["sps_clients", "sps_schedule"].filter(key => Object.hasOwn(changes, key));
+    if (protectedKeys.length) return deps.sharedBatch(operations, { actorId,
+      expectedCurrent: Object.fromEntries(protectedKeys.map(key => [key, snapshot[key].value])) });
     return operations.length > 1 ? deps.batch(operations) : deps.cas(operations[0].key, operations[0].expectedVersion, operations[0].value);
   }
 
@@ -162,7 +167,7 @@ export function createBillingReviewHandler(overrides = {}) {
     throw fail(409, "billing_review_contention", "Billing records changed repeatedly. Refresh and try again.");
   }
 
-  async function promote(id, attemptId, result) {
+  async function promote(id, attemptId, result, actorId) {
     for (let attempt = 0; attempt < 6; attempt += 1) {
       const snapshot = await read([BILLING_REVIEW_KEY, "sps_invoices", "sps_estimates", "sps_schedule"]);
       const review = reviewedRecord(snapshot[BILLING_REVIEW_KEY].value, id);
@@ -184,7 +189,7 @@ export function createBillingReviewHandler(overrides = {}) {
         sps_estimates: snapshot.sps_estimates.value.map(estimate => promoteBacklink(estimate, review, invoice)),
         sps_schedule: snapshot.sps_schedule.value.map(day => ({ ...day, stops: list(day.stops).map(stop => promoteBacklink(stop, review, invoice)) })),
       };
-      const committed = await commit(snapshot, changes);
+      const committed = await commit(snapshot, changes, [], actorId);
       if (committed.applied) {
         const verified = await read([BILLING_REVIEW_KEY, "sps_invoices"]);
         const savedReview = reviewedRecord(verified[BILLING_REVIEW_KEY].value, id);
@@ -196,9 +201,9 @@ export function createBillingReviewHandler(overrides = {}) {
     throw new Error("QuickBooks saved the invoice, but SPS is busy. Retry to finish the existing link.");
   }
 
-  async function runApproval(req, review) {
+  async function runApproval(req, review, actorId) {
     const approval = review.approval;
-    if (approval.qbResult?.qbId) return promote(review.id, approval.attemptId, approval.qbResult);
+    if (approval.qbResult?.qbId) return promote(review.id, approval.attemptId, approval.qbResult, actorId);
     const context = {
       canonicalInvoice: approval.invoice, realmId: approval.realmId, recovering: !!approval.writeStartedAt,
       frozenQuickBooksInvoice: approval.quickBooksInvoice || null, writeStarted: false,
@@ -222,7 +227,7 @@ export function createBillingReviewHandler(overrides = {}) {
           if (current.approval?.attemptId !== approval.attemptId) throw new Error("The billing approval changed.");
           return { ...current, approval: { ...current.approval, state: "created", qbResult: copy(result), leaseUntil: null } };
         });
-        return await promote(review.id, approval.attemptId, result);
+        return await promote(review.id, approval.attemptId, result, actorId);
       }
       const unknown = result.createOutcomeUnknown || (context.writeStarted && !result.createRejected) || !!approval.writeStartedAt;
       const next = await changeReview(review.id, current => ({ ...current,
@@ -246,7 +251,8 @@ export function createBillingReviewHandler(overrides = {}) {
     res.setHeader("Cache-Control", "no-store");
     if (req.method === "OPTIONS") return res.status(204).end();
     if (!["GET", "POST"].includes(req.method)) return res.status(405).json({ error: "Method not allowed" });
-    if (!await deps.authorize(req, res, "billing reviews")) return;
+    const actor = await deps.authorize(req, res, "billing reviews");
+    if (!actor) return;
     try {
       if (req.method === "GET") {
         const snapshot = await read([BILLING_REVIEW_KEY]);
@@ -295,7 +301,7 @@ export function createBillingReviewHandler(overrides = {}) {
           if (!plan.changed) return res.status(200).json({ ok: true, reviews: plan.reviews, migratedIds: plan.migratedIds || [], skipped: plan.skipped || [], version: snapshot[BILLING_REVIEW_KEY].version });
           const result = await commit(snapshot, { [BILLING_REVIEW_KEY]: plan.reviews, sps_invoices: plan.invoices, sps_estimates: plan.estimates, sps_schedule: plan.schedule,
             ...(plan.ledgerChanged ? { sps_maintenance_billing: plan.ledger } : {}),
-          }, action === "migrate" ? ["sps_clients", "sps_maintenance_billing"] : ["sps_clients", "sps_invoicing"]);
+          }, action === "migrate" ? ["sps_clients", "sps_maintenance_billing"] : ["sps_clients", "sps_invoicing"], actor.id);
           if (result.applied) return res.status(200).json({ ok: true, reviews: plan.reviews, ...(plan.review ? { review: plan.review } : {}), migratedIds: plan.migratedIds || [], skipped: plan.skipped || [], versions: result.currentVersions });
         }
         throw fail(409, "billing_review_contention", "Billing records changed. Refresh and try again.");
@@ -319,12 +325,12 @@ export function createBillingReviewHandler(overrides = {}) {
         const snapshot = await read();
         const review = reviewedRecord(snapshot[BILLING_REVIEW_KEY].value, id);
         if (["approving", "synced"].includes(review.reviewState) && chosenNumber && chosenNumber !== review.approval?.number) throw fail(409, "billing_review_number_locked", "This approval already has an invoice number. Retry its existing sync before changing anything.");
-        if (review.reviewState === "synced") return res.status(200).json(await promote(id, review.approval?.attemptId, review.approval?.qbResult));
+        if (review.reviewState === "synced") return res.status(200).json(await promote(id, review.approval?.attemptId, review.approval?.qbResult, actor.id));
         if (review.reviewState === "discarded") throw fail(409, "billing_review_discarded", "This review was discarded and cannot create an invoice.");
         let next;
         if (review.reviewState === "approving") {
           if (!review.approval?.payload || !review.approval?.attemptId) throw fail(409, "billing_review_approval_invalid", "The saved approval could not be verified.");
-          if (review.approval.qbResult?.qbId) return res.status(200).json(await promote(id, review.approval.attemptId, review.approval.qbResult));
+          if (review.approval.qbResult?.qbId) return res.status(200).json(await promote(id, review.approval.attemptId, review.approval.qbResult, actor.id));
           if (Date.parse(review.approval.leaseUntil || "") > deps.now()) return res.status(202).json({ ok: false, pending: true, review, code: "QB_CONFIRMATION_IN_PROGRESS", error: "This invoice is still syncing. Retry shortly to check its result." });
           next = { ...review, approval: { ...review.approval, leaseUntil: new Date(deps.now() + 90_000).toISOString() } };
         } else {
@@ -356,7 +362,7 @@ export function createBillingReviewHandler(overrides = {}) {
         const reviews = snapshot[BILLING_REVIEW_KEY].value.map(row => same(row.id, id) ? next : row);
         const reserved = await commit(snapshot, { [BILLING_REVIEW_KEY]: reviews }, KEYS.filter(key => key !== BILLING_REVIEW_KEY));
         if (!reserved.applied) continue;
-        const result = await runApproval(req, next);
+        const result = await runApproval(req, next, actor.id);
         return res.status(result.ok ? 200 : result.pending ? 202 : 422).json(result);
       }
       throw fail(409, "billing_review_contention", "Billing records changed repeatedly. Refresh and try again.");

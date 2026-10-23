@@ -1,7 +1,8 @@
 // Strict, ownership-checked client portal mutations. A bound auth UID (or one unique legacy email
 // match) determines the client; request bodies cannot choose identity, status, alert id, or resolution.
 import { randomUUID } from "node:crypto";
-import { compareAndSetAppStateBatch, mutateAppState, NO_APP_STATE_CHANGE, readAppStateVersioned } from "./_app-state.js";
+import { mutateAppState, NO_APP_STATE_CHANGE, readAppStateVersioned } from "./_app-state.js";
+import { compareAndSetSharedStatePatchBatch, mutateSharedStatePatch } from "./_shared-state-patch.js";
 import { pushOwner } from "./_push.js";
 import { resolveFrom } from "./_sender.js";
 import {
@@ -245,7 +246,7 @@ async function commitLowRating({ user, reference, rating, feedback, ratedAt }) {
     const alert = existingAlert || proposedAlert;
     const ratedWithReceipt = attachRatingAlertReceipt(rated, alert.id);
     const nextAlerts = existingAlert ? alerts : [alert, ...alerts];
-    const result = await compareAndSetAppStateBatch([
+    const result = await compareAndSetSharedStatePatchBatch([
       {
         key: "sps_clients",
         expectedVersion: clientsState.exists ? clientsState.version : 0,
@@ -256,7 +257,7 @@ async function commitLowRating({ user, reference, rating, feedback, ratedAt }) {
         expectedVersion: alertsState.exists ? alertsState.version : 0,
         value: nextAlerts,
       },
-    ]);
+    ], { expectedCurrent: { sps_clients: clientsState.value }, actorId: user.id });
     if (result.applied) {
       return { visit: ratedWithReceipt.visit, alert, alertCreated: !existingAlert, deduped: !rated.changed && !!existingAlert };
     }
@@ -417,14 +418,14 @@ export default async function handler(req, res) {
       if (!notifyPrefsPatch) return res.status(400).json({ error: "Invalid preference update." });
       let savedPrefs = null;
       try {
-        await mutateAppState("sps_clients", (current) => {
+        await mutateSharedStatePatch("sps_clients", (current) => {
           const { list, client } = mutationClient(current, portal.user);
           savedPrefs = mergePrefsPatch(client.notifyPrefs, notifyPrefsPatch);
           if (JSON.stringify(client.notifyPrefs || {}) === JSON.stringify(savedPrefs)) return NO_APP_STATE_CHANGE;
           return list.map((item) =>
             String(item && item.id) === String(client.id) ? { ...item, notifyPrefs: savedPrefs } : item
           );
-        });
+        }, { actorId: portal.user.id });
       } catch (error) {
         if (error instanceof PortalMutationError) return res.status(error.status).json({ error: error.message });
         return saveFailure(res);
@@ -505,12 +506,12 @@ export default async function handler(req, res) {
             ]);
           }
         } else {
-          await mutateAppState("sps_clients", (current) => {
+          await mutateSharedStatePatch("sps_clients", (current) => {
             const { list, client } = mutationClient(current, portal.user);
             const rated = applyRatingToClientList(list, client, reference, rating, feedback, ratedAt);
             savedVisit = rated.visit;
             return rated.changed ? rated.list : NO_APP_STATE_CHANGE;
-          });
+          }, { actorId: portal.user.id });
         }
       } catch (error) {
         if (error instanceof PortalMutationError) return res.status(error.status).json({ error: error.message });

@@ -112,7 +112,7 @@ async function prepare(uid, key) {
 
 test("a verified IndexedDB pending copy allows the network commit when localStorage is unavailable", async () => {
   const uid = "pending-idb-only";
-  const key = "sps_schedule";
+  const key = "sps_durability_test";
   const base = json([{ sid: "base" }]);
   const next = json([{ sid: "base" }, { sid: "next" }]);
   localMode = "throw";
@@ -133,7 +133,7 @@ test("a verified IndexedDB pending copy allows the network commit when localStor
 
 test("a verified localStorage pending copy allows the network commit when IndexedDB drops the write", async () => {
   const uid = "pending-local-only";
-  const key = "sps_clients";
+  const key = "sps_durability_test";
   const base = json([{ id: "c1", note: "base" }]);
   const next = json([{ id: "c1", note: "next" }]);
   localMode = "write";
@@ -154,7 +154,7 @@ test("a verified localStorage pending copy allows the network commit when Indexe
 
 test("a failed IndexedDB delete is replaced by a verified empty tombstone after the server commit", async () => {
   const uid = "pending-idb-delete-fails";
-  const key = "sps_schedule";
+  const key = "sps_durability_test";
   const base = json([{ sid: "base" }]);
   const next = json([{ sid: "base" }, { sid: "confirmed" }]);
   localMode = "write";
@@ -227,7 +227,7 @@ test("a timed-out committed CAS releases the queue and retry verifies the existi
 });
 
 test("failed durable cleanup reads cannot be treated as proof that the pending intent was deleted", async () => {
-  const key = "sps_schedule", uid = "pending-cleanup-read-failure";
+  const key = "sps_durability_test", uid = "pending-cleanup-read-failure";
   const base = json([{ sid: "stop", note: "Before" }]);
   const next = json([{ sid: "stop", note: "After" }]);
   localMode = "write"; idbMode = "write";
@@ -248,7 +248,7 @@ test("failed durable cleanup reads cannot be treated as proof that the pending i
 
 for (const method of ["flushKey", "flush"]) {
   test(`${method} retries recovered device storage without requiring another edit`, async () => {
-    const key = "sps_clients", uid = `pending-recovered-${method}`;
+    const key = "sps_durability_test", uid = `pending-recovered-${method}`;
     const base = json([{ id: "c1", notes: "Before" }]);
     const next = json([{ id: "c1", notes: "After" }]);
     localMode = "drop"; idbMode = "drop";
@@ -270,7 +270,7 @@ for (const method of ["flushKey", "flush"]) {
 }
 
 test("a conflict choice retains the newest edit until device storage can protect it", async () => {
-  const key = "sps_clients", uid = "conflict-needs-durable-edit";
+  const key = "sps_durability_test", uid = "conflict-needs-durable-edit";
   const base = json([{ id: "c1", notes: "Before" }]);
   const shared = json([{ id: "c1", notes: "Shared" }]);
   const local = json([{ id: "c1", notes: "Local" }]);
@@ -301,7 +301,7 @@ test("a conflict choice retains the newest edit until device storage can protect
 });
 
 test("failed pending hydration preserves an IndexedDB-only intent and later combines the new edit", async () => {
-  const key = "sps_clients", uid = "pending-hydration-read-failure";
+  const key = "sps_durability_test", uid = "pending-hydration-read-failure";
   const base = json([{ id: "c1", notes: "Before", phone: "111" }]);
   const offline = json([{ id: "c1", notes: "Original offline report", phone: "111" }]);
   const newer = json([{ id: "c1", notes: "Before", phone: "222" }]);
@@ -342,7 +342,7 @@ test("failed pending hydration preserves an IndexedDB-only intent and later comb
 });
 
 test("repeated new saves cannot replace an unresolved conflict recovered during hydration", async () => {
-  const key = "sps_clients", uid = "pending-hydration-conflict";
+  const key = "sps_durability_test", uid = "pending-hydration-conflict";
   const base = json([{ id: "c1", notes: "Before", phone: "111" }]);
   const offline = json([{ id: "c1", notes: "Offline notes", phone: "111" }]);
   const newer = json([{ id: "c1", notes: "Before", phone: "222" }]);
@@ -364,7 +364,7 @@ test("repeated new saves cannot replace an unresolved conflict recovered during 
 });
 
 test("a conflict choice cannot bypass an unread newer IndexedDB intent", async () => {
-  const key = "sps_clients", uid = "conflict-hydration-read-failure";
+  const key = "sps_durability_test", uid = "conflict-hydration-read-failure";
   const base = json([{ id: "c1", notes: "Before" }]);
   const shared = json([{ id: "c1", notes: "Shared notes" }]);
   const older = json([{ id: "c1", notes: "Older offline notes" }]);
@@ -394,7 +394,7 @@ test("a conflict choice cannot bypass an unread newer IndexedDB intent", async (
 });
 
 async function prepareClientConflict(uid, { withPulse = false } = {}) {
-  const key = "sps_clients", pulse = "sps_conflict_test_pulse";
+  const key = "sps_durability_test", pulse = "sps_conflict_test_pulse";
   const base = json([{ id: "c1", notes: "Before" }]);
   const local = json([{ id: "c1", notes: "Local" }]);
   const shared = json([{ id: "c1", notes: "Shared" }]);

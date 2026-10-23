@@ -22,9 +22,24 @@ function uniqueClient(clients, id) {
 
 // The billing endpoint already saved its protected policy and client mirror atomically.
 // A billing-only edit must adopt that receipt without uploading the whole client roster again.
-export async function saveClientEditorChanges({ clients, updated, baselineClient, billingConfirmed, hasBillingReceipt = false, refreshClients, persistClients }) {
+export async function saveClientEditorChanges({ clients, updated, baselineClient, billingConfirmed, hasBillingReceipt = false, refreshClients, persistClients, persistClientIntent }) {
   uniqueClient(clients, updated?.id);
   if (!sameId(baselineClient?.id, updated?.id)) throw new Error("The client changed while this editor was open. Reopen it before saving.");
+  if (persistClientIntent) {
+    // Send this form's original fields. An unresolved edit to another client
+    // must not block this one or become part of this client's save request.
+    const receipt = await persistClientIntent({
+      baselineClient: hasBillingReceipt ? withBilling(baselineClient, billingConfirmed) : baselineClient,
+      updated: hasBillingReceipt ? withBilling(updated, billingConfirmed) : updated,
+    });
+    if (!receipt?.ok || !sameId(receipt.confirmedClient?.id, updated.id)) {
+      throw new Error(`${hasBillingReceipt ? "Billing was saved, but the profile confirmation is still pending. " : ""}${receipt?.error?.message || "The client save was not confirmed. Your choices are still here."}`);
+    }
+    if (hasBillingReceipt && !samePolicy(receipt.confirmedClient.maintenanceBilling, billingConfirmed)) {
+      throw new Error("This client's billing changed again after your save. Reopen the client to review the latest plan.");
+    }
+    return receipt.confirmedClient;
+  }
   // The caller's roster was captured before its billing request. A background
   // sync can advance the storage hook's baseline during that await, so using
   // the captured roster as the next value could delete those newer changes.
