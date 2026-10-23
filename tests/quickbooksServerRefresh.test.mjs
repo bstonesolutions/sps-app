@@ -39,7 +39,9 @@ function storage(invoices = [linked()], options = {}) {
       if (expected !== ledger.version) return { applied: false, outcome: "conflict", currentVersion: ledger.version };
       const saved = value.map(invoice => Object.hasOwn(scope.candidates || {}, invoice.id)
         ? { ...invoice, qbWriteReview: { state: "pending", invoiceId: invoice.id } } : invoice);
-      if (JSON.stringify(ledger.value) === JSON.stringify(saved)) return { applied: true, outcome: "unchanged", currentVersion: ledger.version, value: clone(ledger.value) };
+      // Match SQL: even an identical ledger takes the guarded write path when
+      // a diagnostic patch is supplied, so repeated warnings must omit scope.
+      if (!Object.keys(scope.diagnostics || {}).length && JSON.stringify(ledger.value) === JSON.stringify(saved)) return { applied: true, outcome: "unchanged", currentVersion: ledger.version, value: clone(ledger.value) };
       ledger = state(saved, expected + 1);
       return { applied: true, outcome: "applied", currentVersion: ledger.version, value: clone(ledger.value) };
     },
@@ -188,6 +190,41 @@ test("an identical refresh still registers fresh authority without creating anot
   const again = await persist(payload(), store);
   assert.equal(again.changed, false); assert.equal(again.beforeVersion, 11); assert.equal(again.afterVersion, 11);
   assert.equal(store.writes.length, 2);
+});
+
+test("repeated missing diagnostics keep their first timestamp and do not advance the shared version", async () => {
+  const store = storage([linked("1"), linked("2")]);
+  const first = await persist(payload([remote("1")]), store);
+  const again = await persist(payload([remote("1")], { reconciliation: {
+    fetchedAt: "2026-10-22T14:02:00.000Z", pagination: { invoices: { complete: true } },
+  } }), store);
+  assert.equal(first.changed, true);
+  assert.equal(again.changed, false); assert.equal(again.afterVersion, first.afterVersion);
+  assert.equal(again.counts.missing, 1, "the unresolved warning remains visible in the refresh report");
+  assert.equal(again.invoices[1].qbMissingSince, fetchedAt);
+  assert.deepEqual(store.writes.at(-1).scope.diagnostics, {});
+  assert.ok(store.writes.at(-1).scope.authority["local-1"], "fresh QB accounting still registers authority");
+});
+
+test("repeated duplicate diagnostics do not advance the version but an owner change still updates the warning", async () => {
+  const store = storage([linked("1", { id: "qb_1", source: "quickbooks" }), linked("1")]);
+  const extra = { readAuthorityOwners: async () => [{ invoice_id: "qb_1", qb_id: "1" }] };
+  const first = await persist(payload(), store, extra);
+  const again = await persist(payload(), store, extra);
+  assert.equal(again.afterVersion, first.afterVersion); assert.equal(again.changed, false);
+  assert.equal(again.counts.duplicates, 1); assert.deepEqual(store.writes.at(-1).scope.diagnostics, {});
+  const staleWarning = { ...again.invoices[1], qbDuplicateOfId: "old-owner" };
+  const plan = mergeQuickBooksInvoiceRefresh([again.invoices[0], staleWarning], clients, payload(), {
+    authorityOwners: [{ invoice_id: "qb_1", qb_id: "1" }],
+  });
+  assert.equal(plan.diagnostics[staleWarning.id].patch.qbDuplicateOfId, "qb_1");
+});
+
+test("an unchanged missing-only refresh avoids writing altogether", async () => {
+  const store = storage([linked("1", { qbNeedsReview: true, qbSyncStatus: "missing-remote", qbMissingSince: fetchedAt })]);
+  const receipt = await persist(payload([]), store);
+  assert.equal(receipt.changed, false); assert.equal(receipt.afterVersion, 10);
+  assert.equal(store.writes.length, 0); assert.equal(receipt.counts.missing, 1);
 });
 
 test("CAS contention rebases the whole plan preserving another employee's new draft and pending edit", async () => {

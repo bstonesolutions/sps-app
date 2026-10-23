@@ -130,6 +130,9 @@ export function mergeQuickBooksInvoiceRefresh(current, clients, payload, { fetch
   }
   const authority = Object.create(null), candidates = Object.create(null), diagnostics = Object.create(null);
   const diagnose = (invoice, patch) => {
+    // Repeating an already saved warning is a read, not a new shared change.
+    // Nonempty diagnostic scope deliberately forces the SQL guarded write path.
+    if (Object.entries(patch).every(([key, value]) => same(invoice[key], value))) return invoice;
     diagnostics[text(invoice.id)] = { expected: copy(invoice), patch };
     return { ...invoice, ...patch };
   };
