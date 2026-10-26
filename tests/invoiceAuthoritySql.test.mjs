@@ -16,6 +16,7 @@ const batch = await readFile(new URL('../APP-STATE-BATCH-CHECK-ONLY-MIGRATION.sq
 const review = await readFile(new URL('../supabase/migrations/20261023001232_invoice_review_targeted_resolution.sql', import.meta.url), 'utf8');
 const authority = await readFile(new URL('../supabase/migrations/20261023010217_invoice_accounting_authority.sql', import.meta.url), 'utf8');
 const refreshDeleteRepair = await readFile(new URL('../supabase/migrations/20261026150438_invoice_refresh_and_delete_receipts.sql', import.meta.url), 'utf8');
+const exactFastPaths = await readFile(new URL('../supabase/migrations/20261026152318_invoice_exact_noop_fast_paths.sql', import.meta.url), 'utf8');
 const stopMemoryBound = await readFile(new URL('../supabase/migrations/20261012215154_stop_report_memory_bound.sql', import.meta.url), 'utf8');
 const installedStopGuard = stopMemoryBound.slice(stopMemoryBound.indexOf('create or replace function public.sps_guard_accepted_stop_reports()'), stopMemoryBound.indexOf('create or replace function public.sps_stop_completion_batch_cas('));
 const decode = value => { while (typeof value === 'string') value = JSON.parse(value); return value; };
@@ -26,7 +27,7 @@ const initial = () => ({ id: 'one', qbId: '123', qbCustomerId: 'c1', number: '20
   qbContentFingerprint: 'old-content', qbSyncToken: '1', notes: 'Internal note' });
 const paid = () => ({ ...initial(), status: 'Paid', balance: 0, qbSyncToken: '2',
   qbReviewResolution: { reviewedInvoiceHash: 'fixture-source', confirmedResultHash: 'fixture-confirmed', resolvedAt: '2026-10-23T00:00:00Z' } });
-async function setup({ entries = [initial(), { id: 'two', notes: 'Untouched', total: 50 }], depth = 1, seedAudit = false } = {}) {
+async function setup({ entries = [initial(), { id: 'two', notes: 'Untouched', total: 50 }], depth = 1, seedAudit = false, fastPaths = true } = {}) {
   const db = new PGlite();
   await db.exec(`create role anon; create role authenticated; create role service_role; create schema auth;
     create function auth.role() returns text language sql stable as $$select current_setting('request.jwt.claim.role',true)$$;
@@ -43,7 +44,7 @@ async function setup({ entries = [initial(), { id: 'two', notes: 'Untouched', to
   const invoice = async id => decode((await state()).value).find(row => row?.id === id);
   const patch = async (expected = initial(), next = paid()) => (await db.query('select * from sps_invoice_review_patch($1,$2::jsonb,$3::jsonb,$4,$5)', [expected.id, JSON.stringify(expected), JSON.stringify(next), 'fixture-actor', 'retry-linked'])).rows[0];
   if (seedAudit) { await role('service_role'); await patch(); await db.exec('reset role'); }
-  await db.exec(authority); await db.exec(refreshDeleteRepair); await role('service_role');
+  await db.exec(authority); await db.exec(refreshDeleteRepair); if (fastPaths) await db.exec(exactFastPaths); await role('service_role');
   const cas = async (rows, expected) => (await db.query("select * from sps_app_state_cas('sps_invoices',$1,$2::jsonb)", [expected ?? (await state()).version, encode(rows, depth)])).rows[0];
   const canonical = async (rows, authorities = {}, { candidates = {}, metadataCandidates = {}, diagnostics = {}, action = 'quickbooks-refresh', expected } = {}) => (await db.query(
     'select * from sps_invoice_canonical_cas($1,$2::jsonb,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb,$8::jsonb)',
@@ -460,4 +461,51 @@ sqlTest('confirmed deletion of an unanchored missing invoice is receipted and ca
     assert.equal((await receipt()).rows[0].deleted, true);
     await assert.rejects(f.canonical([missing], { one: { ...missing, qbNeedsReview: false, qbSyncStatus: 'synced' } }), /invoice_deleted_identity_reused/);
   } finally { await f.close(); }
+});
+
+sqlTest('exact unchanged canonical and generic rows skip protected-field reconstruction without changing receipts', async()=>{
+  const f=await setup({entries:[initial()]});
+  try{
+    await f.canonical([initial()],{one:initial()});
+    await f.db.exec('reset role');
+    await f.db.exec(`create or replace function public.sps_invoice_protected_content(p_invoice jsonb) returns jsonb
+      language plpgsql immutable set search_path=pg_catalog as $probe$ begin raise exception 'unexpected_projection_for_exact_row'; end $probe$;`);
+    await f.role('service_role');
+    const before=await f.state();const result=await f.canonical([initial()],{one:initial()});
+    assert.equal(result.outcome,'unchanged');assert.deepEqual(await f.state(),before);
+    await f.role('authenticated');assert.equal((await f.cas([initial()])).applied,true);
+    assert.deepEqual(await f.invoice('one'),initial());
+  }finally{await f.close();}
+});
+
+sqlTest('exact no-op ledger still rejects stale authority revisions and reused accounting identity',async()=>{
+  const f=await setup({entries:[initial()]});
+  try{
+    await f.canonical([paid()],{one:paid()});
+    const before=await f.state();
+    await assert.rejects(f.canonical([paid()],{one:initial()}),/invoice_canonical_stale_revision/);
+    const alias={...paid(),id:'same-qb-alias'};
+    await assert.rejects(f.canonical([paid(),alias],{'same-qb-alias':alias}),/invoice_canonical_identity_conflict/);
+    assert.deepEqual(await f.state(),before);
+  }finally{await f.close();}
+});
+
+sqlTest('empty canonical no-op remains an exact unchanged receipt',async()=>{
+  const f=await setup({entries:[]});
+  try{const before=await f.state();const result=await f.canonical([],{});assert.equal(result.outcome,'unchanged');assert.deepEqual(await f.state(),before);}
+  finally{await f.close();}
+});
+
+sqlTest('mixed canonical refresh preserves exact held proposals and applies only new confirmed charges',async()=>{
+  const second={...initial(),id:'second',qbId:'456',number:'2002'};
+  const f=await setup({entries:[initial(),second]});
+  try{
+    await f.canonical([initial(),second],{one:initial(),second});
+    await f.role('authenticated');await f.cas([{...initial(),total:150,locallyEdited:true},second]);
+    await f.role('service_role');const held=await f.invoice('one');assert.ok(held.qbWriteReview);
+    const changed={...second,total:200,balance:200,qbSyncToken:'2',lineItems:[{desc:'Changed work',qty:'1',unitPrice:'200'}]};
+    await f.canonical([held,changed],{one:held,second:changed});
+    assert.deepEqual(await f.invoice('one'),held);assert.equal((await f.invoice('second')).total,200);
+    assert.equal((await f.candidates()).length,1);
+  }finally{await f.close();}
 });

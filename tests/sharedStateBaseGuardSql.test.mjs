@@ -19,6 +19,7 @@ const migrations=await Promise.all([
   'supabase/migrations/20261023010217_invoice_accounting_authority.sql',
   'supabase/migrations/20261023013826_shared_state_base_guard.sql',
   'supabase/migrations/20261026150438_invoice_refresh_and_delete_receipts.sql',
+  'supabase/migrations/20261026152040_shared_patch_preflight.sql',
 ].map(file=>readFile(new URL(`../${file}`,import.meta.url),'utf8')));
 const copy=x=>structuredClone(x);
 const initialClients=()=>[{id:'one',name:'Corrected name',phone:'555-new',plan:'Essential',monthlyRate:250,notes:'New office note',
@@ -269,5 +270,35 @@ sqlTest('confirmed missing invoice deletion atomically unlinks its stop and roll
     assert.deepEqual(await f.value('sps_invoices'),[]);assert.deepEqual(await f.value('sps_schedule'),next);
     assert.equal((await receipt()).rows[0].deleted,true);
     await f.role('authenticated');await f.cas('sps_invoices',[invoice]);assert.deepEqual(await f.value('sps_invoices'),[]);
+  }finally{await f.close();}
+});
+
+sqlTest('protected report rejection happens before a row-lock transaction and leaves all rows unchanged',async()=>{
+  const clients=initialClients();clients[0].history.push({completionReceiptId:'accepted-preflight',sid:'stop-one',notes:'Accepted work'});
+  const f=await setup({clients});try{
+    // PostgreSQL assigns an xid for SELECT FOR UPDATE, but not for this read-only
+    // guard projection. This catches accidentally moving the preflight under locks.
+    await f.role('postgres');
+    await f.db.exec(`alter function sps_stop_guard_clients(jsonb,jsonb,jsonb) rename to fixture_guard_clients;
+      create function sps_stop_guard_clients(p_old jsonb,p_new jsonb,p_context jsonb) returns jsonb
+      language plpgsql security definer set search_path=pg_catalog as $$begin
+        if pg_current_xact_id_if_assigned() is not null then raise exception 'preflight_already_acquired_write_transaction'; end if;
+        return public.fixture_guard_clients(p_old,p_new,p_context);
+      end$$;`);
+    await f.role('service_role');
+    const before=await f.state('sps_clients'),other=await f.state('sps_other');
+    const next=copy(clients);next[0].history[1].notes='Older device replacement';
+    await assert.rejects(f.patchBatch([{key:'sps_clients',expected_version:before.version,value:next},
+      {key:'sps_other',expected_version:other.version,value:{notes:'Must not write'}}],{sps_clients:clients}),/shared_state_protected_change_rejected/);
+    assert.deepEqual(await f.state('sps_clients'),before);assert.deepEqual(await f.state('sps_other'),other);
+  }finally{await f.close();}
+});
+
+sqlTest('stale versions return conflict before decoding a malformed large baseline or acquiring row locks',async()=>{
+  const f=await setup();try{
+    const before=await f.state('sps_clients');
+    const result=(await f.db.query('select * from sps_shared_state_patch_cas($1,$2,$3::jsonb,$4::jsonb,$5)',
+      ['sps_clients',before.version+1,JSON.stringify('not a JSON array'),JSON.stringify('not a JSON array'),'fixture-owner'])).rows[0];
+    assert.equal(result.applied,false);assert.equal(result.outcome,'conflict');assert.deepEqual(await f.state('sps_clients'),before);
   }finally{await f.close();}
 });
