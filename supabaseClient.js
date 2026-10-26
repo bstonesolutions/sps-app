@@ -5,6 +5,8 @@ import { describeStateConflicts, mergeStoredState, normalizeStoredValue } from "
 import { isTransientAppStateError, nextAppStateRetry } from "./appStateBackoff.js";
 import { normalizeInvoiceProjectionIntent, projectInvoiceAccountingAuthority } from "./invoiceAuthorityProjection.js";
 import { stableInvoiceReviewJSON } from "./invoiceReviewIdentity.js";
+import { invoiceDeletionReviewMatches, unlinkUnpaidInvoiceCoverage } from "./invoiceBulkDeletion.js";
+import { unlinkInvoiceDeletionReferences } from "./invoiceDeletionGuard.js";
 import { buildSharedStateIntent } from "./sharedStateIntent.js";
 import { sendSharedStateIntent } from "./sharedStateWriteClient.js";
 
@@ -48,6 +50,7 @@ let _retryAfterAt = 0;
 // Targeted receipts can be newer than the reconstructable whole-ledger snapshot.
 // A slower full refresh must not roll those confirmed choices back on this device.
 let _invoiceReceiptVersion = 0;
+const _confirmedInvoiceDeletions = new Set();
 const _cacheAt = {};
 const _chains = {};
 
@@ -201,7 +204,9 @@ function projectInvoicePending(envelope, remoteValue) {
       const retained = JSON.parse(envelope.invoiceProjectionBaseValue);
       if (Array.isArray(retained)) authorityBase = retained;
     } catch (_) {}
-    return JSON.stringify(projectInvoiceAccountingAuthority(authorityBase, JSON.parse(merged), canonical));
+    const deleted = new Set(envelope.confirmedDeletedInvoiceIds || []);
+    return JSON.stringify(projectInvoiceAccountingAuthority(authorityBase, JSON.parse(merged), canonical)
+      .filter(invoice => !deleted.has(String(invoice?.id ?? ""))));
   } catch (_) { return null; }
 }
 
@@ -520,6 +525,7 @@ function resetForIdentity() {
   _initLastError = null;
   _retryAfterAt = 0;
   _invoiceReceiptVersion = 0;
+  _confirmedInvoiceDeletions.clear();
   clearObject(_cacheAt);
   clearObject(_chains);
 }
@@ -911,11 +917,21 @@ function stagePending(key, value, options = {}) {
   // A fresh user edit is a new intent and gets one immediate commit attempt. It must not inherit
   // an outage cooldown from the older value it replaced.
   envelope = { ...envelope, retryCount: 0, retryAt: 0 };
+  if (key === "sps_invoices" && _confirmedInvoiceDeletions.size) {
+    const deletedIds = [...new Set([...(envelope.confirmedDeletedInvoiceIds || []), ..._confirmedInvoiceDeletions])];
+    envelope.confirmedDeletedInvoiceIds = deletedIds;
+    try {
+      if (JSON.parse(localValue).some(invoice => deletedIds.includes(String(invoice?.id || "")))) {
+        envelope.status = "conflict";
+        envelope.conflicts = [{ path: "$", kind: "deleted-invoice-local-work" }];
+      }
+    } catch (_) {}
+  }
   _pending[key] = envelope;
   recalculateRetryWindow();
   if (envelope.status === "conflict" || envelope.status === "legacy") _conflicts[key] = envelope;
   else delete _conflicts[key];
-  _cache[key] = key === "sps_invoices" && (envelope.v !== 2 || envelope.invoiceProjectionBaseValue)
+  _cache[key] = key === "sps_invoices" && (envelope.v !== 2 || envelope.invoiceProjectionBaseValue || envelope.confirmedDeletedInvoiceIds?.length)
     ? (projectInvoicePending(envelope, _confirmed[key]) ?? localValue) : localValue;
   _cacheAt[key] = now;
   persistPending();
@@ -1423,6 +1439,12 @@ async function commitKey(key, identityVersion = _identityVersion) {
 function queueFailure(key, error, envelope = null) {
   const current = _pending[key];
   const sameIntent = !!(current && (!envelope || current.opId === envelope.opId));
+  // A rejected protected write is not a network outage. Replaying it on every
+  // refresh can saturate the database and cannot change the decision.
+  if (sameIntent && /^(SHARED_STATE_PATCH_PROTECTED_CHANGE|SHARED_STATE_DELETED_IDENTITY|shared-state-protected-change|shared-state-save-needs-review)$/.test(error?.code || "")) {
+    return { ...setConflict(key, { ...current, saveRejection: { code: error.code, message: error.message } },
+      [{ path: "$", kind: "server-rejected" }]), error, queued: false };
+  }
   let retry = null;
   if (sameIntent && current.status === "pending" && isTransientAppStateError(error)) {
     retry = nextAppStateRetry(current.retryCount);
@@ -1682,7 +1704,7 @@ async function resolveConflict(key, strategy, identityVersion = _identityVersion
   if (!_pending[key] || _pending[key].opId !== envelope.opId) return { ok: false, superseded: true };
 
   if (fieldIntentKeys.has(key)) {
-    if ((envelope.v !== 2 || !envelope.baseExists || envelope.deleteIntent) && strategy === "remote") {
+    if ((envelope.v !== 2 || !envelope.baseExists || envelope.deleteIntent || envelope.saveRejection) && strategy === "remote") {
       const remote = await readRemote(key, identityVersion);
       if (remote.staleIdentity) return { ok: false, staleIdentity: true };
       if (!remote.ok) return queueFailure(key, remote.error, envelope);
@@ -2197,6 +2219,124 @@ function acceptInvoiceRefreshSnapshot(receipt, identity) {
   return run;
 }
 
+// A deletion receipt is already committed on the server. Adopt it without
+// flushing unrelated drafts or asking another whole-ledger write to confirm it.
+function acceptInvoiceDeletionSnapshot(receipt, identity, options = {}) {
+  const keys = ["sps_invoices", "sps_estimates", "sps_schedule", "sps_maintenance_billing"];
+  let captured, expected;
+  try { captured = structuredClone(receipt); expected = structuredClone(options.expectedInvoice); } catch (_) {}
+  const priors = keys.map(key => _chains[key] || Promise.resolve());
+  const run = (async () => {
+    try { await Promise.all(priors); } catch (_) {}
+    if (!isCurrentIdentity(identity)) return { ok: false, staleIdentity: true };
+    const equal = (a, b) => stableInvoiceReviewJSON(a) === stableInvoiceReviewJSON(b);
+    const id = String(captured?.deletedInvoiceId || "");
+    const validList = value => Array.isArray(value) && value.every(item => item && typeof item === "object" && !Array.isArray(item));
+    const invalid = () => ({ ok: false, error: new Error("The complete invoice deletion receipt could not be verified. Retry to check the same deletion.") });
+    if (captured?.success !== true || captured.complete !== true || captured.actorId !== identity.uid
+      || !id || String(expected?.id || "") !== id || String(captured.beforeInvoice?.id || "") !== id
+      || !invoiceDeletionReviewMatches(expected, captured.beforeInvoice)
+      || String(captured.qbId || "") !== String(expected.qbId || "")
+      || keys.some(key => !Number.isSafeInteger(captured.beforeVersions?.[key]) || captured.beforeVersions[key] < 0
+        || !Number.isSafeInteger(captured.versions?.[key]) || captured.versions[key] < captured.beforeVersions[key])
+      || !validList(captured.values?.sps_invoices) || !validList(captured.values?.sps_estimates) || !validList(captured.values?.sps_schedule)
+      || !captured.values?.sps_maintenance_billing || typeof captured.values.sps_maintenance_billing !== "object"
+      || Array.isArray(captured.values.sps_maintenance_billing)
+      || captured.values.sps_invoices.some(invoice => String(invoice.id || "") === id || (captured.qbId && String(invoice.qbId || "") === captured.qbId))
+      || new Set(captured.values.sps_invoices.map(invoice => invoice.id)).size !== captured.values.sps_invoices.length) return invalid();
+    const hydration = await ensureHydrate();
+    if (!hydration?.ok) return { ...pendingDurabilityFailure(hydration?.error), serverConfirmed: true };
+    try { await awaitPendingDurability(); } catch (error) { return { ...pendingDurabilityFailure(error), serverConfirmed: true }; }
+    if (!isCurrentIdentity(identity)) return { ok: false, staleIdentity: true };
+    // Check every section before advancing any confirmed value. A late receipt
+    // never replaces a newer local confirmation learned through realtime.
+    for (const key of keys) {
+      if (Number(_versions[key]) === captured.versions[key] && _exists[key]) {
+        try { if (!equal(JSON.parse(_confirmed[key]), captured.values[key])) return invalid(); } catch (_) { return invalid(); }
+      }
+    }
+    const strip = (key, value) => {
+      if (key === "sps_invoices") return value.filter(invoice => String(invoice?.id || "") !== id);
+      if (key === "sps_estimates") return unlinkInvoiceDeletionReferences(expected, value, []).estimates;
+      if (key === "sps_schedule") return unlinkInvoiceDeletionReferences(expected, [], value).schedule;
+      return unlinkUnpaidInvoiceCoverage(expected, value) || value;
+    };
+    _confirmedInvoiceDeletions.add(id);
+    let recoveryPending = false;
+    for (const key of keys) {
+      if ((Number(_versions[key]) || 0) <= captured.versions[key]) {
+        adoptRemote(key, { exists: true, value: JSON.stringify(captured.values[key]), version: captured.versions[key] }, !_pending[key]);
+      }
+      const pending = _pending[key];
+      if (!pending) continue;
+      let next = pending;
+      try {
+        if (pending.v !== 2 || pending.force || pending.deleteIntent) throw new Error("Original intent unavailable");
+        const base = JSON.parse(pending.baseExists ? pending.baseValue : key === "sps_maintenance_billing" ? "{}" : "[]");
+        const local = JSON.parse(pending.localValue);
+        const target = key === "sps_invoices" && local.find(invoice => String(invoice?.id || "") === id);
+        if (target && !invoiceDeletionReviewMatches(expected, target)) throw new Error("Newer invoice edits remain");
+        const nextBase = strip(key, base), nextLocal = strip(key, local);
+        // Retire only exact target paths. Do not clear an ambiguous prefix
+        // which could also describe another record with a dot in its id.
+        const prefixes = [`$.id:${id}`, ...(expected.qbId ? [`$.qb:${expected.qbId}`] : [])];
+        const safe = key === "sps_invoices" ? prefixes.filter(prefix => [...base, ...local].every(invoice => String(invoice?.id || "") === id
+          || [`$.id:${invoice?.id || ""}`, `$.qb:${invoice?.qbId || ""}`].every(other => other !== prefix && !other.startsWith(`${prefix}.`) && !other.startsWith(`${prefix}[`)))) : [];
+        const conflicts = (pending.conflicts || []).filter(item => !safe.some(prefix => item.path === prefix || item.path?.startsWith(`${prefix}.`) || item.path?.startsWith(`${prefix}[`)));
+        next = { ...pending, opId: newOpId(), baseValue: JSON.stringify(nextBase), localValue: JSON.stringify(nextLocal),
+          ...(pending.invoiceProjectionBaseValue ? { invoiceProjectionBaseValue: JSON.stringify(strip(key, JSON.parse(pending.invoiceProjectionBaseValue))) } : {}),
+          conflicts, status: conflicts.length ? "conflict" : "pending", updatedAt: Date.now() };
+        if (equal(nextBase, nextLocal) && !conflicts.length) next = null;
+      } catch (_) {
+        recoveryPending = true;
+        next = { ...pending, status: "conflict", retryAt: 0, retryCount: 0,
+          ...(key === "sps_invoices" ? { confirmedDeletedInvoiceIds: [...new Set([...(pending.confirmedDeletedInvoiceIds || []), id])] } : {}),
+          conflicts: [...(pending.conflicts || []), { path: `$.id:${id}`, kind: "deleted-invoice-local-work" }] };
+      }
+      if (next) {
+        _pending[key] = next;
+        if (next.status === "conflict" || next.status === "legacy") _conflicts[key] = next;
+        else delete _conflicts[key];
+      } else { delete _pending[key]; delete _conflicts[key]; }
+    }
+    _invoiceReceiptVersion = Math.max(_invoiceReceiptVersion, captured.versions.sps_invoices);
+    const project = () => {
+      const values = {}, confirmedValues = {};
+      for (const key of keys) {
+        const pending = _pending[key];
+        const remote = _confirmed[key];
+        let displayed = remote;
+        if (pending) displayed = key === "sps_invoices" ? (projectInvoicePending(pending, remote) ?? remote)
+          : pending.v === 2 && !pending.force && !pending.deleteIntent
+            ? mergeStoredState(key, pending.baseExists ? pending.baseValue : undefined, pending.localValue, remote, { prefer: "local" }).value : remote;
+        // Late local edits remain in the durable envelope but cannot resurrect
+        // the removed record or its old backlinks in the visible list.
+        values[key] = strip(key, JSON.parse(displayed));
+        confirmedValues[key] = JSON.parse(remote);
+        _cache[key] = JSON.stringify(values[key]); _cacheAt[key] = Date.now();
+      }
+      return { values, confirmedValues, parsedValue: values.sps_invoices, versions: Object.fromEntries(keys.map(key => [key, _versions[key]])) };
+    };
+    project(); recalculateRetryWindow();
+    const durable = await persistPending();
+    if (!isCurrentIdentity(identity)) return { ok: false, staleIdentity: true };
+    if (!durable?.durable) return { ...pendingDurabilityFailure(durable?.error), serverConfirmed: true, ...project() };
+    try {
+      await saveSnapshot();
+      const saved = await idb.getVerified(snapshotIdbKey(identity.uid));
+      if (!isCurrentIdentity(identity)) return { ok: false, staleIdentity: true };
+      if (saved?.uid !== identity.uid || keys.some(key => !Number.isSafeInteger(saved.versions?.[key]) || saved.versions[key] < captured.versions[key])) throw new Error("The deletion receipt was not saved on this device");
+    } catch (error) {
+      if (!isCurrentIdentity(identity)) return { ok: false, staleIdentity: true };
+      return { ...pendingDurabilityFailure(error), serverConfirmed: true, ...project() };
+    }
+    recoveryPending ||= (_pending.sps_invoices?.confirmedDeletedInvoiceIds || []).includes(id);
+    return { ok: true, serverConfirmed: true, durable: true, recoveryPending, ...project() };
+  })();
+  const tail = run.then(() => {}, () => {}); keys.forEach(key => { _chains[key] = tail; });
+  return run;
+}
+
 export const store = {
   captureIdentity() { return { uid: _uid, generation: _identityVersion }; },
   isCurrentIdentity,
@@ -2204,6 +2344,7 @@ export const store = {
   patchClient,
   acceptInvoiceReviewResolution,
   acceptInvoiceRefreshSnapshot,
+  acceptInvoiceDeletionSnapshot,
   // Display-only overlay; neither stages nor resolves the original durable local intent.
   projectDisplay(key, displayedValue, remoteValue) {
     return key === "sps_invoices" ? projectInvoiceDisplay(displayedValue, remoteValue)

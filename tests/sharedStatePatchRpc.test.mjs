@@ -65,3 +65,51 @@ test("a narrow portal mutation rechecks ownership inside updater on each CAS ret
   assert.equal(result.value[0].name, "Newer name");
   assert.deepEqual(result.value[0].notifyPrefs, { onMyWay: true });
 });
+
+test('rejected-save telemetry identifies its section without leaking private records or database details', async () => {
+  const events = [], original = console.error;
+  console.error = (...args) => events.push(args);
+  try {
+    await assert.rejects(compareAndSetSharedStatePatch('sps_clients', 7,
+      [{ id: 'private-client', name: 'PRIVATE NAME' }], [{ id: 'private-client', name: 'PRIVATE CHANGE' }], {
+        actorId: 'PRIVATE ACTOR', fetchImpl: async () => ({ ok: false, status: 500,
+          json: async () => ({ code: '40001', message: 'shared_state_protected_change_rejected', details: 'PRIVATE SQL CONTENT' }) }),
+      }), { code: 'SHARED_STATE_PATCH_PROTECTED_CHANGE', status: 409 });
+  } finally { console.error = original; }
+  assert.equal(events.length, 1);
+  const telemetry = JSON.parse(events[0][1]);
+  assert.deepEqual(telemetry.keys, ['sps_clients']); assert.equal(telemetry.databaseCode, '40001');
+  assert.equal(telemetry.databaseReason, 'shared_state_protected_change_rejected');
+  assert.ok(!JSON.stringify(events).includes('PRIVATE')); assert.ok(!JSON.stringify(events).includes('test-service'));
+});
+
+test('exact protected rejections are briefly cached without sharing actors versions or changes', async () => {
+  let clock=1000,calls=0;
+  const options={actorId:'cache-owner',now:()=>clock,fetchImpl:async()=>{calls++;return{ok:false,status:500,json:async()=>({code:'40001',message:'shared_state_protected_change_rejected'})};}};
+  const save=(version=7,extra={},proposed=after)=>compareAndSetSharedStatePatch('sps_clients',version,before,proposed,{...options,...extra});
+  await assert.rejects(save(),{code:'SHARED_STATE_PATCH_PROTECTED_CHANGE'});
+  await assert.rejects(save(),{code:'SHARED_STATE_PATCH_PROTECTED_CHANGE'});assert.equal(calls,1);
+  await assert.rejects(save(8));assert.equal(calls,2,'fresh version gets a fresh database decision');
+  await assert.rejects(save(7,{actorId:'another-cache-owner'}));assert.equal(calls,3,'another actor never inherits the cache');
+  await assert.rejects(save(7,{},[{id:'c1',name:'Different proposal'}]));assert.equal(calls,4);
+  clock=11001;await assert.rejects(save());assert.equal(calls,5,'the unchanged request is retried after ten seconds');
+});
+
+test('transient unknown and authentication errors and success receipts are never negatively cached', async () => {
+  for(const [status,payload] of [[500,{code:'57014',message:'timeout'}],[503,{code:'40001',message:'shared_state_protected_change_rejected'}],[401,{code:'40001',message:'shared_state_protected_change_rejected'}],[500,{code:'XX000',message:'unknown'}]]){
+    let calls=0;const options={actorId:`no-cache-${status}-${payload.code}`,fetchImpl:async()=>{calls++;return{ok:false,status,json:async()=>payload};}};
+    await assert.rejects(compareAndSetSharedStatePatch('sps_clients',7,before,after,options));
+    await assert.rejects(compareAndSetSharedStatePatch('sps_clients',7,before,after,options));assert.equal(calls,2);
+  }
+  let calls=0;const options={actorId:'no-cache-success',fetchImpl:async()=>{calls++;return reply({applied:true,current_version:8,value:after});}};
+  await compareAndSetSharedStatePatch('sps_clients',7,before,after,options);await compareAndSetSharedStatePatch('sps_clients',7,before,after,options);assert.equal(calls,2);
+});
+
+test('negative cache retains at most 128 exact request hashes', async()=>{
+  let calls=0;const options={actorId:'bounded-cache-owner',now:()=>20000,fetchImpl:async()=>{calls++;return{ok:false,status:409,json:async()=>({code:'40001',message:'shared_deleted_identity_reused'})};}};
+  const original=console.error;console.error=()=>{};
+  try{
+    for(let version=1;version<=129;version++)await assert.rejects(compareAndSetSharedStatePatch('sps_clients',version,before,after,options));
+    assert.equal(calls,129);await assert.rejects(compareAndSetSharedStatePatch('sps_clients',1,before,after,options));assert.equal(calls,130);
+  }finally{console.error=original;}
+});

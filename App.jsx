@@ -39,6 +39,8 @@ import BillingReviewQueue from "./BillingReviewQueue.jsx";
 import InvoiceVisitPanel from "./InvoiceVisitPanel.jsx";
 import { billingReviewSaveReceiptMatches } from "./billingReviewReceipt";
 import InvoiceDeletionReview, { InvoiceDeletionConflicts } from "./InvoiceDeletionReview.jsx";
+import { deleteConfirmedQuickBooksInvoice } from "./invoiceDeletionReview.js";
+import { requestAppState } from "./appStateRequest.js";
 import { initialInvoiceClientId, invoiceClientSnapshot, resolveInvoiceClient } from "./invoiceClientSelection";
 import { invoiceMaintenanceCoverageIssue, withMatchedMaintenanceServiceMonths } from "./maintenanceInvoiceCoverage";
 import { deleteInvoiceAndCompactSafeDrafts, draftInvoiceCanBeRenumbered } from "./invoiceNumbering";
@@ -1867,7 +1869,7 @@ function useStoredState(key, initial) {
   // A server-confirmed stop refresh can coexist with unresolved edits in this section. Adopt its
   // display projection without autosaving it as a new whole-section edit. The functional update
   // preserves React changes that have not reached their save effect yet.
-  const adoptStoredDisplay = useCallback((nextValue, { confirmedInvoice } = {}) => {
+  const adoptStoredDisplay = useCallback((nextValue, { confirmedInvoice, deletedInvoice } = {}) => {
     const projection = JSON.stringify(nextValue);
     const priorDisplayBase = lastPersisted.current;
     lastPersisted.current = projection;
@@ -1883,6 +1885,14 @@ function useStoredState(key, initial) {
         const target = current.find(entry => String(entry?.id) === String(before?.id));
         if (target && stableInvoiceReviewJSON(target) === stableInvoiceReviewJSON(before)) {
           display = display.map(entry => String(entry?.id) === String(after?.id) ? after : entry);
+        }
+      }
+      // Deleting the reviewed invoice retires that exact displayed copy. A newer
+      // local edit remains recoverable instead of being silently discarded.
+      if (key === "sps_invoices" && deletedInvoice && Array.isArray(current) && Array.isArray(display)) {
+        const target = current.find(entry => String(entry?.id) === String(deletedInvoice.id));
+        if (!target || invoiceDeletionReviewMatches(deletedInvoice.before, target)) {
+          display = display.filter(entry => String(entry?.id) !== String(deletedInvoice.id));
         }
       }
       return display;
@@ -23725,7 +23735,7 @@ function InvoiceBulkDeleteModal({ invoices, allInvoices, clients, schedule, load
   useEffect(() => { void checkCoverage(); }, [checkCoverage]);
   const selectedIds = reviewedInvoices.map((invoice) => String(invoice.id));
   const plan = partitionInvoiceBulkDeletion(allInvoices, selectedIds, {
-    ledger, schedule, includeQuickBooks, unlinkJobs, reviewedInvoices, totalOf: (invoice) => invoiceTotals(invoice).total,
+    ledger, schedule, includeQuickBooks, allowQuickBooksReviewCheck: includeQuickBooks, unlinkJobs, reviewedInvoices, totalOf: (invoice) => invoiceTotals(invoice).total,
   });
   const remaining = plan.ready.filter((row) => !["deleted", "skipped"].includes(outcomes[String(row.invoice.id)]?.status));
   const deletedCount = Object.values(outcomes).filter((outcome) => outcome.status === "deleted").length;
@@ -23739,7 +23749,7 @@ function InvoiceBulkDeleteModal({ invoices, allInvoices, clients, schedule, load
       await deleteSelectedInvoiceDrafts({
         invoices: allInvoices,
         selectedIds: selectedIds.filter((id) => !["deleted", "skipped"].includes(outcomes[id]?.status)),
-        context: { ledger, schedule, includeQuickBooks, unlinkJobs, reviewedInvoices, totalOf: (invoice) => invoiceTotals(invoice).total },
+        context: { ledger, schedule, includeQuickBooks, allowQuickBooksReviewCheck: includeQuickBooks, unlinkJobs, reviewedInvoices, totalOf: (invoice) => invoiceTotals(invoice).total },
         onDelete: async (id, options) => {
           const result = await onDelete(id, { ...options, reviewedInvoice: reviewedInvoices.find((invoice) => String(invoice.id) === id) });
           if (result?.conflicts?.length) setConflicts(result.conflicts);
@@ -41790,7 +41800,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
 
   // Customizable dock — which pages appear in the bottom bar (max 5)
   const [navDock, setNavDock, lndock] = useStoredState("sps_nav_dock", DEFAULT_DOCK);
-  const [estimatesRaw, setEstimatesRaw, lest] = useStoredState("sps_estimates", []);
+  const [estimatesRaw, setEstimatesRaw, lest, , adoptEstimatesDisplay] = useStoredState("sps_estimates", []);
   const [serviceTiers, setServiceTiers] = useStoredState("sps_service_tiers", DEFAULT_TIERS);
   // Keep the module-level reference in sync so client portal uses live tiers
   CP_TIERS = serviceTiers || DEFAULT_TIERS;  // now a { Pond, Pool, Seasonal } object
@@ -43831,6 +43841,33 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     }
 
     try {
+      if (includeQuickBooks && reviewedInvoice?.qbId && !draftOnly) {
+        if (String(reviewedInvoice.id || "").trim() !== targetId) return { ok: false, error: "Reopen the invoice you want to delete." };
+        return await deleteConfirmedQuickBooksInvoice({
+          invoice: reviewedInvoice, unlinkJobs, store,
+          requestDelete: async (body, identity) => {
+            const result = await requestAppState("invoice-deletion", async signal => {
+              const headers = await authHeaders({ "Content-Type": "application/json" });
+              if (signal?.aborted || !store.isCurrentIdentity(identity)) throw new Error("The signed-in account changed or the request timed out before deletion started. Reopen the invoice and try again.");
+              const response = await fetch(`${QB_API}/delete-invoice`, { method: "POST", headers, body: JSON.stringify(body), signal });
+              const data = await response.json().catch(() => ({}));
+              if (!response.ok || data.success !== true) return { data: null, error: Object.assign(new Error(data.error || "Deletion was not confirmed. The invoice remains available to retry."), { code: data.code, status: response.status }) };
+              return { data, error: null };
+            });
+            if (result.error) {
+              if (result.error.code === "APP_STATE_REQUEST_TIMEOUT") throw new Error("The deletion check timed out. Retry to check the same invoice and finish its cleanup.");
+              throw result.error;
+            }
+            return result.data;
+          },
+          adopt: (values, options) => {
+            invoicesRef.current = values.sps_invoices;
+            adoptInvoicesDisplay(values.sps_invoices, options);
+            adoptEstimatesDisplay(values.sps_estimates);
+            adoptScheduleDisplay(values.sps_schedule);
+          },
+        });
+      }
       const keys = ["sps_invoices", "sps_estimates", "sps_schedule", "sps_maintenance_billing"];
       const conflicts = store.listConflicts().filter(({ key }) => keys.includes(key));
       if (conflicts.length) return deletionFailure({ ok: false, conflicts, error: "Review the overlapping saved changes below, then retry deletion. No invoice was deleted." });

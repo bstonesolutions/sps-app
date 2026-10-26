@@ -5,6 +5,8 @@ import { deleteSelectedInvoiceDrafts, invoiceBulkDeleteEligibility, invoiceDelet
 import { emptyMaintenancePaymentLedger, normalizeMaintenancePaymentLedger } from "../maintenancePaymentLedger.js";
 import { findInvoiceDeletionReferences, invoiceDeletionBlockedMessage, unlinkInvoiceDeletionReferences } from "../invoiceDeletionGuard.js";
 import { deleteInvoiceAndCompactSafeDrafts } from "../invoiceNumbering.js";
+import { deleteConfirmedQuickBooksInvoice } from "../invoiceDeletionReview.js";
+import { requestAppState } from "../appStateRequest.js";
 
 const draft = (id = "draft-1", extra = {}) => ({ id, number: `INV-${id.slice(-1)}`, status: "Draft", clientId: "sample-client", total: 100, lineItems: [{ desc: "Service", qty: 1, unitPrice: 100 }], ...extra });
 const context = () => ({ ledger: emptyMaintenancePaymentLedger() });
@@ -160,6 +162,13 @@ async function deletionHarness(invoices, options = {}) {
   const uiUpdates = [];
   let globalFlushes = 0;
   const store = {
+    captureIdentity: () => ({ uid: "owner" }),
+    isCurrentIdentity: identity => identity.uid === "owner",
+    acceptInvoiceDeletionSnapshot: async receipt => {
+      if (options.acceptReceipt) return options.acceptReceipt(receipt);
+      for (const [key, value] of Object.entries(receipt.values || {})) rows[key] = { ...rows[key], value: JSON.stringify(value) };
+      return { ok: true, values: receipt.values };
+    },
     flush: async () => { globalFlushes += 1; if (options.globalFlushRejects) throw new Error("Unrelated section is offline"); return { ok: true }; },
     flushKey: async (key) => { flushes.push(key); return { ok: true }; },
     listConflicts: () => options.conflicts || [],
@@ -174,7 +183,7 @@ async function deletionHarness(invoices, options = {}) {
       return { ok: true };
     },
   };
-  const deps = { store, perms: { isAdmin: true, invoiceDelete: true }, emptyMaintenancePaymentLedger, normalizeMaintenancePaymentLedger, invoiceBulkDeleteEligibility, invoiceDeletionReviewMatches, findInvoiceDeletionReferences, invoiceDeletionBlockedMessage, unlinkInvoiceDeletionReferences, unlinkUnpaidInvoiceCoverage, deleteInvoiceAndCompactSafeDrafts, invoiceTotals: (invoice) => ({ total: invoice.total }), setInvoices: (value) => uiUpdates.push(structuredClone(value)), setEstimatesRaw: () => {}, setSchedule: () => {}, qbIsConnected: () => { throw new Error("Local draft deletion must never inspect QuickBooks connection"); }, QB_API: "https://mock.test/quickbooks", authHeaders: async (headers) => headers,
+  const deps = { store, perms: { isAdmin: true, invoiceDelete: true }, emptyMaintenancePaymentLedger, normalizeMaintenancePaymentLedger, invoiceBulkDeleteEligibility, invoiceDeletionReviewMatches, findInvoiceDeletionReferences, invoiceDeletionBlockedMessage, unlinkInvoiceDeletionReferences, unlinkUnpaidInvoiceCoverage, deleteInvoiceAndCompactSafeDrafts, deleteConfirmedQuickBooksInvoice, requestAppState, invoicesRef: {current: invoices}, adoptInvoicesDisplay: (value) => uiUpdates.push(structuredClone(value)), adoptEstimatesDisplay: () => {}, adoptScheduleDisplay: () => {}, invoiceTotals: (invoice) => ({ total: invoice.total }), setInvoices: (value) => uiUpdates.push(structuredClone(value)), setEstimatesRaw: () => {}, setSchedule: () => {}, qbIsConnected: () => { throw new Error("Local draft deletion must never inspect QuickBooks connection"); }, QB_API: "https://mock.test/quickbooks", authHeaders: async (headers) => headers,
     fetch: async (url, init) => { qbCalls.push({ url, init }); if (!options.onQuickBooks) throw new Error("Unexpected QuickBooks request"); return options.onQuickBooks(qbCalls.length, { url, init }, rows); },
   };
   const handle = Function(...Object.keys(deps), `${app.slice(start, end)}\nreturn handleDeleteInvoice;`)(...Object.values(deps));
@@ -233,37 +242,43 @@ test("actual handler leaves SPS records and the UI unchanged on every unconfirme
   }
 });
 
-test("QB success followed by local failure stays incomplete and retry checks already-gone before cleanup", async () => {
-  const invoice = draft("linked", { status: "Overdue", qbId: "qb-1", balance: 100 });
-  const harness = await deletionHarness([invoice], {
-    onQuickBooks: async (attempt) => ({ ok: true, json: async () => ({ success: true, ...(attempt > 1 ? { alreadyGone: true } : {}) }) }),
-    beforeWrite: async (_rows, attempt) => attempt === 1 ? { ok: false, error: { message: "Save unavailable" } } : null,
-  });
-  const options = { reviewedInvoice: invoice, includeQuickBooks: true };
-  const first = await harness.handle(invoice.id, options);
-  assert.equal(first.ok, false);
-  assert.match(first.error, /QuickBooks confirmed deletion.*SPS cleanup/i);
-  assert.deepEqual(JSON.parse(harness.rows.sps_invoices.value), [invoice]);
-  assert.deepEqual(harness.uiUpdates, []);
-  const retry = await harness.handle(invoice.id, options);
-  assert.equal(retry.ok, true);
-  assert.equal(harness.qbCalls.length, 2);
-  assert.deepEqual(JSON.parse(harness.rows.sps_invoices.value), []);
-  assert.deepEqual(harness.uiUpdates, [[]]);
-  assert.equal(JSON.parse(harness.qbCalls[1].init.body).qb_id, "qb-1");
+const completeDeletionReceipt = (invoice, rows, extra = {}) => ({
+  success: true, complete: true, actorId: "owner", deletedInvoiceId: invoice.id,
+  values: Object.fromEntries(Object.entries(rows).map(([key, row]) => [key,
+    key === "sps_invoices" ? JSON.parse(row.value).filter(entry => entry.id !== invoice.id) : JSON.parse(row.value)])),
+  versions: Object.fromEntries(Object.keys(rows).map(key => [key, 2])), ...extra,
 });
 
-test("a thrown local save after QB success reports the known incomplete cleanup", async () => {
-  const invoice = draft("linked", { status: "Sent", qbId: "qb-1", balance: 100 });
+test("a linked deletion bypasses unrelated queues and requires the complete server receipt", async () => {
+  const invoice = draft("linked", { status: "Sent", qbId: "qb-1", balance: 100, qbNeedsReview: true });
   const harness = await deletionHarness([invoice], {
-    onQuickBooks: async () => ({ ok: true, json: async () => ({ success: true }) }),
-    beforeWrite: async () => { throw new Error("Local save connection ended"); },
+    conflicts: [{key: "sps_invoices", paths: ["$.other.total"]}, {key: "sps_schedule", paths: ["$.other-stop.notes"]}],
+    onQuickBooks: async (_attempt, call, rows) => {
+      const body = JSON.parse(call.init.body);
+      assert.deepEqual(body, {qb_id: invoice.qbId, reviewed_invoice: invoice, unlinkJobs: true, completeInSps: true});
+      return {ok: true, json: async () => completeDeletionReceipt(invoice, rows)};
+    },
   });
-  const receipt = await harness.handle(invoice.id, { reviewedInvoice: invoice, includeQuickBooks: true });
-  assert.equal(receipt.ok, false);
-  assert.match(receipt.error, /QuickBooks.*delet.*SPS|QuickBooks.*delet.*cleanup/i);
-  assert.deepEqual(JSON.parse(harness.rows.sps_invoices.value), [invoice]);
+  const result = await harness.handle(invoice.id, { reviewedInvoice: invoice, includeQuickBooks: true, unlinkJobs: true });
+  assert.equal(result.ok, true, result.error);
+  assert.equal(harness.qbCalls.length, 1);
+  assert.equal(harness.writes.length, 0, "no second whole-list save after server deletion");
+  assert.deepEqual(harness.flushes, []);
+  assert.deepEqual(harness.uiUpdates, [[]]);
+});
+
+test("server deletion with failed local receipt adoption reports completed removal separately", async () => {
+  const invoice = draft("linked", { status: "Overdue", qbId: "qb-1", balance: 100 });
+  const harness = await deletionHarness([invoice], {
+    onQuickBooks: async (_attempt, _call, rows) => ({ ok: true, json: async () => completeDeletionReceipt(invoice, rows) }),
+    acceptReceipt: async () => ({ok: false, error: new Error("The invoice was deleted on the server, but device storage is unavailable")}),
+  });
+  const result = await harness.handle(invoice.id, {reviewedInvoice: invoice, includeQuickBooks: true});
+  assert.equal(result.ok, false);
+  assert.equal(result.serverConfirmed, true);
+  assert.match(result.error, /deleted on the server/);
   assert.deepEqual(harness.uiUpdates, []);
+  assert.equal(harness.writes.length, 0);
 });
 
 test("unrelated conflicts and a rejected global flush cannot block a related-key deletion", async () => {
@@ -307,15 +322,12 @@ test("reviewed deletion never renumbers another draft used by payment coverage",
   assert.deepEqual(receipt.renumbered, []);
 });
 
-test("a harmless local CAS retry after confirmed QB deletion does not repeat the remote delete", async () => {
-  const invoice = draft("linked", { status: "Sent", qbId: "qb-1", balance: 100 });
-  const harness = await deletionHarness([invoice], {
-    onQuickBooks: async () => ({ ok: true, json: async () => ({ success: true }) }),
-    beforeWrite: async (rows, attempt) => { if (attempt === 1) rows.sps_estimates.version += 1; },
-  });
-  const receipt = await harness.handle(invoice.id, { reviewedInvoice: invoice, includeQuickBooks: true });
-  assert.equal(receipt.ok, true, receipt.error);
-  assert.equal(harness.writes.length, 2);
-  assert.equal(harness.qbCalls.length, 1);
-  assert.deepEqual(JSON.parse(harness.rows.sps_invoices.value), []);
+test("a linked delete never reports an old remote-only receipt as completed SPS cleanup", async () => {
+  const invoice = draft("linked", {status: "Sent", qbId: "qb-1", balance: 100});
+  const harness = await deletionHarness([invoice], {onQuickBooks: async () => ({ok: true, json: async () => ({success: true, alreadyGone: true})})});
+  const result = await harness.handle(invoice.id, {reviewedInvoice: invoice, includeQuickBooks: true});
+  assert.equal(result.ok, false);
+  assert.equal(harness.writes.length, 0);
+  assert.deepEqual(harness.uiUpdates, []);
+  assert.deepEqual(JSON.parse(harness.rows.sps_invoices.value), [invoice]);
 });

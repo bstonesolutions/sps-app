@@ -2,23 +2,58 @@
 // writers are intentionally not a fallback if the protected RPC is unavailable.
 import { APP_STATE_SERVICE_KEY, APP_STATE_SUPABASE_URL, decodeAppStateValue, NO_APP_STATE_CHANGE, readAppStateVersioned, withAppStateRequestDeadline } from "./_app-state.js";
 import { stableInvoiceReviewJSON } from "../invoiceReviewIdentity.js";
+import { createHash } from "node:crypto";
 
 const keys = new Set(["sps_clients", "sps_schedule"]);
 const fail = (code, message, status = 503) => Object.assign(new Error(message), { code, status });
 const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
+const rejectedWrites = new Map();
+const REJECTION_TTL_MS = 10_000;
+const MAX_REJECTED_WRITES = 128;
 
-async function callRpc(name, body, { fetchImpl = globalThis.fetch, ...requestOptions } = {}) {
+async function callRpc(name, body, { fetchImpl = globalThis.fetch, now = Date.now, ...requestOptions } = {}) {
   if (!APP_STATE_SERVICE_KEY) throw fail("SHARED_STATE_PATCH_UNAVAILABLE", "The shared save service is not configured.");
+  const wireBody = JSON.stringify(body);
+  // Old installations may replay a permanent rejection on every refresh. Keep
+  // only its exact request hash for ten seconds in this worker. Actor, original
+  // fields, proposed values and versions are all part of the hash; changing any
+  // of them requires a fresh database decision. No record data is cached.
+  const requestHash = createHash("sha256").update(name).update("\0").update(wireBody).digest("hex");
+  const timestamp = () => { const value = Number(now()); return Number.isFinite(value) ? value : Date.now(); };
+  const startedAt = timestamp();
+  for (const [hash, item] of rejectedWrites) {
+    if (item.expiresAt <= startedAt || startedAt < item.expiresAt - REJECTION_TTL_MS) rejectedWrites.delete(hash);
+  }
+  const cached = rejectedWrites.get(requestHash);
+  if (cached) throw fail(cached.code, cached.message, 409);
   return withAppStateRequestDeadline(name, async signal => {
     const response = await fetchImpl(`${APP_STATE_SUPABASE_URL.replace(/\/+$/, "")}/rest/v1/rpc/${name}`, {
       method: "POST", signal,
       headers: { apikey: APP_STATE_SERVICE_KEY, Authorization: `Bearer ${APP_STATE_SERVICE_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: wireBody,
     });
     const payload = await response.json().catch(() => null);
     if (!response.ok) {
-      if (payload?.message === "shared_deleted_identity_reused") throw fail("SHARED_STATE_DELETED_IDENTITY", "This client or stop was removed after the original save. Review the current records before creating a replacement.", 409);
-      if (payload?.message === "shared_state_protected_change_rejected") throw fail("SHARED_STATE_PATCH_PROTECTED_CHANGE", "A protected service report could not accept this change. Open the saved report to edit it without replacing other work.", 409);
+      // Identify the failing section without logging a customer record, JWT,
+      // actor, or raw database detail. This is a rejected save, not success.
+      const affected = body.p_key ? [body.p_key] : (body.p_operations || []).map(operation => operation.key);
+      const databaseCode = /^[A-Z0-9]{5}$/.test(String(payload?.code || "")) ? payload.code : null;
+      const databaseReason = /^(shared|stop|invoice)_[a-z_]+$/.test(String(payload?.message || "")) ? payload.message : null;
+      console.error("[shared-state-patch]", JSON.stringify({ event: "database_rejected", rpc: name,
+        keys: affected.filter(key => /^sps_[a-z_]+$/.test(String(key))), status: response.status, databaseCode, databaseReason }));
+      const rejection = payload?.message === "shared_deleted_identity_reused"
+        ? fail("SHARED_STATE_DELETED_IDENTITY", "This client or stop was removed after the original save. Review the current records before creating a replacement.", 409)
+        : payload?.message === "shared_state_protected_change_rejected"
+          ? fail("SHARED_STATE_PATCH_PROTECTED_CHANGE", "A protected service report could not accept this change. Open the saved report to edit it without replacing other work.", 409) : null;
+      if (rejection) {
+        // PostgREST can transport SQLSTATE 40001 as HTTP 500. It is still the
+        // exact named permanent application rejection, never a generic 500.
+        if ([400, 409, 500].includes(response.status) && databaseCode === "40001") {
+          while (rejectedWrites.size >= MAX_REJECTED_WRITES) rejectedWrites.delete(rejectedWrites.keys().next().value);
+          rejectedWrites.set(requestHash, { expiresAt: timestamp() + REJECTION_TTL_MS, code: rejection.code, message: rejection.message });
+        }
+        throw rejection;
+      }
       throw fail("SHARED_STATE_PATCH_SAVE_UNCONFIRMED", "The server could not confirm this save. Your changes are still available to retry.", 503);
     }
     const row = Array.isArray(payload) ? payload[0] : payload;

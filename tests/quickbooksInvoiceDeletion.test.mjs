@@ -15,22 +15,37 @@ const canonical = () => ({ id: "invoice-1", qbId: "qb-1", qbContentFingerprint: 
 const remote = () => ({ Id: "qb-1", SyncToken: "4", CustomerRef: { value: "customer-1" }, DocNumber: "INV-1", TotalAmt: 100, Balance: 100, Line: [{ Id: "1", DetailType: "SalesItemLineDetail", Amount: 100, Description: "Pump repair", SalesItemLineDetail: { Qty: 1, UnitPrice: 100, ItemRef: { value: "service-1" } } }] });
 const request = (invoice, extra = {}) => ({ method: "POST", headers: { authorization: "Bearer owner-token" }, body: { qb_id: "qb-1", reviewed_invoice: invoice, ...extra } });
 
-function install({ invoice = canonical(), existing = remote(), team = [{ email: "owner@example.test", role: "owner" }], ledger = { version: 2, policies: {}, allocations: {} }, estimates = [], readStatus = 200, readBody, deleteStatus = 200, deleteBody = { Invoice: { Id: "qb-1", status: "Deleted" } }, throwDelete = false, mutateAfterRead = false } = {}) {
+function install({ invoice = canonical(), existing = remote(), team = [{ email: "owner@example.test", role: "owner" }], ledger = { version: 2, policies: {}, allocations: {} }, estimates = [], readStatus = 200, readBody, deleteStatus = 200, deleteBody = { Invoice: { Id: "qb-1", status: "Deleted" } }, throwDelete = false, mutateAfterRead = false, queryStatus = 200, queryBody = { QueryResponse: {} }, mutateTargetAfterRead = false, batchFailure = false, savedInvoices, deletionReceipt = [] } = {}) {
   const calls = [];
   let version = 1;
-  const state = { sps_invoices: [invoice], sps_estimates: estimates, sps_schedule: [], sps_maintenance_billing: ledger, sps_clients: [{ id: "client-1", qbId: "customer-1" }] };
+  const state = { sps_invoices: savedInvoices || [invoice], sps_estimates: estimates, sps_schedule: [], sps_maintenance_billing: ledger, sps_clients: [{ id: "client-1", qbId: "customer-1" }] };
   globalThis.fetch = async (url, options = {}) => {
     const href = String(url);
     calls.push({ href, method: options.method || "GET", body: options.body });
     if (href.endsWith("/auth/v1/user")) return response({ id: "owner", email: "owner@example.test" });
     if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
     if (href.includes("/rest/v1/app_state?")) return response(Object.entries(state).map(([key, value]) => ({ key, value: JSON.stringify(value), version })));
+    if (href.endsWith("/rpc/sps_invoice_delete_receipt")) return response(deletionReceipt);
     if (href.endsWith("/rpc/sps_invoice_authorize_delete")) return response([{authorized:true,outcome:"authorized"}]);
+    if (href.endsWith("/rpc/sps_shared_state_patch_batch_cas")) {
+      if (batchFailure) return response({ message: "Save failed" }, 500);
+      const request = JSON.parse(options.body);
+      const values = {}, current_versions = {};
+      for (const operation of request.p_operations) {
+        state[operation.key] = JSON.parse(operation.value);
+        values[operation.key] = operation.value;
+        current_versions[operation.key] = version + 1;
+      }
+      version += 1;
+      return response([{ applied: true, outcome: "applied", current_versions, values }]);
+    }
     if (href.includes("/rest/v1/qb_tokens")) return response([{ id: "default", realm_id: "realm-1", access_token: "access", refresh_token: "refresh", expires_at: "2099-01-01T00:00:00Z" }]);
     if (href.includes("/invoice/qb-1?")) {
       if (mutateAfterRead) version += 1;
+      if (mutateTargetAfterRead) { state.sps_invoices[0] = { ...invoice, balance: 0, status: "Paid" }; version += 1; }
       return response(readBody || { Invoice: existing }, readStatus);
     }
+    if (href.includes("/query?")) return response(queryBody, queryStatus);
     if (href.includes("operation=delete")) {
       if (throwDelete) throw new Error("Connection closed after request");
       return response(deleteBody, deleteStatus);
@@ -146,12 +161,12 @@ test("fresh QuickBooks customer, amount, number, or saved-content changes requir
   }
 });
 
-test("changed shared accounting versions stop deletion after the QuickBooks read", async () => {
-  const calls = install({ mutateAfterRead: true });
+test("a target payment change stops deletion after the QuickBooks read", async () => {
+  const calls = install({ mutateTargetAfterRead: true });
   const res = result();
   await handler(request(canonical()), res);
   assert.equal(res.statusCode, 409);
-  assert.equal(res.body.code, "invoice_records_changed");
+  assert.equal(res.body.code, "review-required");
   assert.equal(writes(calls).length, 0);
 });
 
@@ -186,4 +201,89 @@ test("lost or malformed delete receipts remain unknown and never permit optimist
     assert.equal(res.body.outcomeUnknown, true);
     assert.equal(writes(calls).length, 1);
   }
+});
+
+
+test("unrelated shared versions do not block the reviewed target", async () => {
+  const calls = install({ mutateAfterRead: true });
+  const res = result();
+  await handler(request(canonical()), res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(writes(calls).length, 1);
+});
+
+test("missing QuickBooks invoices with sync review errors can be removed atomically in SPS", async () => {
+  const invoice = { ...canonical(), qbNeedsReview: true, qbSyncError: "Object Not Found", qbSyncErrorCode: "QB_SYNC_FAILED" };
+  const calls = install({ invoice, readStatus: 400, readBody: { Fault: { Error: [{ code: "610", Message: "Object Not Found" }] } } });
+  const res = result();
+  await handler(request(invoice, { completeInSps: true, unlinkJobs: true }), res);
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.success, true);
+  assert.equal(res.body.complete, true);
+  assert.equal(res.body.alreadyGone, true);
+  assert.equal(res.body.deletedInvoiceId, invoice.id);
+  assert.equal(res.body.qbId, invoice.qbId);
+  assert.deepEqual(res.body.beforeInvoice, invoice);
+  assert.deepEqual(res.body.values.sps_invoices, []);
+  assert.equal(res.body.actorId, "owner");
+  assert.equal(writes(calls).length, 0, "missing invoice never sends a QB delete or create");
+  assert.equal(calls.filter(call => call.href.endsWith("/rpc/sps_shared_state_patch_batch_cas")).length, 1);
+});
+
+test("a generic 404 never authorizes cleanup without a valid empty QuickBooks query", async () => {
+  for (const setup of [
+    { queryStatus: 401 }, { queryStatus: 500 }, { queryBody: {} },
+    { queryBody: { QueryResponse: { Invoice: [{ Id: "qb-1" }] } } },
+    { queryBody: { QueryResponse: { Invoice: null } } },
+  ]) {
+    const calls = install({ readStatus: 404, ...setup });
+    const res = result();
+    await handler(request(canonical(), { completeInSps: true }), res);
+    assert.equal(res.statusCode, 502);
+    assert.equal(calls.some(call => call.href.endsWith("/rpc/sps_invoice_authorize_delete")), false);
+    assert.equal(writes(calls).length, 0);
+  }
+});
+
+test("a failed atomic SPS cleanup never reports complete deletion", async () => {
+  const calls = install({ readStatus: 400, readBody: { Fault: { Error: [{ code: "610", Message: "Object Not Found" }] } }, batchFailure: true });
+  const res = result();
+  await handler(request(canonical(), { completeInSps: true }), res);
+  assert.equal(res.statusCode, 503);
+  assert.equal(res.body.success, false);
+  assert.notEqual(res.body.complete, true);
+  assert.equal(writes(calls).length, 0);
+});
+
+test("review permission never bypasses payment or unresolved identity protection", async () => {
+  for (const change of [{ balance: 50 }, { qbCreateOutcomeUnknown: true }, { qbDuplicate: true }, { payments: [{ id: "p" }] }]) {
+    const invoice = { ...canonical(), qbNeedsReview: true, ...change };
+    const calls = install({ invoice, readStatus: 400, readBody: { Fault: { Error: [{ code: "610" }] } } });
+    const res = result();
+    await handler(request(invoice, { completeInSps: true }), res);
+    assert.equal(res.statusCode, 409, JSON.stringify(change));
+    assert.equal(calls.some(call => call.href.startsWith("https://quickbooks.test")), false);
+  }
+});
+
+
+test("a lost completed deletion response is recovered without reconnecting or writing to QuickBooks", async () => {
+  const invoice = canonical();
+  const calls = install({ savedInvoices: [], deletionReceipt: [{ deleted: true, invoice_id: invoice.id, qb_id: invoice.qbId, expected_invoice: invoice, consumed_at: "2026-10-26T12:00:00Z" }] });
+  const res = result();
+  await handler(request(invoice, { completeInSps: true }), res);
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.complete, true);
+  assert.equal(res.body.existing, true);
+  assert.deepEqual(res.body.values.sps_invoices, []);
+  assert.equal(calls.some(call => call.href.startsWith("https://quickbooks.test") || call.href.includes("qb_tokens")), false);
+});
+
+test("an absent local row without its exact consumed receipt is not reported as completed deletion", async () => {
+  const calls = install({ savedInvoices: [] });
+  const res = result();
+  await handler(request(canonical(), { completeInSps: true }), res);
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.body.code, "INVOICE_DELETE_RECEIPT_MISSING");
+  assert.equal(calls.some(call => call.href.startsWith("https://quickbooks.test")), false);
 });

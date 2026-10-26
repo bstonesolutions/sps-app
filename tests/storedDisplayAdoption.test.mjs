@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { stableInvoiceReviewJSON } from "../invoiceReviewIdentity.js";
 import { mergeStoredState } from "../stateMerge.js";
+import { invoiceDeletionReviewMatches } from "../invoiceBulkDeletion.js";
 
 if (!globalThis.CustomEvent) globalThis.CustomEvent = class extends Event { constructor(type, init) { super(type); this.detail = init?.detail; } };
 globalThis.document = new EventTarget();
@@ -34,7 +35,7 @@ function mountHook(key, initial) {
   function useState(initial) { const i = cursor++; if (!(i in slots)) slots[i] = initial; return [slots[i], update => { const next = typeof update === "function" ? update(slots[i]) : update; if (!Object.is(next, slots[i])) { slots[i] = next; dirty = true; } }]; }
   function useRef(initial) { const i = cursor++; return slots[i] || (slots[i] = { current: initial }); }
   function useEffect(effect, deps) { const i = cursor++; const old = slots[i]; if (!old || deps.some((value, n) => !Object.is(value, old.deps[n]))) { effects.push(() => { old?.cleanup?.(); slots[i].cleanup = effect(); }); slots[i] = { deps }; } }
-  const hook = new Function("useState", "useRef", "useEffect", "useCallback", "store", "mergeStoredState", "stableInvoiceReviewJSON", `const DB_READ_OK = true; ${hookSource}; return useStoredState;`)(useState, useRef, useEffect, fn => fn, store, mergeStoredState, stableInvoiceReviewJSON);
+  const hook = new Function("useState", "useRef", "useEffect", "useCallback", "store", "mergeStoredState", "stableInvoiceReviewJSON", "invoiceDeletionReviewMatches", `const DB_READ_OK = true; ${hookSource}; return useStoredState;`)(useState, useRef, useEffect, fn => fn, store, mergeStoredState, stableInvoiceReviewJSON, invoiceDeletionReviewMatches);
   function render() { cursor = 0; dirty = false; output = hook(key, initial); }
   return { get result() { return output; }, async settle() { for (let pass = 0; pass < 15; pass++) { if (dirty) render(); while (effects.length) effects.shift()(); await tick(); } }, dispose() { slots.forEach(slot => slot?.cleanup?.()); } };
 }
@@ -237,5 +238,32 @@ for (const unstaged of [false, true]) {
       assert.equal(db.calls,unstaged?1:0,'only a real concurrent user edit should write the roster');
       assert.equal(JSON.parse(db.value).filter(c=>c.id===created.id).length,1);
     }finally{h.dispose()}
+  });
+}
+
+for (const unstaged of [false, true]) {
+  test(`confirmed deletion display ${unstaged ? 'preserves a newer React-only edit for durable recovery' : 'removes the exact reviewed invoice without another write'}`, async () => {
+    const uid = `hook-confirmed-deletion-${unstaged}`, key = 'sps_invoices';
+    const before = {id:'delete-target',qbId:'5287',number:'2035',status:'Sent',total:192.5,balance:192.5,notes:'Reviewed'};
+    const other = {id:'keep',number:'2036',status:'Draft',total:100,notes:'Other'};
+    const db = database([before,other],key); store.setUser(uid); await store.initialize();
+    const h = mountHook(key,[]);
+    try {
+      await h.settle(); db.value = json([other]); db.version = 2;
+      const values = {sps_invoices:[other],sps_estimates:[],sps_schedule:[],sps_maintenance_billing:{version:2,policies:{},allocations:{}}};
+      const receipt = {success:true,complete:true,actorId:uid,deletedInvoiceId:before.id,qbId:before.qbId,beforeInvoice:before,
+        beforeVersions:{sps_invoices:1,sps_estimates:0,sps_schedule:0,sps_maintenance_billing:0},
+        versions:{sps_invoices:2,sps_estimates:0,sps_schedule:0,sps_maintenance_billing:0},values};
+      const accepted=await store.acceptInvoiceDeletionSnapshot(receipt,store.captureIdentity(),{expectedInvoice:before});
+      assert.equal(accepted.ok,true,accepted.error?.message);
+      if(unstaged)h.result[1](rows=>rows.map(row=>row.id===before.id?{...row,notes:'Typed during deletion'}:row));
+      h.result[4](accepted.values.sps_invoices,{deletedInvoice:{id:before.id,before}});await h.settle();
+      assert.deepEqual(JSON.parse(db.value),[other]);assert.equal(db.calls,0,'a confirmed deletion never triggers a replacement ledger write');
+      if(unstaged){
+        const pending=JSON.parse(localValues.get(`sps_pending_writes:${uid}`))[key];
+        assert.equal(JSON.parse(pending.localValue).find(row=>row.id===before.id).notes,'Typed during deletion');
+        assert.equal(pending.status,'conflict');assert.deepEqual(JSON.parse((await store.get(key)).value),[other]);
+      }else assert.deepEqual(h.result[0],[other]);
+    }finally{h.dispose();}
   });
 }

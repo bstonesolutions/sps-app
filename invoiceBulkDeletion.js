@@ -24,6 +24,7 @@ export function invoiceDeletionReviewMatches(reviewed, latest) {
   const content = (invoice) => Object.fromEntries(Object.entries(invoice || {}).filter(([key]) => (
     !(allowRenumber && ["number", "draftNumberAdjustedAt", "previousDraftNumber"].includes(key))
     && !key.startsWith("_")
+    && !["qbSyncError", "qbSyncErrorCode", "qbSyncAttemptedAt"].includes(key)
   )));
   return !!reviewed && !!latest && JSON.stringify(stableValue(content(reviewed))) === JSON.stringify(stableValue(content(latest)));
 }
@@ -80,6 +81,7 @@ export function invoiceBulkDeleteEligibility(invoice, {
   includeQuickBooks = false,
   unlinkJobs = false,
   reviewedInvoice = null,
+  allowQuickBooksReviewCheck = false,
 } = {}) {
   const id = text(invoice?.id);
   if (!id) return blocked("missing-id", "Missing invoice identifier");
@@ -101,7 +103,8 @@ export function invoiceBulkDeleteEligibility(invoice, {
   ].some((key) => evidence(invoice[key]));
   if (quickBooks) {
     if (!includeQuickBooks) return blocked("quickbooks", "Include QuickBooks invoices to delete this linked invoice");
-    if (!text(invoice.qbId) || ["qbNeedsReview", "qbReviewRequired", "qbConflict", "qbPendingRemote", "qbPendingRemoteInvoice", "qbDuplicate", "qbCreateOutcomeUnknown"].some((key) => evidence(invoice[key]))
+    if (!text(invoice.qbId) || ["qbPendingRemote", "qbPendingRemoteInvoice", "qbDuplicate", "qbCreateOutcomeUnknown"].some((key) => evidence(invoice[key]))
+      || (!allowQuickBooksReviewCheck && ["qbNeedsReview", "qbReviewRequired", "qbConflict"].some((key) => evidence(invoice[key])))
       || ["pending", "create-outcome-unknown"].includes(syncStatus)) return blocked("quickbooks-review", "Resolve this invoice's QuickBooks review before deleting it");
     if (!reviewed) return blocked("review-required", "Review this QuickBooks invoice before deleting it");
   }

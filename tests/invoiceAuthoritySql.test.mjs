@@ -15,6 +15,7 @@ const base = await readFile(new URL('../APP-STATE-CONCURRENCY-MIGRATION.sql', im
 const batch = await readFile(new URL('../APP-STATE-BATCH-CHECK-ONLY-MIGRATION.sql', import.meta.url), 'utf8');
 const review = await readFile(new URL('../supabase/migrations/20261023001232_invoice_review_targeted_resolution.sql', import.meta.url), 'utf8');
 const authority = await readFile(new URL('../supabase/migrations/20261023010217_invoice_accounting_authority.sql', import.meta.url), 'utf8');
+const refreshDeleteRepair = await readFile(new URL('../supabase/migrations/20261026150438_invoice_refresh_and_delete_receipts.sql', import.meta.url), 'utf8');
 const stopMemoryBound = await readFile(new URL('../supabase/migrations/20261012215154_stop_report_memory_bound.sql', import.meta.url), 'utf8');
 const installedStopGuard = stopMemoryBound.slice(stopMemoryBound.indexOf('create or replace function public.sps_guard_accepted_stop_reports()'), stopMemoryBound.indexOf('create or replace function public.sps_stop_completion_batch_cas('));
 const decode = value => { while (typeof value === 'string') value = JSON.parse(value); return value; };
@@ -42,7 +43,7 @@ async function setup({ entries = [initial(), { id: 'two', notes: 'Untouched', to
   const invoice = async id => decode((await state()).value).find(row => row?.id === id);
   const patch = async (expected = initial(), next = paid()) => (await db.query('select * from sps_invoice_review_patch($1,$2::jsonb,$3::jsonb,$4,$5)', [expected.id, JSON.stringify(expected), JSON.stringify(next), 'fixture-actor', 'retry-linked'])).rows[0];
   if (seedAudit) { await role('service_role'); await patch(); await db.exec('reset role'); }
-  await db.exec(authority); await role('service_role');
+  await db.exec(authority); await db.exec(refreshDeleteRepair); await role('service_role');
   const cas = async (rows, expected) => (await db.query("select * from sps_app_state_cas('sps_invoices',$1,$2::jsonb)", [expected ?? (await state()).version, encode(rows, depth)])).rows[0];
   const canonical = async (rows, authorities = {}, { candidates = {}, metadataCandidates = {}, diagnostics = {}, action = 'quickbooks-refresh', expected } = {}) => (await db.query(
     'select * from sps_invoice_canonical_cas($1,$2::jsonb,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb,$8::jsonb)',
@@ -231,7 +232,7 @@ sqlTest('private RPCs and tables reject direct clients and forged trusted contex
     const grants = (await f.db.query(`select proname,has_function_privilege('authenticated',p.oid,'execute') client,
       has_function_privilege('service_role',p.oid,'execute') service from pg_proc p join pg_namespace n on n.oid=p.pronamespace
       where n.nspname='public' and (proname like 'sps_invoice_%' or proname='sps_guard_invoice_authority')`)).rows;
-    const allowed = new Set(['sps_invoice_canonical_cas','sps_invoice_authority_owners','sps_invoice_authorize_delete','sps_invoice_write_candidates_read','sps_invoice_write_candidate_resolve','sps_invoice_review_patch']);
+    const allowed = new Set(['sps_invoice_canonical_cas','sps_invoice_authority_owners','sps_invoice_authorize_delete','sps_invoice_delete_receipt','sps_invoice_write_candidates_read','sps_invoice_write_candidate_resolve','sps_invoice_review_patch']);
     for (const row of grants) { assert.equal(row.client, false, row.proname); assert.equal(row.service, allowed.has(row.proname), row.proname); }
   } finally { await f.close(); }
 });
@@ -429,9 +430,34 @@ sqlTest('1092 realistic invoice records refresh and stale-write protection execu
     const authority = Object.fromEntries(next.map(invoice => [invoice.id, invoice]));
     let start = performance.now(); const saved = await f.canonical(next, authority); const canonicalMs = performance.now() - start;
     assert.equal(saved.applied, true); assert.equal(saved.current_version, 2);
+    start = performance.now(); const unchanged = await f.canonical(next, authority); const unchangedMs = performance.now() - start;
+    assert.equal(unchanged.outcome, 'unchanged'); assert.equal(unchanged.current_version, 2);
+    console.log(JSON.stringify({ unchangedRefreshBenchmark: true, count, unchangedMs: Math.round(unchangedMs) }));
     await f.role('authenticated'); start = performance.now(); const stale = await f.cas(entries); const genericMs = performance.now() - start;
     assert.equal(stale.applied, true); assert.equal(stale.current_version, 3);
     const stored = decode((await f.state()).value); assert.equal(stored.length, count); assert.ok(stored.every(invoice => invoice.balance === 0 && !invoice.qbWriteReview));
     console.log(JSON.stringify({ sqlBenchmark: true, count, jsonBytes: Buffer.byteLength(JSON.stringify(entries)), canonicalMs: Math.round(canonicalMs), genericMs: Math.round(genericMs) }));
+  } finally { await f.close(); }
+});
+
+sqlTest('confirmed deletion of an unanchored missing invoice is receipted and cannot be replayed', async () => {
+  const missing = { ...initial(), qbNeedsReview: true, qbSyncStatus: 'missing-remote', qbMissingSince: '2026-09-19T00:00:00Z' };
+  const f = await setup({ entries: [missing, { id: 'unrelated', total: 20 }] });
+  try {
+    const receipt = () => f.db.query('select * from sps_invoice_delete_receipt($1,$2)', ['one', '123']);
+    assert.deepEqual((await receipt()).rows, []);
+    assert.equal((await f.authorizeDelete(missing)).authorized, true);
+    assert.deepEqual((await receipt()).rows, [], 'authorization alone is not a completed deletion');
+    await f.cas([{ id: 'unrelated', total: 20 }]);
+    const saved = (await receipt()).rows[0];
+    assert.equal(saved.deleted, true); assert.equal(saved.invoice_id, 'one'); assert.deepEqual(saved.expected_invoice, missing);
+    assert.ok(saved.consumed_at); assert.deepEqual((await f.db.query('select * from sps_invoice_delete_receipt($1,$2)', ['one', 'different-qb-id'])).rows, []);
+    await f.role('authenticated');
+    await assert.rejects(receipt(), /permission denied/);
+    await f.cas([missing, { id: 'unrelated', total: 20 }]);
+    assert.equal(await f.invoice('one'), undefined);
+    await f.role('service_role');
+    assert.equal((await receipt()).rows[0].deleted, true);
+    await assert.rejects(f.canonical([missing], { one: { ...missing, qbNeedsReview: false, qbSyncStatus: 'synced' } }), /invoice_deleted_identity_reused/);
   } finally { await f.close(); }
 });

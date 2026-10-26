@@ -18,6 +18,7 @@ const migrations=await Promise.all([
   'supabase/migrations/20261023001232_invoice_review_targeted_resolution.sql',
   'supabase/migrations/20261023010217_invoice_accounting_authority.sql',
   'supabase/migrations/20261023013826_shared_state_base_guard.sql',
+  'supabase/migrations/20261026150438_invoice_refresh_and_delete_receipts.sql',
 ].map(file=>readFile(new URL(`../${file}`,import.meta.url),'utf8')));
 const copy=x=>structuredClone(x);
 const initialClients=()=>[{id:'one',name:'Corrected name',phone:'555-new',plan:'Essential',monthlyRate:250,notes:'New office note',
@@ -243,5 +244,30 @@ sqlTest('invoice authority remains independent and rejected shared batches roll 
     assert.equal((await f.db.query('select * from sps_invoice_write_candidates_read($1)',['inv-one'])).rows.length,0,'failed atomic batch retains no invoice candidate side effect');
     await f.role('authenticated');assert.equal((await f.cas('sps_invoices',[{...invoice,total:999,status:'Sent'}])).applied,true);
     const kept=(await f.value('sps_invoices'))[0];assert.equal(kept.status,'Paid');assert.equal(kept.total,100);assert.ok(kept.qbWriteReview);
+  }finally{await f.close();}
+});
+
+sqlTest('confirmed missing invoice deletion atomically unlinks its stop and rolls back on later protected work',async()=>{
+  const schedule=initialSchedule();schedule[0].stops[0].linkedInvoiceId='missing-invoice';
+  const f=await setup({schedule});try{
+    const invoice={id:'missing-invoice',qbId:'missing-qb',number:'2035',total:192.5,balance:192.5,status:'Sent',qbNeedsReview:true,qbSyncStatus:'missing-remote'};
+    await f.cas('sps_invoices',[invoice]);
+    const authorize=async()=>f.db.query('select * from sps_invoice_authorize_delete($1,$2::jsonb,$3)',[invoice.id,JSON.stringify(invoice),'fixture-owner']);
+    const receipt=async()=>f.db.query('select * from sps_invoice_delete_receipt($1,$2)',[invoice.id,invoice.qbId]);
+    await authorize();
+    const next=copy(schedule);delete next[0].stops[0].linkedInvoiceId;
+    const ivBefore=await f.state('sps_invoices'),scheduleBefore=await f.state('sps_schedule');
+    const operations=[{key:'sps_invoices',expected_version:ivBefore.version,value:[]},{key:'sps_schedule',expected_version:scheduleBefore.version,value:next}];
+    await f.db.exec('reset role');
+    await f.db.exec("create function reject_schedule_fixture() returns trigger language plpgsql as $$begin if new.key='sps_schedule' then raise exception 'fixture_late_failure'; end if; return new; end$$;create trigger zz_fixture_late_failure before update on app_state for each row execute function reject_schedule_fixture();");
+    await f.role('service_role');
+    await assert.rejects(f.patchBatch(operations,{sps_schedule:schedule}),/fixture_late_failure/);
+    assert.deepEqual(await f.state('sps_invoices'),ivBefore);assert.deepEqual(await f.state('sps_schedule'),scheduleBefore);
+    assert.deepEqual((await receipt()).rows,[],'failed cleanup cannot leave a consumed deletion receipt');
+    await f.db.exec('reset role');await f.db.exec('drop trigger zz_fixture_late_failure on app_state');await f.role('service_role');
+    assert.equal((await f.patchBatch(operations,{sps_schedule:schedule})).applied,true);
+    assert.deepEqual(await f.value('sps_invoices'),[]);assert.deepEqual(await f.value('sps_schedule'),next);
+    assert.equal((await receipt()).rows[0].deleted,true);
+    await f.role('authenticated');await f.cas('sps_invoices',[invoice]);assert.deepEqual(await f.value('sps_invoices'),[]);
   }finally{await f.close();}
 });

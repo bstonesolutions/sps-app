@@ -61,3 +61,19 @@ test("invalid scope and malformed success receipts fail without generic fallback
   await assert.rejects(compareAndSetCanonicalInvoices(4, invoices, { actorId: "owner", action: "quickbooks-refresh",
     fetchImpl: async () => response({}, 503) }), { code: "INVOICE_CANONICAL_SAVE_FAILED", status: 503 });
 });
+
+test('database timeout is identified without exposing SQL details or accepting a save', async () => {
+  await assert.rejects(compareAndSetCanonicalInvoices(4, invoices, { actorId: 'owner', action: 'quickbooks-refresh',
+    fetchImpl: async () => response({ code: '57014', message: 'canceling statement due to statement timeout', details: 'PRIVATE INVOICE DATA', hint: 'PRIVATE QUERY' }, 500) }), error => {
+      assert.equal(error.code, 'INVOICE_CANONICAL_TIMEOUT'); assert.equal(error.databaseCode, '57014'); assert.equal(error.status, 503);
+      assert.ok(!JSON.stringify(error).includes('PRIVATE')); assert.ok(!error.message.includes('PRIVATE')); return true;
+    });
+});
+
+test('database rejection diagnostics preserve only safe codes and named invariant reasons', async () => {
+  await assert.rejects(compareAndSetCanonicalInvoices(4, invoices, { actorId: 'owner', action: 'quickbooks-refresh',
+    fetchImpl: async () => response({ code: '40001', message: 'invoice_canonical_stale_revision', details: 'PRIVATE DATA' }, 500) }), error => {
+      assert.equal(error.code, 'INVOICE_CANONICAL_SAVE_FAILED'); assert.equal(error.databaseCode, '40001');
+      assert.equal(error.databaseReason, 'invoice_canonical_stale_revision'); assert.ok(!JSON.stringify(error).includes('PRIVATE')); return true;
+    });
+});

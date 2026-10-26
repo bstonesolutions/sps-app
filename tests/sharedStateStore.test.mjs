@@ -65,6 +65,22 @@ test('independent fields merge on the server without uploading the stale whole r
   assert.equal(h.pending(), undefined);
 });
 
+test('permanent protected-save rejection pauses automatic retries and use saved actually discards it', async () => {
+  const h = await harness();
+  let attempts = 0;
+  globalThis.fetch = async () => { attempts++; return { ok: false, status: 409, json: async () => ({ ok: false,
+    code: 'SHARED_STATE_PATCH_PROTECTED_CHANGE', error: 'A saved report cannot be replaced' }) }; };
+  const edited = [{ ...a, notes: 'Rejected local edit' }, b];
+  const failed = await store.set(h.key, json(edited), { baseValue: json([a, b]) });
+  assert.equal(failed.conflict, true); assert.equal(h.pending().status, 'conflict');
+  const originalBase = h.pending().baseValue;
+  for (let index=0; index<8; index++) { await store.flush(); await store.set(h.key, json(edited), { baseValue: json([a, b]) }); }
+  assert.equal(attempts, 1); assert.equal(h.pending().baseValue, originalBase);
+  const result = await store.resolveConflict(h.key, 'remote');
+  assert.equal(result.ok, true); assert.equal(attempts, 1); assert.equal(h.pending(), undefined);
+  assert.deepEqual(JSON.parse((await store.get(h.key)).value), [a,b]);
+});
+
 test('lost save response retains the same original intent and retry does not repeat the change', async () => {
   const h = await harness(); h.state.loseNextReply = true;
   assert.equal((await store.set(h.key, json([{ ...a, notes: 'Saved once' }, b]), { baseValue: json([a, b]) })).ok, false);

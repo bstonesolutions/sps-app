@@ -24,8 +24,19 @@ export async function compareAndSetCanonicalInvoices(expectedVersion, value, {
         ...(Object.keys(metadataCandidates).length ? { p_metadata_candidates: metadataCandidates } : {}),
         ...(Object.keys(diagnostics).length ? { p_diagnostics: diagnostics } : {}) }),
     });
-    if (!response.ok) throw failure("INVOICE_CANONICAL_SAVE_FAILED", `Shared invoice persistence could not confirm this save (${response.status}).`, response.status);
     const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      // Keep a safe database code in server diagnostics without echoing raw
+      // Postgres details (which may contain invoice contents) to the client.
+      const databaseCode = /^[A-Z0-9]{5}$/.test(String(payload?.code || "")) ? String(payload.code) : null;
+      const timedOut = databaseCode === "57014";
+      const error = failure(timedOut ? "INVOICE_CANONICAL_TIMEOUT" : "INVOICE_CANONICAL_SAVE_FAILED",
+        timedOut ? "The invoice refresh took too long to save. No replacement was confirmed. Retry to check the saved invoices."
+          : `Shared invoice persistence could not confirm this save (${response.status}).`, timedOut ? 503 : response.status);
+      if (databaseCode) error.databaseCode = databaseCode;
+      if (/^(invoice|shared)_[a-z_]+$/.test(String(payload?.message || ""))) error.databaseReason = payload.message;
+      throw error;
+    }
     const row = Array.isArray(payload) ? payload[0] : payload;
     if (!object(row) || typeof row.applied !== "boolean") throw failure("INVOICE_CANONICAL_RESPONSE_INVALID", "Shared invoice persistence returned an unreadable receipt.");
     const currentVersion = row.current_version == null ? null : Number(row.current_version);

@@ -13,6 +13,49 @@ export function invoiceDeletionReviewRequest(invoice, unlinkJobs = false) {
   };
 }
 
+// Linked invoice deletion is one server operation. It must not flush a device's
+// whole invoice list or wait for an unrelated client's pending changes.
+export async function deleteConfirmedQuickBooksInvoice({ invoice, unlinkJobs = false, store, requestDelete, adopt }) {
+  const expectedInvoice = snapshotInvoiceDeletionReview(invoice);
+  const id = text(expectedInvoice?.id);
+  if (!id || !text(expectedInvoice?.qbId)) throw new Error("Choose the saved QuickBooks invoice before deleting it.");
+  const identity = store.captureIdentity();
+  const current = () => {
+    if (!store.isCurrentIdentity(identity)) throw new Error("The signed-in account changed. Reopen this invoice in the original account to confirm deletion.");
+  };
+  current();
+  const receipt = await requestDelete({
+    qb_id: expectedInvoice.qbId, reviewed_invoice: expectedInvoice,
+    unlinkJobs: unlinkJobs === true, completeInSps: true,
+  }, identity);
+  current();
+  if (receipt?.success !== true || receipt.complete !== true || text(receipt.deletedInvoiceId) !== id || receipt.actorId !== identity.uid) {
+    throw new Error(receipt?.error || "Deletion was not confirmed in SPS Way. The invoice remains available to retry.");
+  }
+  let accepted;
+  try { accepted = await store.acceptInvoiceDeletionSnapshot(receipt, identity, { expectedInvoice }); }
+  catch (error) { return {
+    ok: false, serverConfirmed: true,
+    error: `The invoice was deleted on the server, but this device could not refresh its list. ${error?.message || "Retry to finish refreshing it."}`,
+  }; }
+  current();
+  if (accepted?.ok !== true) return {
+    ok: false, serverConfirmed: true, targetChanged: accepted?.targetChanged === true,
+    error: accepted?.error?.message || "The invoice was deleted on the server, but this device could not confirm its updated list. Retry to finish refreshing it.",
+  };
+  const values = accepted.values;
+  if (!Array.isArray(values?.sps_invoices) || values.sps_invoices.some(row => text(row?.id) === id)) return {
+    ok: false, serverConfirmed: true,
+    error: "The invoice was deleted on the server, but this device still has changes for it. Your local work has been preserved for review.",
+  };
+  await adopt(values, { deletedInvoice: { id, before: expectedInvoice } });
+  current();
+  return { ok: true, existing: receipt.alreadyGone === true, renumbered: receipt.renumbered || [],
+    recoveryPending: accepted.recoveryPending === true,
+    ...(accepted.recoveryPending ? { message: "Invoice removed. Newer local edits are preserved for review." } : {}),
+  };
+}
+
 export function invoiceDeletionRelatedConflicts(store) {
   const conflicts = typeof store?.listConflicts === "function" ? store.listConflicts() : [];
   return (Array.isArray(conflicts) ? conflicts : []).filter(conflict => INVOICE_DELETION_CONFLICT_KEYS.includes(conflict?.key));

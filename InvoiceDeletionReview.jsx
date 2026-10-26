@@ -66,6 +66,7 @@ export default function InvoiceDeletionReview({ invoice, onDelete, onClose, T: r
   const [notice, setNotice] = useState("");
   const [conflicts, setConflicts] = useState([]);
   const [refreshRequired, setRefreshRequired] = useState(false);
+  const [deletionComplete, setDeletionComplete] = useState(false);
   const pendingRef = useRef(false);
   const dialogRef = useRef(null);
   const triggerRef = useRef(null);
@@ -91,17 +92,25 @@ export default function InvoiceDeletionReview({ invoice, onDelete, onClose, T: r
     return () => { window.removeEventListener("keydown", onKey, true); triggerRef.current?.focus(); };
   }, [open]);
 
-  const beginReview = () => {
+  const beginReview = async () => {
+    if (pendingRef.current) return;
     targetIdRef.current = invoice?.id;
     setReviewedInvoice(snapshotInvoiceDeletionReview(invoice));
-    setUnlinkJobs(false); setError(""); setNotice(""); setConflicts([]); setRefreshRequired(false); setOpen(true);
+    setUnlinkJobs(false); setError(""); setNotice(""); setConflicts([]); setDeletionComplete(false); setRefreshRequired(!!store?.refresh); setOpen(true);
+    if (!store?.refresh) return;
+    pendingRef.current = true; setBusy(true);
+    try { await refreshReview({ initial: true }); }
+    catch (refreshError) { setError(refreshError?.message || "The saved invoice could not be checked. Try loading it again."); }
+    finally { pendingRef.current = false; setBusy(false); }
   };
-  const refreshReview = async () => {
+  const refreshReview = async ({ initial = false } = {}) => {
     const refreshed = await refreshInvoiceDeletionReview(store, targetIdRef.current);
     setReviewedInvoice(refreshed.invoice);
-    setUnlinkJobs(false); setConflicts(refreshed.conflicts); setRefreshRequired(false); setError("");
+    // The linked-invoice endpoint checks and removes just this saved record.
+    // Other queued edits do not need to be resolved before that server check.
+    setUnlinkJobs(false); setConflicts(refreshed.invoice?.qbId ? [] : refreshed.conflicts); setRefreshRequired(false); setError("");
     setNotice(refreshed.invoice
-      ? "Review the updated invoice below. Nothing has been deleted."
+      ? initial ? "" : "The saved invoice details are shown below"
       : "This invoice is no longer in SPS Way. Nothing was deleted by this review.");
   };
   const onConflictResolved = async () => {
@@ -127,6 +136,11 @@ export default function InvoiceDeletionReview({ invoice, onDelete, onClose, T: r
         setError(text(receipt?.error) || "Deletion was not confirmed. The invoice is still available.");
         return;
       }
+      if (receipt.recoveryPending) {
+        setDeletionComplete(true); setReviewedInvoice(null); setConflicts([]); setRefreshRequired(false);
+        setNotice(receipt.message || "Invoice removed. Newer local edits are preserved for review.");
+        return;
+      }
       setOpen(false);
       onClose?.();
     } catch (deleteError) { setError(deleteError?.message || "The invoice was not deleted."); }
@@ -145,29 +159,29 @@ export default function InvoiceDeletionReview({ invoice, onDelete, onClose, T: r
   const dialog = open ? <div role="dialog" aria-modal="true" aria-labelledby={titleId} style={{ position: "fixed", inset: 0, zIndex: 2300, background: "rgba(0,0,0,.48)", display: "flex", alignItems: "center", justifyContent: "center", padding: "max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left))", boxSizing: "border-box", fontFamily: "inherit" }}>
     <div ref={dialogRef} style={{ width: "100%", maxWidth: 540, maxHeight: "calc(100dvh - 32px)", minHeight: 0, display: "flex", flexDirection: "column", border: `1px solid ${T.border}`, borderRadius: 16, background: T.surface, color: T.text, overflow: "hidden" }}>
       <div style={{ padding: "19px 20px 15px", borderBottom: `1px solid ${T.border}` }}>
-        <h3 id={titleId} tabIndex={-1} style={{ margin: 0, fontSize: 22, lineHeight: 1.2, letterSpacing: "-.025em" }}>Review invoice deletion</h3>
+        <h3 id={titleId} tabIndex={-1} style={{ margin: 0, fontSize: 23, lineHeight: 1.2, letterSpacing: "-.025em" }}>{deletionComplete ? `Invoice ${invoice?.number || ""} removed` : `Delete invoice ${reviewedInvoice?.number || ""}`}</h3>
       </div>
       <div style={{ padding: "18px 20px", minHeight: 0, overflowY: "auto", overscrollBehavior: "contain" }}>
         {notice && <div role="status" style={{ marginBottom: 15, paddingLeft: 11, borderLeft: `3px solid ${T.primary}`, fontSize: 12.5, lineHeight: 1.5 }}>{notice}</div>}
         {reviewedInvoice && <>
           <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 16, alignItems: "start", paddingBottom: 16, borderBottom: `1px solid ${T.border}` }}>
-            <div style={{ minWidth: 0 }}><div style={{ fontSize: 17, fontWeight: 750, overflowWrap: "anywhere" }}>Invoice #{reviewedInvoice.number || "Unnumbered"}</div><div style={{ marginTop: 5, color: T.textMuted, fontSize: 13, overflowWrap: "anywhere" }}>{clientName || "Client not recorded"}</div><div style={{ marginTop: 6, color: T.textMuted, fontSize: 12 }}>{reviewedInvoice.status || "Status unavailable"}{reviewedInvoice.date ? ` · ${reviewedInvoice.date}` : ""}</div></div>
-            <div style={{ textAlign: "right", fontVariantNumeric: "tabular-nums", fontSize: amount == null ? 12 : 19, fontWeight: 750 }}>{amount == null ? "Amount unavailable" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(amount)}</div>
+            <div style={{ minWidth: 0 }}><div style={{ fontSize: 19, fontWeight: 750, overflowWrap: "anywhere" }}>{clientName || "Client not recorded"}</div><div style={{ marginTop: 7, color: T.textMuted, fontSize: 12.5 }}>{reviewedInvoice.status || "Status unavailable"}{reviewedInvoice.date ? ` · ${reviewedInvoice.date}` : ""}</div></div>
+            <div style={{ textAlign: "right", fontVariantNumeric: "tabular-nums", fontSize: amount == null ? 12 : 26, letterSpacing: "-.025em", fontWeight: 750 }}>{amount == null ? "Amount unavailable" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(amount)}</div>
           </div>
-          <div style={{ marginTop: 15, fontSize: 13, fontWeight: 750 }}>{reviewedInvoice.qbId ? "Deletes from SPS Way and QuickBooks" : "Deletes from SPS Way"}</div>
-          <p style={{ margin: "6px 0 17px", fontSize: 12.5, color: T.textMuted, lineHeight: 1.5 }}>Deletion cannot be undone. Payment history and protected invoices are checked before anything is removed.</p>
-          <label style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "13px 12px", border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 12.5, lineHeight: 1.5, cursor: busy ? "default" : "pointer" }}>
+          <div style={{ marginTop: 17, fontSize: 14, fontWeight: 750 }}>{reviewedInvoice.qbId ? "QuickBooks is checked before removal" : "Deletes from SPS Way"}</div>
+          <p style={{ margin: "7px 0 17px", fontSize: 13, color: T.textMuted, lineHeight: 1.55 }}>{reviewedInvoice.qbId ? "If QuickBooks already removed this invoice, only the SPS copy is removed. Otherwise the unpaid invoice is deleted from both. Paid invoices and payment history stay protected." : "Deletion cannot be undone. Paid invoices and payment history stay protected."}</p>
+          <label style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "14px 0 0", borderTop: `1px solid ${T.border}`, fontSize: 13, lineHeight: 1.5, cursor: busy ? "default" : "pointer" }}>
             <input type="checkbox" disabled={busy || !!conflicts.length || refreshRequired} checked={unlinkJobs} onChange={event => setUnlinkJobs(event.target.checked)} style={{ width: 18, height: 18, margin: "1px 0 0", flexShrink: 0, accentColor: T.primary }} />
             <span>Remove invoice links from unpaid maintenance months, jobs and estimates. Keep the jobs and estimates.</span>
           </label>
         </>}
         {error && <div role="alert" style={{ marginTop: 16, paddingLeft: 11, borderLeft: `3px solid ${T.primary}`, color: T.primary, fontSize: 12.5, lineHeight: 1.5 }}>{error}</div>}
         <InvoiceDeletionConflicts conflicts={conflicts} store={store} T={T} onResolved={onConflictResolved} />
-        {store?.refresh && (error || notice) && <button type="button" disabled={busy} onClick={refresh} style={{ ...buttonStyle(T), marginTop: 14 }}>Refresh invoice details</button>}
+        {!deletionComplete && store?.refresh && (error || notice) && <button type="button" disabled={busy} onClick={refresh} style={{ ...buttonStyle(T), marginTop: 14 }}>Reload saved invoice</button>}
       </div>
       <div style={{ flexShrink: 0, padding: "14px 20px 18px", borderTop: `1px solid ${T.border}`, display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
-        <button type="button" disabled={busy} onClick={() => setOpen(false)} style={buttonStyle(T)}>Cancel</button>
-        {reviewedInvoice ? <button type="button" disabled={busy || !!conflicts.length || refreshRequired || !onDelete} onClick={remove} style={{ ...buttonStyle(T), background: T.primary, borderColor: T.primary, color: "#fff", opacity: busy || conflicts.length || refreshRequired ? .55 : 1 }}>{busy ? "Checking and deleting" : "Delete invoice"}</button> : <button type="button" onClick={() => { setOpen(false); onClose?.(); }} style={buttonStyle(T)}>Close invoice</button>}
+        {!deletionComplete && <button type="button" disabled={busy} onClick={() => setOpen(false)} style={buttonStyle(T)}>Cancel</button>}
+        {reviewedInvoice ? <button type="button" disabled={busy || !!conflicts.length || refreshRequired || !onDelete} onClick={remove} style={{ ...buttonStyle(T), background: T.primary, borderColor: T.primary, color: "#fff", opacity: busy || conflicts.length || refreshRequired ? .55 : 1 }}>{busy ? refreshRequired ? "Loading saved invoice" : "Checking and deleting" : "Delete invoice"}</button> : <button type="button" onClick={() => { setOpen(false); onClose?.(); }} style={buttonStyle(T)}>Close invoice</button>}
       </div>
     </div>
   </div> : null;
