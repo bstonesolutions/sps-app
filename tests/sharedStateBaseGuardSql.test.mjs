@@ -20,6 +20,7 @@ const migrations=await Promise.all([
   'supabase/migrations/20261023013826_shared_state_base_guard.sql',
   'supabase/migrations/20261026150438_invoice_refresh_and_delete_receipts.sql',
   'supabase/migrations/20261026152040_shared_patch_preflight.sql',
+  'supabase/migrations/20261026153209_business_conflicts_without_transaction_retry.sql',
 ].map(file=>readFile(new URL(`../${file}`,import.meta.url),'utf8')));
 const copy=x=>structuredClone(x);
 const initialClients=()=>[{id:'one',name:'Corrected name',phone:'555-new',plan:'Essential',monthlyRate:250,notes:'New office note',
@@ -289,7 +290,7 @@ sqlTest('protected report rejection happens before a row-lock transaction and le
     const before=await f.state('sps_clients'),other=await f.state('sps_other');
     const next=copy(clients);next[0].history[1].notes='Older device replacement';
     await assert.rejects(f.patchBatch([{key:'sps_clients',expected_version:before.version,value:next},
-      {key:'sps_other',expected_version:other.version,value:{notes:'Must not write'}}],{sps_clients:clients}),/shared_state_protected_change_rejected/);
+      {key:'sps_other',expected_version:other.version,value:{notes:'Must not write'}}],{sps_clients:clients}),error=>error.code==='PT409'&&error.message==='shared_state_protected_change_rejected');
     assert.deepEqual(await f.state('sps_clients'),before);assert.deepEqual(await f.state('sps_other'),other);
   }finally{await f.close();}
 });
@@ -300,5 +301,23 @@ sqlTest('stale versions return conflict before decoding a malformed large baseli
     const result=(await f.db.query('select * from sps_shared_state_patch_cas($1,$2,$3::jsonb,$4::jsonb,$5)',
       ['sps_clients',before.version+1,JSON.stringify('not a JSON array'),JSON.stringify('not a JSON array'),'fixture-owner'])).rows[0];
     assert.equal(result.applied,false);assert.equal(result.outcome,'conflict');assert.deepEqual(await f.state('sps_clients'),before);
+  }finally{await f.close();}
+});
+
+
+sqlTest('only named business conflicts become PT409 and real serialization failures are preserved',async()=>{
+  const f=await setup();try{
+    await f.role('postgres');
+    const names=['sps_shared_state_patch_batch_cas','sps_invoice_canonical_cas','sps_guard_invoice_authority','sps_invoice_review_patch','sps_invoice_review_patch_internal','sps_client_create','sps_stop_completion_delta_cas'];
+    const rows=(await f.db.query("select proname,prosrc from pg_proc where proname=any($1::text[])",[names])).rows;
+    assert.equal(rows.length,7);for(const row of rows){assert.match(row.prosrc,/errcode='PT409'/,row.proname);assert.doesNotMatch(row.prosrc,/errcode='40001'/,row.proname);}
+    await f.db.exec("create function fixture_actual_serialization_failure() returns void language plpgsql as $$ begin raise exception 'could not serialize access due to concurrent update' using errcode='40001'; end $$;");
+    await f.db.exec(migrations[migrations.length-1]);
+    await assert.rejects(f.db.query('select fixture_actual_serialization_failure()'),error=>error.code==='40001');
+    await f.role('service_role');
+    assert.equal((await f.patch('sps_clients',initialClients(),[initialClients()[0]])).applied,true);
+    const before=await f.state('sps_clients');
+    await assert.rejects(f.patch('sps_clients',[initialClients()[0]],initialClients()),error=>error.code==='PT409'&&error.message==='shared_deleted_identity_reused');
+    assert.deepEqual(await f.state('sps_clients'),before);
   }finally{await f.close();}
 });

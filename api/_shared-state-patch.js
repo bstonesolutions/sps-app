@@ -46,9 +46,10 @@ async function callRpc(name, body, { fetchImpl = globalThis.fetch, now = Date.no
         : payload?.message === "shared_state_protected_change_rejected"
           ? fail("SHARED_STATE_PATCH_PROTECTED_CHANGE", "A protected service report could not accept this change. Open the saved report to edit it without replacing other work.", 409) : null;
       if (rejection) {
-        // PostgREST can transport SQLSTATE 40001 as HTTP 500. It is still the
-        // exact named permanent application rejection, never a generic 500.
-        if ([400, 409, 500].includes(response.status) && databaseCode === "40001") {
+        // PT409 is the non-retrying database business-conflict response. Keep
+        // compatibility with old named 40001 responses during rollout only.
+        // Real serialization errors and generic 500s are never cached.
+        if ([400, 409, 500].includes(response.status) && ["PT409", "40001"].includes(databaseCode)) {
           while (rejectedWrites.size >= MAX_REJECTED_WRITES) rejectedWrites.delete(rejectedWrites.keys().next().value);
           rejectedWrites.set(requestHash, { expiresAt: timestamp() + REJECTION_TTL_MS, code: rejection.code, message: rejection.message });
         }

@@ -113,3 +113,18 @@ test('negative cache retains at most 128 exact request hashes', async()=>{
     assert.equal(calls,129);await assert.rejects(compareAndSetSharedStatePatch('sps_clients',1,before,after,options));assert.equal(calls,130);
   }finally{console.error=original;}
 });
+
+
+test('PT409 business rejection returns once and exact retries reuse its bounded cache', async()=>{
+  for(const reason of ['shared_state_protected_change_rejected','shared_deleted_identity_reused']){
+    let calls=0;const options={actorId:`pt409-${reason}`,fetchImpl:async()=>{calls++;return{ok:false,status:409,json:async()=>({code:'PT409',message:reason})};}};
+    for(let i=0;i<2;i++)await assert.rejects(compareAndSetSharedStatePatch('sps_clients',7,before,after,options),error=>error.status===409&&error.code.startsWith('SHARED_STATE_'));
+    assert.equal(calls,1,'known permanent rejection is returned without another database transaction');
+  }
+});
+
+test('genuine SQLSTATE40001 serialization errors never enter the permanent rejection cache', async()=>{
+  let calls=0;const options={actorId:'actual-serialization-failure',fetchImpl:async()=>{calls++;return{ok:false,status:500,json:async()=>({code:'40001',message:'could not serialize access due to concurrent update'})};}};
+  for(let i=0;i<2;i++)await assert.rejects(compareAndSetSharedStatePatch('sps_clients',7,before,after,options),{code:'SHARED_STATE_PATCH_SAVE_UNCONFIRMED'});
+  assert.equal(calls,2);
+});

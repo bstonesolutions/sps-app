@@ -17,6 +17,7 @@ const review = await readFile(new URL('../supabase/migrations/20261023001232_inv
 const authority = await readFile(new URL('../supabase/migrations/20261023010217_invoice_accounting_authority.sql', import.meta.url), 'utf8');
 const refreshDeleteRepair = await readFile(new URL('../supabase/migrations/20261026150438_invoice_refresh_and_delete_receipts.sql', import.meta.url), 'utf8');
 const exactFastPaths = await readFile(new URL('../supabase/migrations/20261026152318_invoice_exact_noop_fast_paths.sql', import.meta.url), 'utf8');
+const businessConflictCodes = await readFile(new URL('../supabase/migrations/20261026153209_business_conflicts_without_transaction_retry.sql', import.meta.url), 'utf8');
 const stopMemoryBound = await readFile(new URL('../supabase/migrations/20261012215154_stop_report_memory_bound.sql', import.meta.url), 'utf8');
 const installedStopGuard = stopMemoryBound.slice(stopMemoryBound.indexOf('create or replace function public.sps_guard_accepted_stop_reports()'), stopMemoryBound.indexOf('create or replace function public.sps_stop_completion_batch_cas('));
 const decode = value => { while (typeof value === 'string') value = JSON.parse(value); return value; };
@@ -44,7 +45,7 @@ async function setup({ entries = [initial(), { id: 'two', notes: 'Untouched', to
   const invoice = async id => decode((await state()).value).find(row => row?.id === id);
   const patch = async (expected = initial(), next = paid()) => (await db.query('select * from sps_invoice_review_patch($1,$2::jsonb,$3::jsonb,$4,$5)', [expected.id, JSON.stringify(expected), JSON.stringify(next), 'fixture-actor', 'retry-linked'])).rows[0];
   if (seedAudit) { await role('service_role'); await patch(); await db.exec('reset role'); }
-  await db.exec(authority); await db.exec(refreshDeleteRepair); if (fastPaths) await db.exec(exactFastPaths); await role('service_role');
+  await db.exec(authority); await db.exec(refreshDeleteRepair); if (fastPaths) await db.exec(exactFastPaths); await db.exec(businessConflictCodes); await role('service_role');
   const cas = async (rows, expected) => (await db.query("select * from sps_app_state_cas('sps_invoices',$1,$2::jsonb)", [expected ?? (await state()).version, encode(rows, depth)])).rows[0];
   const canonical = async (rows, authorities = {}, { candidates = {}, metadataCandidates = {}, diagnostics = {}, action = 'quickbooks-refresh', expected } = {}) => (await db.query(
     'select * from sps_invoice_canonical_cas($1,$2::jsonb,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb,$8::jsonb)',
@@ -507,5 +508,40 @@ sqlTest('mixed canonical refresh preserves exact held proposals and applies only
     await f.canonical([held,changed],{one:held,second:changed});
     assert.deepEqual(await f.invoice('one'),held);assert.equal((await f.invoice('second')).total,200);
     assert.equal((await f.candidates()).length,1);
+  }finally{await f.close();}
+});
+
+sqlTest('permanent invoice conflicts roll back once with PT409 instead of a serialization-retry code',async()=>{
+  const f=await setup({entries:[initial()]});
+  const conflict=(promise,message)=>assert.rejects(promise,error=>{assert.equal(error.code,'PT409');assert.match(error.message,new RegExp(message));return true;});
+  try{
+    await f.canonical([paid()],{one:paid()});const before=await f.state();
+    await conflict(f.canonical([paid()],{one:initial()}),'invoice_canonical_stale_revision');
+    const alias={...paid(),id:'same-qb-alias'};
+    await conflict(f.canonical([paid(),alias],{'same-qb-alias':alias}),'invoice_canonical_identity_conflict');
+    const diagnostic={expected:initial(),patch:{qbNeedsReview:true,qbSyncStatus:'missing-remote',qbMissingSince:'2026-10-26T12:00:00Z'}};
+    await conflict(f.canonical([paid()],{},{diagnostics:{one:diagnostic}}),'invoice_canonical_diagnostic_changed');
+    await conflict(f.canonical([paid()],{one:paid()},{candidates:{one:initial()}}),'invoice_canonical_candidate_changed');
+    await conflict(f.canonical([paid()],{one:paid()},{metadataCandidates:{one:{expected:initial(),proposed:paid()}}}),'invoice_canonical_metadata_candidate_changed');
+    assert.deepEqual(await f.state(),before);
+    await f.authorizeDelete(paid());await f.cas([]);const removed=await f.state();
+    await conflict(f.canonical([paid()],{one:paid()}),'invoice_deleted_identity_reused');
+    assert.deepEqual(await f.state(),removed);
+  }finally{await f.close();}
+});
+
+sqlTest('installed invoice invariant raises use permanent conflict codes and retain access controls',async()=>{
+  const f=await setup();
+  try{
+    await f.db.exec('reset role');
+    const rows=(await f.db.query(`select p.proname,p.prosrc,has_function_privilege('authenticated',p.oid,'execute') as client
+      from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public'
+      and p.proname in ('sps_invoice_canonical_cas','sps_guard_invoice_authority','sps_invoice_review_patch','sps_invoice_review_patch_internal')`)).rows;
+    assert.equal(rows.length,4);
+    for(const row of rows){
+      assert.match(row.prosrc,/errcode='PT409'/,row.proname);
+      assert.doesNotMatch(row.prosrc,/raise exception 'invoice_[a-z_]+' using errcode='40001'/,row.proname);
+      assert.equal(row.client,false,row.proname);
+    }
   }finally{await f.close();}
 });

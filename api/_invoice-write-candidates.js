@@ -8,8 +8,15 @@ export async function invoiceAuthorityRpc(name, body, {fetchImpl = globalThis.fe
     const response = await fetchImpl(`${APP_STATE_SUPABASE_URL}/rest/v1/rpc/${name}`, {
       method: 'POST', signal, headers: {apikey: APP_STATE_SERVICE_KEY, Authorization: `Bearer ${APP_STATE_SERVICE_KEY}`, 'Content-Type': 'application/json'}, body: JSON.stringify(body),
     });
-    if (!response.ok) throw fail('INVOICE_AUTHORITY_UNAVAILABLE', 'The saved invoice action could not be confirmed. Retry to check its state.', 503);
-    return response.json();
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      if (response.status === 409 && payload?.code === 'PT409') {
+        throw Object.assign(fail('INVOICE_AUTHORITY_CONFLICT', 'This saved invoice changed or has a protected accounting link. Review its current details before trying again.', 409), { retryable: false, databaseCode: 'PT409' });
+      }
+      throw fail('INVOICE_AUTHORITY_UNAVAILABLE', 'The saved invoice action could not be confirmed. Retry to check its state.', 503);
+    }
+    if (payload == null) throw fail('INVOICE_AUTHORITY_UNAVAILABLE', 'The saved invoice action returned an unreadable receipt. Retry to check its state.', 503);
+    return payload;
   });
 }
 export async function readInvoiceWriteProposal(body, {readState = readAppStateVersioned, rpc = invoiceAuthorityRpc} = {}) {

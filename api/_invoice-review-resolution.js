@@ -161,7 +161,12 @@ export async function patchReviewedInvoice({ invoiceId, beforeInvoice, invoice, 
     });
     let data;
     try { data = await response.json(); } catch (_) { data = null; }
-    if (!response.ok) throw failure("INVOICE_REVIEW_SAVE_UNCONFIRMED", "The invoice save was not confirmed. Retry to check the same review.", 503);
+    if (!response.ok) {
+      if (response.status === 409 && data?.code === "PT409") {
+        throw Object.assign(failure("INVOICE_REVIEW_SAVE_CONFLICT", "This invoice changed or contains protected accounting information. Reopen its review before choosing a version.", 409), { retryable: false, databaseCode: "PT409" });
+      }
+      throw failure("INVOICE_REVIEW_SAVE_UNCONFIRMED", "The invoice save was not confirmed. Retry to check the same review.", 503);
+    }
     const row = Array.isArray(data) ? data[0] : data;
     if (!record(row) || typeof row.applied !== "boolean") {
       throw failure("INVOICE_REVIEW_SAVE_UNCONFIRMED", "The server did not confirm the invoice save. Retry to check the same review.", 503);

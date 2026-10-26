@@ -29,10 +29,13 @@ export async function compareAndSetCanonicalInvoices(expectedVersion, value, {
       // Keep a safe database code in server diagnostics without echoing raw
       // Postgres details (which may contain invoice contents) to the client.
       const databaseCode = /^[A-Z0-9]{5}$/.test(String(payload?.code || "")) ? String(payload.code) : null;
+      const permanentConflict = databaseCode === "PT409" && response.status === 409;
       const timedOut = databaseCode === "57014";
-      const error = failure(timedOut ? "INVOICE_CANONICAL_TIMEOUT" : "INVOICE_CANONICAL_SAVE_FAILED",
-        timedOut ? "The invoice refresh took too long to save. No replacement was confirmed. Retry to check the saved invoices."
-          : `Shared invoice persistence could not confirm this save (${response.status}).`, timedOut ? 503 : response.status);
+      const error = failure(permanentConflict ? "INVOICE_CANONICAL_CONFLICT" : timedOut ? "INVOICE_CANONICAL_TIMEOUT" : "INVOICE_CANONICAL_SAVE_FAILED",
+        permanentConflict ? "This invoice changed or has a protected accounting link. Review its current details before trying this change again."
+          : timedOut ? "The invoice refresh took too long to save. No replacement was confirmed. Retry to check the saved invoices."
+          : `Shared invoice persistence could not confirm this save (${response.status}).`, permanentConflict ? 409 : timedOut ? 503 : response.status);
+      if (permanentConflict) error.retryable = false;
       if (databaseCode) error.databaseCode = databaseCode;
       if (/^(invoice|shared)_[a-z_]+$/.test(String(payload?.message || ""))) error.databaseReason = payload.message;
       throw error;
