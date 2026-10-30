@@ -69,6 +69,18 @@ const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 const sameStored = (a, b) => a === b;
 const serverProtectedKeys = new Set(["sps_clients", "sps_schedule", "sps_completed", "sps_invoices"]);
 const fieldIntentKeys = new Set(["sps_clients", "sps_schedule"]);
+// Other sections (inventory, estimates, team, settings, …) keep saving around an overlap: only the
+// fields two people changed differently are held on this device for review, every other change is
+// saved right away, and the device keeps receiving everyone else's updates. Clients and the schedule
+// already merge per field on the server; invoices keep their dedicated accounting review.
+const HOLDABLE_CONFLICT_KINDS = new Set(["same-field-edit", "delete-vs-edit", "same-identity-add", "concurrent-array-edit", "concurrent-reorder"]);
+const committable = (envelope) => !!envelope
+  && (envelope.status === "pending" || (envelope.heldConflicts === true && envelope.heldDirty === true));
+function canHoldConflicts(key, envelope, remote, conflicts) {
+  return key !== "sps_invoices" && !fieldIntentKeys.has(key) && envelope.v === 2 && !envelope.deleteIntent
+    && !envelope.force && !envelope.saveRejection && remote.exists && conflicts.length > 0
+    && conflicts.every((item) => HOLDABLE_CONFLICT_KINDS.has(item && item.kind) && typeof item.path === "string" && item.path !== "$");
+}
 function normalizeRemoteStoredValue(key, value) {
   const raw = normalizeStoredValue(value);
   if (!serverProtectedKeys.has(key) || typeof raw !== "string") return raw;
@@ -115,7 +127,7 @@ function clearObject(obj) {
 
 function recalculateRetryWindow() {
   _retryAfterAt = Object.values(_pending).reduce((latest, envelope) => {
-    if (!envelope || envelope.status !== "pending") return latest;
+    if (!committable(envelope)) return latest;
     return Math.max(latest, Math.max(0, Number(envelope.retryAt) || 0));
   }, 0);
   return _retryAfterAt;
@@ -875,6 +887,9 @@ async function init() {
         const pending = _pending[row.key];
         if (pending && row.key === "sps_invoices") _cache[row.key] = projectInvoicePending(pending, value) ?? pendingDisplayValue(pending);
         else if (pending && pending.deleteIntent && pending.status === "conflict") _cache[row.key] = value;
+        else if (pending && pending.heldConflicts) {
+          _cache[row.key] = normalizeStoredValue(mergeEnvelopeWithRemote(row.key, pending, { exists: true, value }, "local").value) ?? pending.localValue;
+        }
         else if (!pending && !(_cacheAt[row.key] > _initSelectAt)) _cache[row.key] = value;
       }
       _loaded = true;
@@ -924,6 +939,11 @@ function stagePending(key, value, options = {}) {
   // A projected base and explicit force are meaningful operations even when the value matches.
   if (existing && existing.localValue === localValue && !existing.deleteIntent
     && !existing.force && !options.force && !hasOwn(options, "projectedBaseValue")) return existing;
+  const shownValue = hasOwn(options, "baseValue") ? normalizeStoredValue(options.baseValue)
+    : hasOwn(options, "projectedBaseValue") ? normalizeStoredValue(options.projectedBaseValue) : _cache[key];
+  const heldRebase = existing && existing.v === 2 && existing.heldConflicts && !existing.deleteIntent && !options.force
+    ? rebaseOntoHeld(key, shownValue, localValue, existing) : null;
+  if (heldRebase && heldRebase.localValue === existing.localValue && heldRebase.baseValue === existing.baseValue) return existing;
   let envelope;
   if (existing && existing.v !== 2) {
     // A pre-versioning queue item has no trustworthy merge base. Preserve it as a visible conflict
@@ -933,6 +953,9 @@ function stagePending(key, value, options = {}) {
         existing.localValue, { prefer: "local" }).value;
     }
     envelope = { ...existing, opId: newOpId(), localValue, status: "legacy", updatedAt: now };
+  } else if (heldRebase) {
+    // The held fields stay paused for review; the rest of this new edit commits on its own.
+    envelope = { ...existing, opId: newOpId(), baseValue: heldRebase.baseValue, localValue: heldRebase.localValue, heldDirty: true, updatedAt: now };
   } else if (existing && existing.v === 2) {
     // Display-only refreshes can include server changes that were never part of the user's intent.
     // On a subsequent real edit, reverse the original local delta out of that projection to build
@@ -976,6 +999,8 @@ function stagePending(key, value, options = {}) {
       status: existing.status === "conflict" && !options.force && !fieldIntentKeys.has(key) ? "conflict" : "pending",
       conflicts: existing.status === "conflict" && !options.force && !fieldIntentKeys.has(key) ? existing.conflicts : [],
       ...(fieldIntentKeys.has(key) ? { sharedReviewConflicts: undefined, sharedResolutions: undefined } : {}),
+      heldConflicts: false,
+      heldDirty: false,
       updatedAt: now,
     };
   } else {
@@ -1023,6 +1048,17 @@ function stagePending(key, value, options = {}) {
   return envelope;
 }
 
+// Apply an editor's newest change to a held envelope. `shownValue` is the copy the editor started
+// from, so only the edits made since then are applied to the held copy. Where someone else changed
+// the same thing meanwhile, the merge base keeps what this device showed, so that field also pauses
+// for review instead of silently overwriting work this device never displayed.
+function rebaseOntoHeld(key, shownValue, nextLocal, held) {
+  if (shownValue === undefined || !held.baseExists) return null;
+  const localValue = normalizeStoredValue(mergeStoredState(key, shownValue, nextLocal, held.localValue, { prefer: "local" }).value);
+  const baseValue = normalizeStoredValue(mergeStoredState(key, shownValue, nextLocal, held.baseValue, { prefer: "base", dropLocal: true }).value);
+  return localValue === undefined || baseValue === undefined ? null : { localValue, baseValue };
+}
+
 function stageDelete(key, options = {}) {
   const now = Date.now();
   const existing = _pending[key];
@@ -1058,12 +1094,15 @@ function stageDelete(key, options = {}) {
   return envelope;
 }
 
-function setConflict(key, envelope, conflicts) {
+function setConflict(key, envelope, conflicts, { held = false } = {}) {
   const safe = publicConflicts(conflicts);
   const next = {
     ...envelope,
     status: "conflict",
     conflicts: safe,
+    // Only a held envelope (everything else already saved) may keep committing new edits.
+    heldConflicts: held,
+    heldDirty: false,
     retryCount: 0,
     retryAt: 0,
     updatedAt: Date.now(),
@@ -1092,8 +1131,13 @@ function rebaseNewerEnvelope(key, completedEnvelope, appliedValue, appliedVersio
     return { ...newer, baseExists: true, baseValue: appliedValue, baseVersion: appliedVersion, status: "pending", conflicts: [] };
   }
   const rebased = mergeStoredState(key, completedEnvelope.localValue, newer.localValue, appliedValue, { prefer: "local" });
+  // An overlap here keeps the newer edit's own base; on a holdable section its next commit saves
+  // the non-overlapping part and holds the rest instead of pausing the whole section.
+  const hold = rebased.conflicts.length > 0 && key !== "sps_invoices" && !fieldIntentKeys.has(key) && !newer.deleteIntent;
   const next = {
     ...newer,
+    heldConflicts: hold,
+    heldDirty: hold,
     // A user can type again while a reviewed choice is in flight. If that text
     // overlaps the response, preserve its original base and exact local value.
     // Rebasing it onto the response would either erase it or authorize a stale overwrite.
@@ -1110,6 +1154,58 @@ function rebaseNewerEnvelope(key, completedEnvelope, appliedValue, appliedVersio
     notifyConflict(key, next.conflicts);
   }
   return next;
+}
+
+// Everything except the overlapping fields was just saved (or already matched the saved copy).
+// Keep only those fields on this device for review. `mergedAgainst` is the saved copy the merge
+// used, `candidate` what was written for it, and `applied` the database's confirmation.
+async function holdConflicts(key, envelope, mergedAgainst, candidate, applied, conflicts, identityVersion) {
+  if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+  const base = envelope.baseExists ? envelope.baseValue : undefined;
+  // A protected section can be adjusted by the database as it is stored; carry that adjustment.
+  const settle = (value, prefer) => (sameStored(applied.value, candidate) ? value
+    : mergeStoredState(key, candidate, value, applied.value, { prefer }).value);
+  const heldBase = normalizeStoredValue(settle(mergeStoredState(key, base, envelope.localValue, mergedAgainst, { prefer: "base" }).value, "remote"));
+  const heldLocal = normalizeStoredValue(settle(mergeStoredState(key, base, envelope.localValue, mergedAgainst, { prefer: "local" }).value, "local"));
+  _confirmed[key] = applied.value;
+  _versions[key] = applied.version;
+  _exists[key] = true;
+  if (heldBase === undefined || heldLocal === undefined) return setConflict(key, envelope, conflicts);
+  const current = _pending[key];
+  const newer = current && current.opId !== envelope.opId ? current : null;
+  if (!newer && sameStored(heldBase, heldLocal)) return finishApplied(key, envelope, applied.value, applied.version, identityVersion);
+  let next = { ...envelope, baseExists: true, baseValue: heldBase, baseVersion: applied.version, localValue: heldLocal };
+  if (newer) {
+    // An edit made during this save rebases onto the held copy. A newer delete/restore, or one that
+    // cannot be rebased, keeps its own base and re-merges with the saved copy when it commits.
+    const rebased = newer.v === 2 && !newer.deleteIntent && !newer.force
+      ? rebaseOntoHeld(key, envelope.localValue, newer.localValue, next) : null;
+    if (!rebased) {
+      saveSnapshot();
+      return { ok: false, superseded: true };
+    }
+    next = { ...newer, baseExists: true, baseValue: rebased.baseValue, baseVersion: applied.version, localValue: rebased.localValue };
+  }
+  next = {
+    ...next,
+    status: "conflict",
+    conflicts: publicConflicts(conflicts),
+    heldConflicts: true,
+    heldDirty: !!newer,
+    retryCount: 0,
+    retryAt: 0,
+    updatedAt: Date.now(),
+  };
+  _pending[key] = next;
+  _conflicts[key] = next;
+  _cache[key] = next.localValue;
+  recalculateRetryWindow();
+  persistPending();
+  saveSnapshot();
+  notifyConflict(key, next.conflicts);
+  // Show everyone else's saved changes (plus this device's held fields) on the open screen.
+  notifyReconciled(key, true);
+  return { ok: false, conflict: true, held: true, key, conflicts: next.conflicts, value: applied.value, version: applied.version };
 }
 
 async function finishApplied(key, envelope, value, version, identityVersion, options = {}) {
@@ -1445,7 +1541,7 @@ async function commitKey(key, identityVersion = _identityVersion) {
     };
   }
   if (!envelope) return { ok: true, value: _confirmed[key], version: Number(_versions[key]) || 0 };
-  if (envelope.status === "conflict") return { ok: false, conflict: true, key, conflicts: envelope.conflicts || [] };
+  if (envelope.status === "conflict" && !committable(envelope)) return { ok: false, conflict: true, key, conflicts: envelope.conflicts || [] };
   if (fieldIntentKeys.has(key)) return commitSharedEnvelope(key, envelope, identityVersion);
 
   let remote;
@@ -1502,17 +1598,26 @@ async function commitKey(key, identityVersion = _identityVersion) {
     }
 
     const merged = mergeEnvelopeWithRemote(key, envelope, remote);
-    if (merged.conflicts.length) return setConflict(key, envelope, merged.conflicts);
+    // The merge keeps the saved value wherever both sides changed the same field, so `candidate`
+    // carries every non-overlapping change from this device and nothing that overwrites others.
+    const holding = merged.conflicts.length > 0;
+    if (holding && !canHoldConflicts(key, envelope, remote, merged.conflicts)) return setConflict(key, envelope, merged.conflicts);
     const candidate = normalizeStoredValue(merged.value);
-    if (candidate === undefined) return finishDeleted(key, envelope, identityVersion);
+    if (candidate === undefined) {
+      return holding ? setConflict(key, envelope, merged.conflicts) : finishDeleted(key, envelope, identityVersion);
+    }
     if (remote.exists && sameStored(candidate, remote.value)) {
-      return finishApplied(key, envelope, remote.value, remote.version, identityVersion);
+      return holding ? holdConflicts(key, envelope, remote.value, candidate, remote, merged.conflicts, identityVersion)
+        : finishApplied(key, envelope, remote.value, remote.version, identityVersion);
     }
 
     const result = await compareAndSwap(key, remote.exists ? remote.version : 0, candidate, identityVersion);
     if (result.staleIdentity) return { ok: false, staleIdentity: true };
     if (!result.ok) return commitFailure(key, envelope, result.error);
-    if (result.applied) return finishApplied(key, envelope, result.value, result.version, identityVersion);
+    if (result.applied) {
+      return holding ? holdConflicts(key, envelope, remote.value, candidate, result, merged.conflicts, identityVersion)
+        : finishApplied(key, envelope, result.value, result.version, identityVersion);
+    }
 
     remote = await readRemote(key, identityVersion);
     if (remote.staleIdentity) return { ok: false, staleIdentity: true };
@@ -1532,14 +1637,14 @@ function queueFailure(key, error, envelope = null) {
       [{ path: "$", kind: "server-rejected" }]), error, queued: false };
   }
   let retry = null;
-  if (sameIntent && current.status === "pending" && isTransientAppStateError(error)) {
+  if (sameIntent && committable(current) && isTransientAppStateError(error)) {
     retry = nextAppStateRetry(current.retryCount);
     _pending[key] = {
       ...current,
       retryCount: retry.retryCount,
       retryAt: retry.retryAt,
     };
-  } else if (sameIntent && current.status === "pending" && (current.retryAt || current.retryCount)) {
+  } else if (sameIntent && committable(current) && (current.retryAt || current.retryCount)) {
     // Do not let an expired infrastructure cooldown hide a different, non-transient problem.
     _pending[key] = { ...current, retryCount: 0, retryAt: 0 };
   }
@@ -1615,6 +1720,9 @@ async function refreshKey(key, identityVersion = _identityVersion) {
       else _cache[key] = projected;
     }
     saveSnapshot();
+    // A held section stays live: show others' saved changes alongside this device's held fields.
+    // Not forceRemote — the dirty-aware path rebases any edit the screen has not staged yet.
+    if (changed && pending?.heldConflicts && _pending[key] === pending) notifyReconciled(key, false);
     // Do not let a successful one-key refresh certify an earlier FAILED full-app read. Doing so
     // would lift App.jsx's write fence while other sections still hold their defaults. Once the
     // initial shared snapshot was confirmed, this lighter signal can clear a transient refresh error.
@@ -1704,7 +1812,7 @@ async function refreshChangedKeys(keys, options = {}, identityVersion = _identit
 
 async function flush() {
   if (_flushing) return { ok: false, busy: true };
-  const pendingKeys = Object.keys(_pending).filter((key) => _pending[key] && _pending[key].status === "pending");
+  const pendingKeys = Object.keys(_pending).filter((key) => committable(_pending[key]));
   if (!pendingKeys.length) {
     _retryAfterAt = 0;
     return { ok: true, empty: true };
@@ -1720,7 +1828,7 @@ async function flush() {
   try {
     for (const key of pendingKeys) {
       if (identityVersion !== _identityVersion || !_uid) return;
-      if (!_pending[key] || _pending[key].status !== "pending") continue;
+      if (!committable(_pending[key])) continue;
       const result = await enqueueCommit(key, identityVersion);
       results.push({ key, result });
       // A shared infrastructure failure is unlikely to be key-specific. Stop this drain after one
@@ -1756,7 +1864,7 @@ async function flushKey(key) {
     if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
     const pending = _pending[key];
     const retryAt = Number(pending && pending.retryAt) || 0;
-    if (pending && pending.status === "pending" && retryAt > Date.now()) {
+    if (committable(pending) && retryAt > Date.now()) {
       return { ok: false, deferred: true, queued: true, key, retryAt };
     }
 
@@ -1830,7 +1938,9 @@ async function resolveConflict(key, strategy, identityVersion = _identityVersion
       if (known.size && fresh.some((item) => !known.has(conflictSignature(item)))) {
         // A third writer introduced a different overlapping field after the banner appeared. Show
         // the expanded set and require a fresh choice instead of stretching the old click to it.
-        return setConflict(key, envelope, fresh);
+        return setConflict(key, envelope, fresh, {
+          held: envelope.heldConflicts === true && canHoldConflicts(key, envelope, remote, resolvedMerge.conflicts),
+        });
       }
       candidate = resolvedMerge.value;
     }
@@ -1987,6 +2097,8 @@ function replaceMany(changes, options = {}) {
         localValue: rebased.value,
         status: rebased.conflicts.length ? "conflict" : "pending",
         conflicts: publicConflicts(rebased.conflicts),
+        heldConflicts: false,
+        heldDirty: false,
         updatedAt: Date.now(),
       };
       _pending[key] = next;
@@ -2486,7 +2598,8 @@ export const store = {
     if (_hydrationHeldKeys.has(key)) {
       if (_pending[key]) {
         const prior = await enqueueCommit(key, identityVersion);
-        if (!prior?.ok) return prior;
+        // A held section already saved everything but its overlap, and new edits rebase onto it.
+        if (!prior?.ok && !(prior?.conflict && _pending[key]?.heldConflicts)) return prior;
       }
       _hydrationHeldKeys.delete(key);
     }

@@ -186,6 +186,7 @@ function recordConflict(ctx, path, kind, base, local, remote) {
 
 function chooseConflict(ctx, path, kind, base, local, remote) {
   recordConflict(ctx, path, kind, base, local, remote);
+  if (ctx.prefer === "base") return base;
   return ctx.prefer === "local" ? local : remote;
 }
 
@@ -345,7 +346,7 @@ function mergeOrder(baseOrder, localOrder, remoteOrder, available, path, ctx) {
   const remoteReordered = !sameOrder(remoteExistingBase, expectedRemote);
 
   let preferred;
-  if (localReordered && !remoteReordered) preferred = localOrder;
+  if (localReordered && !remoteReordered) preferred = ctx.dropLocal ? remoteOrder : localOrder;
   else if (remoteReordered && !localReordered) preferred = remoteOrder;
   else if (localReordered && remoteReordered) {
     const common = baseOrder.filter((id) => localOrder.includes(id) && remoteOrder.includes(id) && availableSet.has(id));
@@ -452,7 +453,7 @@ function mergeObject(base, local, remote, path, ctx) {
     }
   }
   let result = deriveEstimateTotals ? withEstimateTotals(out, out.taxRate ?? 0) : out;
-  if (estimateNeedsDraftAfterMerge(base, local, remote, path, ctx)) {
+  if (!ctx.dropLocal && estimateNeedsDraftAfterMerge(base, local, remote, path, ctx)) {
     result = { ...result, status: "draft" };
     delete result.sentAt;
     delete result.approvedAt;
@@ -471,7 +472,7 @@ function mergeNode(base, local, remote, path, ctx) {
 
   if (equal(local, remote)) return local;
   if (equal(local, base)) return remote;
-  if (equal(remote, base)) return local;
+  if (equal(remote, base)) return ctx.dropLocal ? remote : local;
 
   if (local === MISSING || remote === MISSING || base === MISSING) {
     // Concurrent different additions, or delete-vs-edit, cannot be inferred safely.
@@ -547,14 +548,20 @@ function mergeSchedule(base, local, remote, ctx) {
   return result;
 }
 
+// options.prefer picks the value kept where both sides changed the same thing: "remote" (default),
+// "local", or "base" (the value both sides started from). options.dropLocal additionally ignores
+// local-only changes, so the result is the remote value with the starting value restored wherever
+// the two sides overlap. The store uses "base" and dropLocal to build the merge base of an edit
+// whose overlapping fields are held for review while everything else has already been saved.
 export function mergeStoredState(key, baseValue, localValue, remoteValue, options = {}) {
   const base = parseStored(baseValue), local = parseStored(localValue), remote = parseStored(remoteValue);
-  const ctx = { key: String(key || ""), prefer: options.prefer === "local" ? "local" : "remote", conflicts: [] };
+  const prefer = ["local", "base"].includes(options.prefer) ? options.prefer : "remote";
+  const ctx = { key: String(key || ""), prefer, dropLocal: options.dropLocal === true, conflicts: [] };
   let merged;
   if (ctx.key === "sps_schedule" && [base, local, remote].every(Array.isArray)) {
     if (equal(local, remote)) merged = local;
     else if (equal(local, base)) merged = remote;
-    else if (equal(remote, base)) merged = local;
+    else if (equal(remote, base)) merged = ctx.dropLocal ? remote : local;
     else merged = mergeSchedule(base, local, remote, ctx);
   } else {
     merged = mergeNode(base, local, remote, [], ctx);
