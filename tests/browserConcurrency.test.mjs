@@ -69,7 +69,9 @@ function installDatabase(initialRows, options = {}) {
           },
           then(resolve, reject) {
             if (columns === "key, version") versionProbeCalls += 1;
-            if (columns === "key, value, version") {
+            // Startup now probes (version, write time) before fetching changed values; the probe is
+            // the read that decides whether initialization succeeds, so it is the "initial SELECT".
+            if (columns === "key, version, updated_at") {
               initialSelectCalls += 1;
               const selectError = typeof options.initialSelectError === "function"
                 ? options.initialSelectError({ call: initialSelectCalls, rows })

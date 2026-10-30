@@ -23,7 +23,7 @@ async function harness(value = [a, b], key = 'sps_clients') {
   disk.clear(); local.clear();
   const uid = `shared-store-${++sequence}`;
   const state = { value: structuredClone(value), version: 1, writes: 0, requests: [], loseNextReply: false, beforeResponse: null, beforeSession: null };
-  supabase.from = () => ({ select() { const query = { eq() { return query; }, async maybeSingle() { return { data: { key, value: json(state.value), version: state.version }, error: null }; }, then(resolve, reject) { return Promise.resolve({ data: [{ key, value: json(state.value), version: state.version }], error: null }).then(resolve, reject); } }; return query; } });
+  supabase.from = () => ({ select() { const query = { eq() { return query; }, in() { return query; }, async maybeSingle() { return { data: { key, value: json(state.value), version: state.version }, error: null }; }, then(resolve, reject) { return Promise.resolve({ data: [{ key, value: json(state.value), version: state.version }], error: null }).then(resolve, reject); } }; return query; } });
   supabase.rpc = async () => { throw new Error('Protected records must never use the legacy whole-snapshot RPC'); };
   supabase.auth.getSession = async () => { await state.beforeSession?.(); return { data: { session: { user: { id: uid }, access_token: 'test-token' } } }; };
   globalThis.fetch = async (_url, request) => {

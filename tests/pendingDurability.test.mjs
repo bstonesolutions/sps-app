@@ -68,6 +68,7 @@ function installDatabase(key, initialValue, beforeCas = () => {}) {
         let selectedKey = null;
         const builder = {
           eq(field, value) { assert.equal(field, "key"); selectedKey = value; return builder; },
+          in(field) { assert.equal(field, "key"); return builder; },
           async maybeSingle() {
             return { data: selectedKey === key ? { key, ...row } : null, error: null };
           },

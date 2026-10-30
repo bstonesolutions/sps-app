@@ -1767,10 +1767,12 @@ function useStoredState(key, initial) {
   // over real saved data (the remount/failed-read overwrite that lost stops, notes, tasks).
   useEffect(() => {
     if (!loaded) return;
-    // Bug #1 — refuse to persist while the initial read FAILED. The cache is empty, so `value` is
-    // this key's DEFAULT; writing it would clobber the real saved row. The auto-retry reload will
-    // re-fetch real data, after which writes resume normally.
-    if (!DB_READ_OK) return;
+    // Stage every real edit in the store's durable queue even while the database is unreachable
+    // (weak field signal). Skipping it here used to leave the edit only in React memory, so it was
+    // lost if iOS closed the app before the connection returned. Writing a DEFAULT over real data
+    // is still impossible: an untouched default equals `lastPersisted` and is skipped just below,
+    // and a real edit is staged with that default as its merge base, so the store's three-way
+    // merge keeps every saved record the device never loaded instead of overwriting it.
     const json = JSON.stringify(value);
     if (json === lastPersisted.current) return;
     if (typeof window.__onSpsSyncStart === "function") window.__onSpsSyncStart();

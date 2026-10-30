@@ -21,12 +21,23 @@ const SNAP_KEY = "snapshot";
 const PENDING_KEY = "sps_pending_writes";
 const MAX_CAS_ATTEMPTS = 6;
 const MAX_INIT_BACKOFF_STEP = 7;
+// Startup sync. Values are fetched only for rows whose (version, write time) differ from this
+// device's confirmed snapshot, in small parallel batches, so a field device on a weak cell
+// connection no longer has to download the entire workspace in one 20s request on every launch.
+// Value batches get a longer budget than the tiny version probe because they run behind the
+// cache-first UI, and every batch that does arrive is kept so a retry only fetches what's missing.
+const INIT_VALUE_CHUNK_SIZE = 8;
+const INIT_VALUE_CONCURRENCY = 3;
+const INIT_VALUE_TIMEOUT_MS = 60_000;
 
 let _uid = null;
 let _identityVersion = 0;
 let _cache = {};       // optimistic values displayed by the app
 let _confirmed = {};   // last values confirmed by Supabase
 let _versions = {};    // database-controlled version for each confirmed value
+// Database write time recorded TOGETHER with a confirmed (value, version) from the same server row.
+// A version alone can repeat after a row is deleted and recreated; (version, updated_at) cannot.
+let _updatedAt = {};
 let _exists = {};
 let _pending = {};     // durable three-way-merge intents
 let _conflicts = {};
@@ -423,11 +434,15 @@ async function hydrateFromIDB() {
       for (const key of Object.keys(snap.data)) {
         const value = normalizeRemoteStoredValue(key, snap.data[key]);
         if (value === undefined) continue;
-        if (!hasOwn(_confirmed, key)) _confirmed[key] = value;
+        const adoptedValue = !hasOwn(_confirmed, key);
+        if (adoptedValue) _confirmed[key] = value;
         if (!hasOwn(_cache, key)) _cache[key] = value;
         if (snap.versions && Number(snap.versions[key]) > 0) {
           _versions[key] = Number(snap.versions[key]);
           _exists[key] = true;
+          // Older snapshots have no write times; those rows are simply re-fetched once at startup.
+          if (adoptedValue && snap.updatedAt && snap.updatedAt[key]) _updatedAt[key] = String(snap.updatedAt[key]);
+          else if (!adoptedValue) delete _updatedAt[key];
         }
       }
     }
@@ -493,7 +508,7 @@ function ensureHydrate() {
 function saveSnapshot() {
   const uid = _uid;
   if (!uid) return _snapshotPersistTail;
-  const snap = { uid, at: Date.now(), data: { ..._confirmed }, versions: { ..._versions } };
+  const snap = { uid, at: Date.now(), data: { ..._confirmed }, versions: { ..._versions }, updatedAt: { ..._updatedAt } };
   const run = _snapshotPersistTail.then(
     () => idb.set(snapshotIdbKey(uid), snap),
     () => idb.set(snapshotIdbKey(uid), snap)
@@ -507,6 +522,7 @@ function resetForIdentity() {
   _cache = {};
   _confirmed = {};
   _versions = {};
+  _updatedAt = {};
   _exists = {};
   _pending = {};
   _conflicts = {};
@@ -697,14 +713,66 @@ function adoptRemote(key, remote, updateDisplay = true) {
   if (remote.exists) {
     _confirmed[key] = remote.value;
     _versions[key] = remote.version;
+    if (remote.updatedAt) _updatedAt[key] = String(remote.updatedAt);
+    else delete _updatedAt[key];
     _exists[key] = true;
     if (updateDisplay) _cache[key] = remote.value;
   } else {
     delete _confirmed[key];
     _versions[key] = 0;
+    delete _updatedAt[key];
     _exists[key] = false;
     if (updateDisplay) delete _cache[key];
   }
+}
+
+// Identical to the original startup read-failure handling, shared by the version probe and the
+// batched value fetch so both fail exactly the way a single whole-table read used to.
+async function initReadFailed(error, identityVersion) {
+  console.error("store.init failed:", error && error.message);
+  const denied = /row.level security|permission denied|not authorized|insufficient privilege/i.test((error && error.message) || "");
+  if (denied) notify("restricted", "Using scoped account access.");
+  else notify("error", "Cannot reach the database.");
+  await refreshForAuthError(error);
+  if (identityVersion !== _identityVersion || !_uid) return { ok: false, loaded: false, staleIdentity: true };
+  const retry = nextAppStateRetry(Math.min(_initRetryCount, MAX_INIT_BACKOFF_STEP - 1));
+  _initRetryCount = Math.min(retry.retryCount, MAX_INIT_BACKOFF_STEP);
+  _initRetryAt = retry.retryAt;
+  _initLastError = error;
+  _loaded = false;
+  return {
+    ok: false,
+    loaded: false,
+    retryable: isTransientAppStateError(error) || isAuthError(error),
+    retryAt: _initRetryAt,
+    retryCount: _initRetryCount,
+    error,
+  };
+}
+
+// Fetch full values for only the rows startup actually needs, in small parallel batches. Rows that
+// arrive are always returned (even when another batch fails) so callers can keep that progress.
+async function fetchInitValues(keys, identityVersion) {
+  const rows = [];
+  if (!keys.length) return { ok: true, rows };
+  const chunks = [];
+  for (let i = 0; i < keys.length; i += INIT_VALUE_CHUNK_SIZE) chunks.push(keys.slice(i, i + INIT_VALUE_CHUNK_SIZE));
+  let next = 0;
+  let firstError = null;
+  const worker = async () => {
+    while (!firstError && next < chunks.length) {
+      const chunk = chunks[next++];
+      const { data, error } = await requestAppState("initialize-values", () => supabase.from("app_state")
+        .select("key, value, version, updated_at")
+        .in("key", chunk), { timeoutMs: INIT_VALUE_TIMEOUT_MS });
+      if (identityVersion !== _identityVersion || !_uid) return;
+      if (error) { firstError = firstError || error; return; }
+      for (const row of data || []) rows.push(row);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(INIT_VALUE_CONCURRENCY, chunks.length) }, worker));
+  if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true, rows: [] };
+  return firstError ? { ok: false, rows, error: firstError } : { ok: true, rows };
 }
 
 async function init() {
@@ -726,33 +794,15 @@ async function init() {
   _initSelectAt = Date.now();
   const run = (async () => {
     try {
-      const { data, error } = await requestAppState("initialize", () => supabase.from("app_state").select("key, value, version"));
+      // 1) Probe the tiny (version, write time) stamps for every row this account can read.
+      const { data: stamps, error } = await requestAppState("initialize", () => supabase.from("app_state").select("key, version, updated_at"));
       if (identityVersion !== _identityVersion || !_uid) return { ok: false, loaded: false, staleIdentity: true };
-      if (error) {
-        console.error("store.init failed:", error.message);
-        const denied = /row.level security|permission denied|not authorized|insufficient privilege/i.test(error.message || "");
-        if (denied) notify("restricted", "Using scoped account access.");
-        else notify("error", "Cannot reach the database.");
-        await refreshForAuthError(error);
-        if (identityVersion !== _identityVersion || !_uid) return { ok: false, loaded: false, staleIdentity: true };
-        const retry = nextAppStateRetry(Math.min(_initRetryCount, MAX_INIT_BACKOFF_STEP - 1));
-        _initRetryCount = Math.min(retry.retryCount, MAX_INIT_BACKOFF_STEP);
-        _initRetryAt = retry.retryAt;
-        _initLastError = error;
-        _loaded = false;
-        return {
-          ok: false,
-          loaded: false,
-          retryable: isTransientAppStateError(error) || isAuthError(error),
-          retryAt: _initRetryAt,
-          retryCount: _initRetryCount,
-          error,
-        };
-      }
-      if (!data || data.length === 0) {
+      if (error) return initReadFailed(error, identityVersion);
+      if (!stamps || stamps.length === 0) {
         const deletedKeys = Object.keys(_confirmed).filter((key) => !_pending[key]);
         _confirmed = {};
         _versions = {};
+        _updatedAt = {};
         _exists = {};
         deletedKeys.forEach((key) => { delete _cache[key]; notifyReconciled(key, true); });
         _loaded = true;
@@ -769,12 +819,45 @@ async function init() {
         flush();
         return { ok: true, loaded: true, empty: true, rowCount: 0 };
       }
+      // 2) Reuse every confirmed value this device already holds for the exact same server write
+      //    (same version AND same write time), and fetch only rows that changed or were never cached.
+      const reused = [];
+      const needed = [];
+      for (const row of stamps) {
+        const version = Number(row.version) || 0;
+        const stamp = row.updated_at == null ? "" : String(row.updated_at);
+        if (version > 0 && stamp && hasOwn(_confirmed, row.key)
+          && Number(_versions[row.key]) === version && _updatedAt[row.key] === stamp) {
+          reused.push({ key: row.key, value: _confirmed[row.key], version, updated_at: row.updated_at });
+        } else needed.push(row.key);
+      }
+      const fetched = await fetchInitValues(needed, identityVersion);
+      if (fetched.staleIdentity || identityVersion !== _identityVersion || !_uid) {
+        return { ok: false, loaded: false, staleIdentity: true };
+      }
+      if (!fetched.ok) {
+        // Keep every confirmed row that did arrive so the next attempt only fetches what is still
+        // missing. Display values and deletions wait for a complete, consistent read.
+        for (const row of fetched.rows) {
+          const value = normalizeRemoteStoredValue(row.key, row.value);
+          if (value === undefined) continue;
+          _confirmed[row.key] = value;
+          _versions[row.key] = Number(row.version) || 0;
+          if (row.updated_at) _updatedAt[row.key] = String(row.updated_at);
+          else delete _updatedAt[row.key];
+          _exists[row.key] = true;
+        }
+        if (fetched.rows.length) saveSnapshot();
+        return initReadFailed(fetched.error, identityVersion);
+      }
+      const data = [...reused, ...fetched.rows];
       const remoteKeys = new Set(data.map((row) => row.key));
       const deletedKeys = [];
       for (const key of Object.keys(_confirmed)) {
         if (remoteKeys.has(key)) continue;
         delete _confirmed[key];
         _versions[key] = 0;
+        delete _updatedAt[key];
         _exists[key] = false;
         if (!_pending[key]) {
           delete _cache[key];
@@ -786,6 +869,8 @@ async function init() {
         if (value === undefined) continue;
         _confirmed[row.key] = value;
         _versions[row.key] = Number(row.version) || 0;
+        if (row.updated_at) _updatedAt[row.key] = String(row.updated_at);
+        else delete _updatedAt[row.key];
         _exists[row.key] = true;
         const pending = _pending[row.key];
         if (pending && row.key === "sps_invoices") _cache[row.key] = projectInvoicePending(pending, value) ?? pendingDisplayValue(pending);
@@ -1094,6 +1179,7 @@ async function finishDeleted(key, envelope, identityVersion, options = {}) {
   if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
   delete _confirmed[key];
   _versions[key] = 0;
+  delete _updatedAt[key];
   _exists[key] = false;
   const current = _pending[key];
   const hasNewerIntent = !!(current && current.opId !== envelope.opId);
