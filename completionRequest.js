@@ -94,11 +94,32 @@ export async function requestCompletedStop({
       return {};
     });
     const durationMs = elapsedMs(startedAt, now);
-    if (!response.ok || data.ok !== true) {
-      const error = requestError(data.error || "The stop could not be saved. Nothing was changed.", {
+    // A successful JSON body alone is not the completion receipt. Without the
+    // receipt and an applied/replay outcome, callers must keep the saved report
+    // and retry the same request instead of clearing drafts or starting delivery.
+    if (response.ok && body.mode === "complete" && (
+      data?.ok !== true
+      || typeof data.receiptId !== "string"
+      || !data.receiptId.trim()
+      || data.receiptId.length > 320
+      || (data.applied !== true && !(data.applied === false && data.alreadyCompleted === true))
+      || data.legacy === true
+      || (data.mode != null && data.mode !== "complete")
+    )) {
+      const error = requestError("The server completion receipt could not be confirmed. The saved report will retry automatically.", {
+        status: 502,
+        code: "completion-response-unconfirmed",
+        requestId,
+        durationMs,
+      });
+      log(logger, "warn", "request unconfirmed", { ...context, durationMs, status: error.status, code: error.code });
+      throw error;
+    }
+    if (!response.ok || data?.ok !== true) {
+      const error = requestError(data?.error || "The stop could not be saved. Nothing was changed.", {
         status: Number(response.status) || 0,
-        code: cleanPart(data.code),
-        legacy: !!data.legacy,
+        code: cleanPart(data?.code),
+        legacy: !!data?.legacy,
         requestId,
         durationMs,
       });

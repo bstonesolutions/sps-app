@@ -5,7 +5,9 @@ import {
   classifyCompletionFailure,
   completionRetryDelay,
   enqueueCompletionIntent,
+  persistStopDraft,
   readCompletionOutbox,
+  readStopDraft,
   retryCompletionIntent,
   updateCompletionIntent,
 } from "../completionOutbox.js";
@@ -141,6 +143,44 @@ test("the actual completion drain saves through the atomic API despite unrelated
   assert.deepEqual(server.state.sps_clients.value[0].history[0].photos, report.entry.photos);
   assert.equal(server.state.sps_catalog.value.treatments[0].stockByLoc.truck, 7);
   assert.equal(drain.deliveries.length, 1);
+});
+
+test("a successful response without its receipt keeps the exact report queued and its draft intact", async () => {
+  const storage = new MemoryStorage();
+  const original = await enqueueCompletionIntent(report, { storage });
+  await persistStopDraft(report.uid, report.sid, report.entry, { storage });
+  const sent = [];
+  const uncertain = createDrain(storage, {
+    request: request => requestCompletedStop({
+      url: "https://fixture.invalid/api/stop-completion", body: request, logger: null,
+      fetchImpl: async (_url, options) => {
+        sent.push(JSON.parse(options.body));
+        return { ok: true, status: 200, json: async () => ({ ok: true, applied: true }) };
+      },
+    }),
+  });
+  await uncertain.run();
+  const [queued] = await readCompletionOutbox(report.uid, { storage });
+  assert.equal(queued.state, "queued");
+  assert.equal(queued.retryCount, 1);
+  assert.ok(queued.retryAt > 0);
+  assert.deepEqual(queued.request, original.request);
+  assert.deepEqual((await readStopDraft(report.uid, report.sid, { storage })).payload, report.entry);
+  assert.equal(uncertain.applied.length, 0, "unconfirmed success cannot run the draft-clearing handler");
+  assert.equal(uncertain.deliveries.length, 0);
+
+  // The exact queued request can still recover its confirmed receipt on retry.
+  await updateCompletionIntent(report.uid, original.id, { retryAt: 0 }, { storage });
+  const server = installServer();
+  const recovered = createDrain(storage, server);
+  await recovered.run();
+  const [saved] = await readCompletionOutbox(report.uid, { storage });
+  assert.equal(saved.state, "saved");
+  assert.ok(saved.receiptId);
+  assert.deepEqual(sent, [original.request]);
+  assert.deepEqual(server.requests, [original.request]);
+  assert.equal(recovered.applied.length, 1);
+  assert.equal(recovered.deliveries.length, 1);
 });
 
 test("an older conflict review stays paused until explicit Retry preserves and submits its exact report", async () => {

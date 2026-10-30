@@ -19,6 +19,22 @@ const list = value => Array.isArray(value) ? value : [];
 const allStops = value => list(value).flatMap(day => list(day.stops));
 const ownerAction = action => ["restore", "media-migration", "reset"].includes(action);
 
+function validateScheduleDelete(intent) {
+  const ids = intent.deleteStopIds;
+  if (intent.key !== "sps_schedule" || !Array.isArray(ids) || !ids.length || ids.length > 5000
+    || ids.some(id => typeof id !== "string" || !id.trim() || id.length > 320) || new Set(ids).size !== ids.length
+    || intent.resolutions?.length || intent.operations.some(operation => operation.kind !== "delete" || !["stop", "day"].includes(operation.entity))) {
+    throw fail(400, "shared-state-delete-scope-invalid", "The selected stop removals could not be verified.");
+  }
+  const removed = intent.operations.filter(operation => operation.entity === "stop").map(operation => operation.entityId);
+  if (removed.length !== ids.length || removed.some(id => !ids.includes(id))) throw fail(400, "shared-state-delete-scope-invalid", "Remove only the stops selected for deletion.");
+}
+
+const removedStopIds = (before, after) => {
+  const retained = new Set(allStops(after).map(stop => String(stop.sid)));
+  return allStops(before).map(stop => String(stop.sid)).filter(id => !retained.has(id));
+};
+
 function operationAlreadyPresent(operation, current) {
   const records = operation.entity === "client" ? current : operation.entity === "stop"
     ? list(current).flatMap(day => list(day.stops).map(stop => ({ date: day.date, stop }))) : list(current).map(({ stops, ...day }) => day);
@@ -36,10 +52,13 @@ function checkPolicy(intent, staff, current, { action = "", includesBillingLedge
   const owner = staff.teamRole === "owner" || staff.teamMember?.role === "owner";
   const canBill = memberHasCapability(staff.teamMember, "invoiceCreate");
   if (intent.key === "sps_schedule") {
+    const addRemove = staff.teamMember?.fine?.scheduleAddRemove;
+    if (action === "schedule-delete" && !owner && addRemove !== undefined && !addRemove) throw fail(403, "shared-state-stop-delete-forbidden", "Your team permissions do not allow removing scheduled stops.");
     for (const operation of intent.operations) {
       if (operation.entity !== "stop" || operationAlreadyPresent(operation, current)) continue;
       const existing = allStops(current).find(stop => same(stop.sid, operation.entityId));
       if (operation.kind === "delete" && existing?.sourceEstimateId && !["restore", "reset"].includes(action)) throw fail(409, "shared-state-estimate-stop-protected", "This stop belongs to an estimate. Open that estimate before removing its scheduled work.");
+      if (operation.kind === "delete" && !["schedule-delete", "restore", "reset"].includes(action)) throw fail(409, "shared-state-stop-delete-action-required", "A background save cannot remove scheduled stops. Use the stop's Delete action to review and remove it.");
       const field = operation.path?.[1], nextStop = operation.kind === "add" ? operation.next.value?.stop : null;
       if (nextStop && (nextStop.completionReceiptId || nextStop.completedAt || nextStop.estimateFulfillment?.completionReceiptId
         || nextStop.estimateFulfillment?.completedAt || nextStop.estimateFulfillment?.state === "completed")
@@ -164,9 +183,11 @@ async function handleBatch(req, res, deps) {
     validateLinkedTransaction(body.action, snapshot, values);
     const operations = body.operations.map(operation => ({ key: operation.key, expectedVersion: operation.expectedVersion, value: values[operation.key] }));
     const expectedCurrent = Object.fromEntries(operations.filter(operation => protectedKeys.has(operation.key)).map(operation => [operation.key, snapshot[operation.key].value]));
+    const deleteStopIds = snapshot.sps_schedule && values.sps_schedule ? removedStopIds(snapshot.sps_schedule.value, values.sps_schedule) : [];
+    const deletion = deleteStopIds.length ? { deleteStopIds, operationId: body.operationId } : {};
     const saved = operations.length === 1
-      ? await deps.cas(operations[0].key, operations[0].expectedVersion, snapshot[operations[0].key].value, operations[0].value, { actorId: staff.id })
-      : await deps.batch(operations, { actorId: staff.id, expectedCurrent });
+      ? await deps.cas(operations[0].key, operations[0].expectedVersion, snapshot[operations[0].key].value, operations[0].value, { actorId: staff.id, ...deletion })
+      : await deps.batch(operations, { actorId: staff.id, expectedCurrent, ...deletion });
     if (!saved.applied) return res.status(409).json({ ok: false, code: "shared-state-batch-conflict", operationId: body.operationId, error: "A related record changed while saving. Refresh and review the transaction before trying again." });
     const versions = operations.length === 1 ? { [operations[0].key]: saved.currentVersion } : saved.currentVersions;
     const confirmed = operations.length === 1 ? { [operations[0].key]: saved.value } : saved.values;
@@ -192,7 +213,12 @@ export function createSharedStatePatchHandler(overrides = {}) {
     if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed" });
     if (req.body?.mode === "batch") return handleBatch(req, res, deps);
     let intent;
-    try { validateSharedStateIntent(req.body); intent = req.body; }
+    try {
+      validateSharedStateIntent(req.body); intent = req.body;
+      if (intent.action !== undefined && intent.action !== "schedule-delete") throw fail(400, "invalid-shared-state-action", "The shared save action is invalid.");
+      if (intent.action === "schedule-delete") validateScheduleDelete(intent);
+      else if (intent.deleteStopIds !== undefined) throw fail(400, "invalid-shared-state-action", "Stop removals need their explicit Delete action.");
+    }
     catch (_) { return res.status(400).json({ ok: false, code: "invalid-shared-state-intent", error: "This save request could not be read. Your changes are still on this device." }); }
     const staff = await deps.authorize(req, res, intent.key === "sps_clients" ? "editClients" : "editSchedule", intent.key === "sps_clients" ? "editing clients" : "editing the schedule");
     if (!staff) return;
@@ -200,12 +226,14 @@ export function createSharedStatePatchHandler(overrides = {}) {
       for (let attempt = 0; attempt < 6; attempt += 1) {
         const before = await deps.read(intent.key);
         if (!before.exists || !Array.isArray(before.value) || !Number.isSafeInteger(before.version) || before.version < 1) throw fail(503, "shared-state-snapshot-invalid", "The saved records could not be read. Your changes are still on this device.");
-        checkPolicy(intent, staff, before.value);
+        checkPolicy(intent, staff, before.value, { action: intent.action });
         const result = await deps.apply(intent, before.value);
         if (!result.applied || result.conflicts.length) return res.status(409).json({ ok: false, code: "shared-state-field-conflict", key: intent.key, operationId: intent.operationId,
           actorId: staff.id, currentVersion: before.version, conflicts: result.conflicts, error: "Another saved change overlaps this edit. Review the current details before choosing which change to keep." });
         if (!result.changed) return res.status(200).json({ ok: true, actorId: staff.id, key: intent.key, operationId: intent.operationId, beforeVersion: before.version, afterVersion: before.version, value: before.value, complete: true, replayed: true });
-        const saved = await deps.cas(intent.key, before.version, before.value, result.value, { actorId: staff.id });
+        const deleteStopIds = intent.action === "schedule-delete" ? removedStopIds(before.value, result.value) : [];
+        const saved = await deps.cas(intent.key, before.version, before.value, result.value, { actorId: staff.id,
+          ...(deleteStopIds.length ? { deleteStopIds, operationId: intent.operationId } : {}) });
         if (saved.applied) {
           if (!Number.isSafeInteger(saved.currentVersion) || saved.currentVersion < before.version || !Array.isArray(saved.value)) throw fail(503, "shared-state-receipt-invalid", "The saved change could not be verified.");
           if (stableInvoiceReviewJSON(saved.value) !== stableInvoiceReviewJSON(result.value)) throw fail(409, "shared-state-protected-change", "A protected report or shared record could not accept part of this change. Your original work is still on this device. Review the saved details before continuing.");

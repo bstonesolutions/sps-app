@@ -37,7 +37,7 @@ function mountHook(key, initial) {
   function useEffect(effect, deps) { const i = cursor++; const old = slots[i]; if (!old || deps.some((value, n) => !Object.is(value, old.deps[n]))) { effects.push(() => { old?.cleanup?.(); slots[i].cleanup = effect(); }); slots[i] = { deps }; } }
   const hook = new Function("useState", "useRef", "useEffect", "useCallback", "store", "mergeStoredState", "stableInvoiceReviewJSON", "invoiceDeletionReviewMatches", `const DB_READ_OK = true; ${hookSource}; return useStoredState;`)(useState, useRef, useEffect, fn => fn, store, mergeStoredState, stableInvoiceReviewJSON, invoiceDeletionReviewMatches);
   function render() { cursor = 0; dirty = false; output = hook(key, initial); }
-  return { get result() { return output; }, async settle() { for (let pass = 0; pass < 15; pass++) { if (dirty) render(); while (effects.length) effects.shift()(); await tick(); } }, dispose() { slots.forEach(slot => slot?.cleanup?.()); } };
+  return { get result() { return output; }, get currentState() { return slots[0]; }, async settle() { for (let pass = 0; pass < 15; pass++) { if (dirty) render(); while (effects.length) effects.shift()(); await tick(); } }, dispose() { slots.forEach(slot => slot?.cleanup?.()); } };
 }
 function database(value, key = "sps_clients") {
   const state = { value: json(value), version: 1, calls: 0 };
@@ -267,3 +267,101 @@ for (const unstaged of [false, true]) {
     }finally{h.dispose();}
   });
 }
+
+function holdNextStoredRead(key) {
+  const actualGet = store.get;
+  let heldOnce = false, capture, release;
+  const captured = new Promise(resolve => { capture = resolve; });
+  const held = new Promise(resolve => { release = resolve; });
+  store.get = async (...args) => {
+    const result = await actualGet(...args);
+    if (!heldOnce && args[0] === key) {
+      heldOnce = true;
+      capture();
+      await held;
+    }
+    return result;
+  };
+  return { captured, release, restore() { release(); store.get = actualGet; } };
+}
+
+const scheduleBefore = () => [{ date: '10/29/2026', stops: [{ sid: 'before', clientId: 'a', client: 'Existing route stop' }] }];
+const addedScheduleStop = { sid: 'added', clientId: 'b', client: 'New route stop' };
+const appendScheduleStop = days => [{ ...days[0], stops: [...days[0].stops, addedScheduleStop] }];
+const forceReconcile = key => document.dispatchEvent(new CustomEvent('sps-reconciled', { detail: { key, forceRemote: true } }));
+
+for (const forced of [false, true]) for (const outcome of ['committed', 'failed', 'unstaged']) {
+  test(`a delayed ${forced ? 'forced' : 'clean'} schedule read preserves a newer ${outcome} stop addition`, async () => {
+    const key = 'sps_schedule', uid = `hook-${forced ? "forced" : "clean"}-schedule-${outcome}`;
+    const base = scheduleBefore(), db = database(base, key);
+    store.setUser(uid); await store.initialize();
+    const h = mountHook(key, []);
+    let held;
+    try {
+      await h.settle();
+      held = holdNextStoredRead(key);
+      document.dispatchEvent(new CustomEvent('sps-reconciled', { detail: { key, forceRemote: forced } }));
+      await held.captured;
+      if (outcome === 'failed') supabase.rpc = async () => ({ data: null, error: { message: 'Save unavailable', code: '503' } });
+      h.result[1](appendScheduleStop);
+      if (outcome !== 'unstaged') await h.settle();
+      held.release();
+      // Let the delayed continuation run before delivering the next React effects.
+      await tick(); await h.settle();
+      assert.deepEqual(h.result[0], appendScheduleStop(base), 'an old read must not hide the new stop');
+      if (outcome === 'failed') {
+        const pending = JSON.parse(localValues.get(`sps_pending_writes:${uid}`))[key];
+        assert.deepEqual(JSON.parse(pending.localValue), appendScheduleStop(base), 'failed work stays durable and visible');
+        assert.deepEqual(JSON.parse(db.value), base, 'a failed save is never certified as committed');
+      } else {
+        assert.deepEqual(JSON.parse(db.value), appendScheduleStop(base));
+        assert.equal(db.calls, 1, 'the stop is saved once without a compensating deletion');
+      }
+    } finally { held?.restore(); h.dispose(); }
+  });
+}
+
+test('a suspended forced schedule read cannot update an unmounted account scope', async () => {
+  const key = 'sps_schedule', uid = 'hook-forced-schedule-old-scope';
+  const base = scheduleBefore(); database(base, key);
+  store.setUser(uid); await store.initialize();
+  const h = mountHook(key, []); let held;
+  try {
+    await h.settle(); held = holdNextStoredRead(key); forceReconcile(key); await held.captured;
+    h.result[1](appendScheduleStop);
+    h.dispose(); store.setUser('hook-forced-schedule-new-scope');
+    held.release(); await tick(); await tick();
+    assert.deepEqual(h.currentState, appendScheduleStop(base), 'an abandoned read must not set React state after unmount');
+    assert.equal(localValues.has('sps_pending_writes:hook-forced-schedule-new-scope'), false);
+  } finally { held?.restore(); }
+});
+
+test('a forced schedule reconcile still adopts an authoritative deletion when no newer edit exists', async () => {
+  const key = 'sps_schedule', uid = 'hook-forced-schedule-confirmed-delete';
+  const base = scheduleBefore(), db = database(base, key);
+  store.setUser(uid); await store.initialize();
+  const h = mountHook(key, []);
+  try {
+    await h.settle(); db.value = json([]); db.version = 2;
+    await store.refresh(key); forceReconcile(key); await h.settle();
+    assert.deepEqual(h.result[0], []);
+    assert.equal(db.calls, 0, 'displaying a confirmed deletion must not write another schedule');
+    assert.equal(localValues.get(`sps_pending_writes:${uid}`), undefined);
+  } finally { h.dispose(); }
+});
+
+
+test('a delayed initial schedule read preserves a stop added before hydration finishes', async () => {
+  const key = 'sps_schedule', uid = 'hook-initial-schedule-addition';
+  const base = scheduleBefore(), db = database(base, key);
+  store.setUser(uid); await store.initialize();
+  const held = holdNextStoredRead(key), h = mountHook(key, []);
+  try {
+    await h.settle(); await held.captured;
+    h.result[1]([{ date: '10/29/2026', stops: [addedScheduleStop] }]);
+    held.release(); await tick(); await h.settle();
+    assert.deepEqual(h.result[0], appendScheduleStop(base));
+    assert.deepEqual(JSON.parse(db.value), appendScheduleStop(base));
+    assert.equal(db.calls, 1);
+  } finally { held.restore(); h.dispose(); }
+});

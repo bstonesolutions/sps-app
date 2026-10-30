@@ -188,6 +188,51 @@ for (const bodyFailure of [new TypeError("terminated body stream"), new SyntaxEr
   });
 }
 
+for (const [label, data] of [
+  ["missing receipt", { ok: true, applied: true }],
+  ["blank receipt", { ok: true, applied: true, receiptId: "   " }],
+  ["non-string receipt", { ok: true, applied: true, receiptId: { id: "receipt-1" } }],
+  ["oversized receipt", { ok: true, applied: true, receiptId: "r".repeat(321) }],
+  ["missing outcome", { ok: true, receiptId: "receipt-1" }],
+  ["unapplied without replay", { ok: true, applied: false, receiptId: "receipt-1" }],
+  ["wrong mode", { ok: true, applied: true, mode: "reverse", receiptId: "receipt-1" }],
+  ["legacy completion", { ok: true, applied: true, legacy: true, receiptId: "receipt-1" }],
+  ["null body", null],
+  ["unconfirmed body", { ok: false }],
+]) {
+  test(`successful response with ${label} cannot certify completion`, async () => {
+    const events = logger();
+    await assert.rejects(requestCompletedStop({
+      url: "https://spsway.app/api/stop-completion", body: body(), logger: events,
+      fetchImpl: async () => ({ ok: true, status: 200, json: async () => data }),
+    }), error => {
+      assert.equal(error.status, 502);
+      assert.equal(error.code, "completion-response-unconfirmed");
+      assert.equal(classifyCompletionFailure(error).retryable, true);
+      assert.equal(classifyCompletionFailure(error).needsReview, false);
+      return true;
+    });
+    assert.equal(events.rows.at(-1).message, "[completion-sync] request unconfirmed");
+    assert.ok(!events.rows.some(row => row.message === "[completion-sync] request confirmed"));
+  });
+}
+
+for (const [label, request, data] of [
+  ["new completion", body(), { ok: true, applied: true, mode: "complete", receiptId: "receipt-1", legacy: false }],
+  ["completion replay", body(), { ok: true, applied: false, alreadyCompleted: true, sameRequest: true, receiptId: "receipt-1" }],
+  ["modern reopening", { mode: "reverse", sid: "stop-42", clientId: "client-7" }, { ok: true, applied: true, mode: "reverse", receiptId: "receipt-1" }],
+  ["legacy reopening", { mode: "reverse", sid: "stop-42", clientId: "client-7", allowLegacy: true }, { ok: true, applied: true, mode: "reverse", legacy: true }],
+  ["already reopened", { mode: "reverse", sid: "stop-42", clientId: "client-7" }, { ok: true, applied: false, alreadyReversed: true, receiptId: null }],
+]) {
+  test(`valid ${label} remains compatible with receipt confirmation`, async () => {
+    const result = await requestCompletedStop({
+      url: "https://spsway.app/api/stop-completion", body: request, logger: null,
+      fetchImpl: async () => ({ ok: true, status: 200, json: async () => data }),
+    });
+    assert.deepEqual(result.data, data);
+  });
+}
+
 test("request ids remain available without Web Crypto", () => {
   const id = createCompletionRequestId({
     cryptoImpl: null,

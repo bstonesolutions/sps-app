@@ -175,3 +175,56 @@ test("new scheduled stops cannot carry forged completion metadata", async () => 
     assert.equal(result.statusCode, 409); assert.equal(result.body.code, "shared-state-completion-required"); assert.equal(h.calls.writes, 0);
   }
 });
+
+test('ordinary autosave cannot reinterpret a truncated route as 148 intentional removals', async () => {
+  const before = [{ date: '10/29/2026', stops: Array.from({ length: 150 }, (_, i) => ({ sid: `s${i}`, clientId: 'c1' })) }];
+  const local = [{ ...before[0], stops: before[0].stops.slice(148) }];
+  const intent = await buildSharedStateIntent('sps_schedule', before, local, { operationId: 'stale-display' });
+  const h = harness(before), response = await h.call(intent);
+  assert.equal(response.statusCode, 409); assert.equal(response.body.code, 'shared-state-stop-delete-action-required');
+  assert.equal(h.calls.writes, 0); assert.deepEqual(h.value, before);
+});
+
+test('explicit selected stop deletion preserves another device additions and archives its operation scope', async () => {
+  const before = [{ date: '10/29/2026', stops: [{ sid: 's1', clientId: 'c1' }, { sid: 's2', clientId: 'c2' }] }];
+  const after = [{ ...before[0], stops: [before[0].stops[1]] }];
+  const intent = { ...await buildSharedStateIntent('sps_schedule', before, after, { operationId: 'user-delete' }), action: 'schedule-delete', deleteStopIds: ['s1'] };
+  const current = structuredClone(before); current[0].stops.push({ sid: 's3', clientId: 'c3' });
+  const h = harness(current, { onCas({ calls }) { assert.equal(calls.writes, 1); } });
+  const response = await h.call(intent);
+  assert.equal(response.statusCode, 200); assert.equal(response.body.complete, true);
+  assert.deepEqual(h.value[0].stops.map(stop => stop.sid), ['s2', 's3']);
+  const replay = await h.call(intent); assert.equal(replay.statusCode, 200); assert.equal(replay.body.replayed, true); assert.equal(h.calls.writes, 1);
+});
+
+test('explicit deletion refuses a target changed since the user reviewed it', async () => {
+  const before = [{ date: '10/29/2026', stops: [{ sid: 's1', clientId: 'c1', notes: 'Original' }] }];
+  const intent = { ...await buildSharedStateIntent('sps_schedule', before, [], { operationId: 'user-delete' }), action: 'schedule-delete', deleteStopIds: ['s1'] };
+  const h = harness([{ ...before[0], stops: [{ ...before[0].stops[0], notes: 'Tech added work' }] }]);
+  assert.equal((await h.call(intent)).statusCode, 409); assert.equal(h.calls.writes, 0);
+});
+
+test('explicit deletion requires exactly the selected IDs and cannot carry other edits', async () => {
+  const before = [{ date: '10/29/2026', stops: [{ sid: 's1', clientId: 'c1' }, { sid: 's2', clientId: 'c2' }] }];
+  const intent = { ...await buildSharedStateIntent('sps_schedule', before, [], { operationId: 'user-delete' }), action: 'schedule-delete', deleteStopIds: ['s1'] };
+  const h = harness(before); assert.equal((await h.call(intent)).statusCode, 400); assert.equal(h.calls.writes, 0);
+  const edit = { ...await buildSharedStateIntent('sps_schedule', before, [{ ...before[0], stops: [{ ...before[0].stops[1], notes: 'Unrelated edit' }] }], { operationId: 'user-delete' }), action: 'schedule-delete', deleteStopIds: ['s1'] };
+  assert.equal((await h.call(edit)).statusCode, 400); assert.equal(h.calls.writes, 0);
+});
+
+test('explicit stop deletion respects fine add/remove permission and the schedule master switch', async () => {
+  const before = [{ date: '10/29/2026', stops: [{ sid: 's1', clientId: 'c1' }] }];
+  const intent = { ...await buildSharedStateIntent('sps_schedule', before, [], { operationId: 'restricted-delete' }), action: 'schedule-delete', deleteStopIds: ['s1'] };
+  for (const flag of [false, 0, null, '']) {
+    const staff = { id: 'restricted-editor', teamMember: { role: 'lead', tabAccess: { schedule: 'edit' }, fine: { scheduleAddRemove: flag } } };
+    const h = harness(before, { staff }), response = await h.call(intent);
+    assert.equal(response.statusCode, 403); assert.equal(response.body.code, 'shared-state-stop-delete-forbidden');
+    assert.equal(h.calls.writes, 0); assert.deepEqual(h.value, before);
+  }
+  const owner = harness(before, { staff: { ...actor, teamMember: { role: 'owner', fine: { scheduleAddRemove: false } } } });
+  assert.equal((await owner.call(intent)).statusCode, 200); assert.equal(owner.calls.writes, 1);
+  const legacy = harness(before, { staff: { id: 'legacy-lead', teamMember: { role: 'lead' } } });
+  assert.equal((await legacy.call(intent)).statusCode, 200); assert.equal(legacy.calls.writes, 1);
+  const readOnly = harness(before, { staff: { id: 'read-only', teamMember: { role: 'lead', tabAccess: { schedule: 'view' }, fine: { scheduleAddRemove: true } } } });
+  assert.equal((await readOnly.call(intent)).statusCode, 403); assert.equal(readOnly.calls.writes, 0);
+});

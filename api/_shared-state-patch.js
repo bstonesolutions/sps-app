@@ -43,6 +43,8 @@ async function callRpc(name, body, { fetchImpl = globalThis.fetch, now = Date.no
         keys: affected.filter(key => /^sps_[a-z_]+$/.test(String(key))), status: response.status, databaseCode, databaseReason }));
       const rejection = payload?.message === "shared_deleted_identity_reused"
         ? fail("SHARED_STATE_DELETED_IDENTITY", "This client or stop was removed after the original save. Review the current records before creating a replacement.", 409)
+        : payload?.message === "shared_schedule_delete_requires_action"
+          ? fail("SHARED_STATE_STOP_DELETE_ACTION_REQUIRED", "A background save cannot remove scheduled stops. Use the stop's Delete action to review and remove it.", 409)
         : payload?.message === "shared_state_protected_change_rejected"
           ? fail("SHARED_STATE_PATCH_PROTECTED_CHANGE", "A protected service report could not accept this change. Open the saved report to edit it without replacing other work.", 409) : null;
       if (rejection) {
@@ -63,16 +65,25 @@ async function callRpc(name, body, { fetchImpl = globalThis.fetch, now = Date.no
   }, requestOptions);
 }
 
-export async function compareAndSetSharedStatePatch(key, expectedVersion, expectedCurrent, proposed, { actorId, ...options } = {}) {
+export async function compareAndSetSharedStatePatch(key, expectedVersion, expectedCurrent, proposed, { actorId, deleteStopIds, operationId, ...options } = {}) {
   const version = Number(expectedVersion);
   if (!keys.has(key) || !Number.isSafeInteger(version) || version < 1 || !Array.isArray(expectedCurrent)
     || !Array.isArray(proposed) || !String(actorId || "").trim()) {
     throw fail("SHARED_STATE_PATCH_SCOPE_INVALID", "The shared save scope is invalid.", 400);
   }
-  const row = await callRpc("sps_shared_state_patch_cas", {
-    p_key: key, p_expected_version: version, p_expected_current: expectedCurrent,
-    p_proposed: JSON.stringify(proposed), p_actor_id: String(actorId),
-  }, options);
+  let row;
+  if (deleteStopIds !== undefined) {
+    if (key !== "sps_schedule" || !Array.isArray(deleteStopIds) || !deleteStopIds.length || !String(operationId || "").trim()) throw fail("SHARED_STATE_PATCH_SCOPE_INVALID", "The selected stop removals need their original operation.", 400);
+    const batch = await callRpc("sps_schedule_delete_patch_batch_cas", {
+      p_operations: [{ key, expected_version: version, value: JSON.stringify(proposed) }],
+      p_expected_current: { [key]: expectedCurrent }, p_stop_ids: deleteStopIds,
+      p_actor_id: String(actorId), p_operation_id: String(operationId),
+    }, options);
+    row = { ...batch, current_version: batch.current_versions?.[key], value: batch.values?.[key] };
+  } else row = await callRpc("sps_shared_state_patch_cas", {
+      p_key: key, p_expected_version: version, p_expected_current: expectedCurrent,
+      p_proposed: JSON.stringify(proposed), p_actor_id: String(actorId),
+    }, options);
   const currentVersion = Number(row.current_version), value = decodeAppStateValue(row.value);
   if (row.applied && (!Number.isSafeInteger(currentVersion) || currentVersion < version || !Array.isArray(value))) {
     throw fail("SHARED_STATE_PATCH_RECEIPT_INVALID", "The server did not return the saved records and their version.");
@@ -83,7 +94,7 @@ export async function compareAndSetSharedStatePatch(key, expectedVersion, expect
     changedAt: row.changed_at || null, value };
 }
 
-export async function compareAndSetSharedStatePatchBatch(operations, { expectedCurrent, actorId, ...options } = {}) {
+export async function compareAndSetSharedStatePatchBatch(operations, { expectedCurrent, actorId, deleteStopIds, operationId, ...options } = {}) {
   if (!Array.isArray(operations) || operations.length < 2 || !object(expectedCurrent) || !String(actorId || "").trim()) throw fail("SHARED_STATE_PATCH_SCOPE_INVALID", "The shared save scope is invalid.", 400);
   const seen = new Set(), scoped = [];
   const wire = operations.map(operation => {
@@ -97,7 +108,11 @@ export async function compareAndSetSharedStatePatchBatch(operations, { expectedC
     return { key, expected_version: version, ...(checkOnly ? { check_only: true } : { value: JSON.stringify(operation.value) }) };
   });
   if (!scoped.length || Object.keys(expectedCurrent).some(key => !scoped.includes(key))) throw fail("SHARED_STATE_PATCH_SCOPE_INVALID", "The shared transaction scope is invalid.", 400);
-  const row = await callRpc("sps_shared_state_patch_batch_cas", { p_operations: wire, p_expected_current: expectedCurrent, p_actor_id: String(actorId) }, options);
+  if (deleteStopIds !== undefined && (!Array.isArray(deleteStopIds) || !deleteStopIds.length || !scoped.includes("sps_schedule") || !String(operationId || "").trim())) throw fail("SHARED_STATE_PATCH_SCOPE_INVALID", "The transaction needs its selected stop removals.", 400);
+  const row = await callRpc(deleteStopIds === undefined ? "sps_shared_state_patch_batch_cas" : "sps_schedule_delete_patch_batch_cas", {
+    p_operations: wire, p_expected_current: expectedCurrent, p_actor_id: String(actorId),
+    ...(deleteStopIds === undefined ? {} : { p_stop_ids: deleteStopIds, p_operation_id: String(operationId) }),
+  }, options);
   if (row.applied && (!object(row.current_versions) || !object(row.values))) throw fail("SHARED_STATE_PATCH_RECEIPT_INVALID", "The shared transaction returned an incomplete receipt.");
   const values = object(row.values) ? Object.fromEntries(Object.entries(row.values).map(([key, value]) => [key, decodeAppStateValue(value)])) : {};
   if (row.applied && scoped.some(key => !Array.isArray(values[key]) || stableInvoiceReviewJSON(values[key]) !== stableInvoiceReviewJSON(operations.find(operation => operation.key === key).value))) {

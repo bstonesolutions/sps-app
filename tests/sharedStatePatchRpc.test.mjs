@@ -128,3 +128,16 @@ test('genuine SQLSTATE40001 serialization errors never enter the permanent rejec
   for(let i=0;i<2;i++)await assert.rejects(compareAndSetSharedStatePatch('sps_clients',7,before,after,options),{code:'SHARED_STATE_PATCH_SAVE_UNCONFIRMED'});
   assert.equal(calls,2);
 });
+
+test('explicit schedule removals use the event-scoped RPC and exact IDs operation and baseline', async () => {
+  const schedule = [{ date: '10/29/2026', stops: [{ sid: 's1' }] }];
+  const result = await compareAndSetSharedStatePatch('sps_schedule', 9, schedule, [], { actorId: 'owner', deleteStopIds: ['s1'], operationId: 'user-event', fetchImpl: async (url, options) => {
+    assert.ok(url.endsWith('/sps_schedule_delete_patch_batch_cas'));
+    const body = JSON.parse(options.body);
+    assert.deepEqual(body.p_stop_ids, ['s1']); assert.equal(body.p_operation_id, 'user-event'); assert.equal(body.p_actor_id, 'owner');
+    assert.deepEqual(body.p_expected_current, { sps_schedule: schedule });
+    assert.deepEqual(body.p_operations, [{ key: 'sps_schedule', expected_version: 9, value: '[]' }]);
+    return reply([{ applied: true, outcome: 'applied', current_versions: { sps_schedule: 10 }, values: { sps_schedule: '[]' } }]);
+  } });
+  assert.equal(result.currentVersion, 10); assert.deepEqual(result.value, []);
+});

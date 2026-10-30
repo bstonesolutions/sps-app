@@ -100,6 +100,7 @@ import {
   updateCompletionIntent,
 } from "./completionOutbox";
 import { requestCompletedStop } from "./completionRequest";
+import { deleteScheduledStops, scheduleDeletionSelection, scheduleSelectionScope } from "./scheduleDeletion";
 import { buildReportEditRequest, requestStopReportEdit } from "./stopReport";
 import {
   DASHBOARD_WIDGETS,
@@ -1734,6 +1735,17 @@ function useStoredState(key, initial) {
   // can never overwrite good saved data (the same bug family as the team clobber in Item 1).
   const lastPersisted = useRef(JSON.stringify(initial));
   const projectedBase = useRef(null);
+  const reconcileReadVersion = useRef(0);
+  const adoptReadDisplay = (parsed, beforeJson) => {
+    const confirmedJson = JSON.stringify(parsed);
+    lastPersisted.current = confirmedJson;
+    setValue(current => {
+      const currentJson = JSON.stringify(current);
+      if (currentJson === beforeJson) return parsed;
+      const merged = mergeStoredState(key, beforeJson, currentJson, confirmedJson, { prefer: "local" });
+      try { return merged.value === undefined ? current : JSON.parse(merged.value); } catch (_) { return current; }
+    });
+  };
   const saveOptions = baseValue => ({
     baseValue,
     ...(projectedBase.current !== null ? { projectedBaseValue: projectedBase.current } : {}),
@@ -1744,7 +1756,7 @@ function useStoredState(key, initial) {
     (async () => {
       const res = await store.get(key);
       if (alive && res && res.value != null) {
-        try { const parsed = JSON.parse(res.value); lastPersisted.current = JSON.stringify(parsed); setValue(parsed); } catch (e) {}
+        try { adoptReadDisplay(JSON.parse(res.value), JSON.stringify(initial)); } catch (e) {}
       }
       if (alive) setLoaded(true);
     })();
@@ -1791,47 +1803,49 @@ function useStoredState(key, initial) {
   // push that edit through now that the read is confirmed. Mirrors _init's pending-precedence rule.
   useEffect(() => {
     if (!loaded) return;
+    let alive = true;
     const onReconciled = async (event) => {
       const detail = (event && event.detail) || {};
       if (detail.key && detail.key !== key) return;
+      const readVersion = ++reconcileReadVersion.current;
       const localJson = JSON.stringify(value);
       // A conflict choice or completed background retry is authoritative for this key. At this point
       // the storage cache contains the exact CAS-confirmed merge, so reflect it in React as well.
       if (detail.key === key && detail.forceRemote) {
         const res = await store.get(key);
+        // A completed save can emit another reconcile while this read is suspended. An old
+        // response must not roll back that save or update a hook that changed scope/unmounted.
+        if (!alive || readVersion !== reconcileReadVersion.current) return;
+        let parsed;
+        try { parsed = res?.value != null ? JSON.parse(res.value) : initial; } catch (_) { return; }
         projectedBase.current = null;
-        if (res && res.value != null) {
-          try { const parsed = JSON.parse(res.value); lastPersisted.current = res.value; setValue(parsed); } catch (_) {}
-        } else {
-          const initialJson = JSON.stringify(initial);
-          lastPersisted.current = initialJson;
-          setValue(initial);
-        }
+        // Retire only the display captured when this read started. Newer React-only edits
+        // remain visible and reach the normal durable save path.
+        adoptReadDisplay(parsed, localJson);
         return;
       }
       if (localJson !== lastPersisted.current) {
         const r = await store.set(key, localJson, saveOptions(lastPersisted.current)); // merge the in-flight local edit
+        if (!alive || readVersion !== reconcileReadVersion.current) return;
         if (r && r.ok) {
           const savedJson = typeof r.value === "string" ? r.value : localJson;
-          lastPersisted.current = savedJson;
           projectedBase.current = null;
-          if (savedJson !== localJson) { try { setValue(JSON.parse(savedJson)); } catch (_) {} }
+          try { adoptReadDisplay(JSON.parse(savedJson), localJson); } catch (_) {}
         }
         return;
       }
       const res = await store.get(key);               // clean key → take the freshly-read DB value
+      if (!alive || readVersion !== reconcileReadVersion.current) return;
       if (res && res.value != null && res.value !== lastPersisted.current) {
-        try { const parsed = JSON.parse(res.value); lastPersisted.current = res.value; setValue(parsed); } catch (_) {}
+        try { adoptReadDisplay(JSON.parse(res.value), localJson); } catch (_) {}
       } else if ((!res || res.value == null) && detail.key === key && detail.remoteMissing) {
         // A targeted refresh confirmed that this row was deleted. Reset only when the React value
         // was clean above; a just-entered local edit takes the dirty branch and safely recreates it.
-        const initialJson = JSON.stringify(initial);
-        lastPersisted.current = initialJson;
-        setValue(initial);
+        adoptReadDisplay(initial, localJson);
       }
     };
     document.addEventListener("sps-reconciled", onReconciled);
-    return () => document.removeEventListener("sps-reconciled", onReconciled);
+    return () => { alive = false; document.removeEventListener("sps-reconciled", onReconciled); };
   }, [key, value, loaded]);
   // Critical workflows (for example QuickBooks reconciliation) need an exact, awaited
   // server receipt for the payload they just computed.  Waiting for React effects or
@@ -14233,7 +14247,7 @@ function StopChangeModal({ stop, client, dayDate, email, onReschedule, onCancelS
 // reload / resync / close (the module re-initializes then). Cleared on a Schedule re-tap.
 let SCHED_VIEW = { date: null, tech: null };
 
-function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, scheduleCfg, team, me, onClientSelect, estimates = [], seedClientIds, clearSeed, seedEstimate, clearEstimateSeed, onScheduleEstimate, focusStop, clearFocus, stopDrafts = {}, setStopDrafts, stopDraftsReady = true, draftScope = "", email, onComplete, onUncomplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments, vp = {}, arrivals = {}, onArrived, onValidateArrival, enRoute = {}, onEnRoute }) {
+function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, onDeleteStops, scheduleCfg, team, me, onClientSelect, estimates = [], seedClientIds, clearSeed, seedEstimate, clearEstimateSeed, onScheduleEstimate, focusStop, clearFocus, stopDrafts = {}, setStopDrafts, stopDraftsReady = true, draftScope = "", email, onComplete, onUncomplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments, vp = {}, arrivals = {}, onArrived, onValidateArrival, enRoute = {}, onEnRoute }) {
   const { T, perms, branding } = useApp();
   const wx = useAreaWeather((branding && branding.companyAddress) || "");  // service-area forecast for weather flags
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
@@ -14256,6 +14270,11 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   const [selected, setSelected] = useState({}); // { sid: true }
   const [reassignOpen, setReassignOpen] = useState(false); // bulk-reassign tech picker
   const [assignFilter, setAssignFilter] = useState(""); // "" all | id | "__un" unassigned
+  const [selectedDate, setSelectedDate] = useState(() => SCHED_VIEW.date || todayMDY());
+  const [viewTech, setViewTech] = useState(() => SCHED_VIEW.tech ?? null);
+  const [deletingStops, setDeletingStops] = useState(false);
+  const deletingStopsRef = useRef(false);
+  useEffect(() => { setSelected({}); }, [selectedDate, viewTech]);
 
   // order stops within a day: by time, or in stored (manual) order
   const orderStops = (stops) => cfg.sort === "time"
@@ -14325,19 +14344,26 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
     });
   };
 
-  const deleteStop = (origDate, sid) => {
-    const deleted = (schedule || []).flatMap(d => d.stops || []).find(s => String(s.sid) === String(sid));
-    if (deleted?.sourceEstimateId) {
-      window.alert("This stop is linked to an approved estimate. Reschedule or cancel it instead so the estimate and its materials stay linked.");
-      return;
+  const removeReviewedStops = async (ids) => {
+    if (deletingStopsRef.current) return false;
+    deletingStopsRef.current = true;
+    setDeletingStops(true);
+    try {
+      scheduleDeletionSelection(schedule, ids);
+      const saved = await onDeleteStops({ schedule, deleteStopIds: ids });
+      if (!saved?.ok) throw new Error("The server did not confirm removal. Your selection is still here.");
+      // Close tracking only after the exact selected removals are confirmed by the server.
+      for (const item of saved.selected || []) if (item.stop?.trackToken) void writeTrackRecord(item.stop, "complete");
+      return true;
+    } catch (error) {
+      window.alert(error?.message || "Removal was not confirmed. Your selection is still here. Try again.");
+      return false;
+    } finally {
+      deletingStopsRef.current = false;
+      setDeletingStops(false);
     }
-    if (deleted && deleted.trackToken) writeTrackRecord(deleted, "complete");
-    setSchedule(prev => {
-      let copy = prev.map(d => ({ ...d, stops: d.stops.filter(s => s.sid !== sid) }));
-      copy = copy.filter(d => d.stops.length > 0 || d.date === todayMDY());
-      return copy;
-    });
   };
+  const deleteStop = (_origDate, sid) => removeReviewedStops([String(sid)]);
 
   // Reschedule: move a stop to a new date and stamp why. Cancel: mark it cancelled in place
   // (kept on the schedule, rendered struck-through) so the change stays on the record.
@@ -14391,7 +14417,8 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
 
   const handleOmwSent = (key) => setSentStops(s => ({ ...s, [key]: true }));
 
-  const allStops = schedule.flatMap(d => d.stops.map(s => s.sid));
+  const selectableDays = scheduleSelectionScope(schedule, selectedDate, viewTech, team || []);
+  const allStops = selectableDays.flatMap(d => d.stops.map(s => s.sid));
   const selectedSids = Object.keys(selected).filter(k => selected[k]);
   const selCount = selectedSids.length;
   const allSelected = allStops.length > 0 && allStops.every(sid => selected[sid]);
@@ -14401,7 +14428,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
     if (allSelected) setSelected({});
     else setSelected(Object.fromEntries(allStops.map(sid => [sid, true])));
   };
-  const exitSelect = () => { setSelectMode(false); setSelected({}); };
+  const exitSelect = () => { if (!deletingStopsRef.current) { setSelectMode(false); setSelected({}); } };
 
   // Per-stop live-tracking link. Two things happen here:
   //  1. ensure the stop carries an unguessable token (persisted on the stop in sps_schedule), and
@@ -14468,19 +14495,12 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
     if (clearSeed) clearSeed();
   };
 
-  const deleteSelected = () => {
-    const selectedStops = (schedule || [])
-      .flatMap(d => d.stops || [])
-      .filter(s => selected[s.sid]);
-    if (selectedStops.some(s => s?.sourceEstimateId)) {
-      window.alert("One or more selected stops are linked to approved estimates. Reschedule or cancel those stops instead so their scope and materials stay linked. Nothing was removed.");
-      return;
-    }
-    setSchedule(prev => prev
-      .map(d => ({ ...d, stops: d.stops.filter(s => !selected[s.sid]) }))
-      .filter(d => d.stops.length > 0)
-    );
-    exitSelect();
+  const deleteSelected = async () => {
+    const ids = allStops.filter(sid => selected[sid]).map(String);
+    if (!ids.length || deletingStopsRef.current) return;
+    const names = selectableDays.flatMap(day => day.stops.filter(stop => ids.includes(String(stop.sid))).map(stop => `${stop.client || "Client"} (${day.date})`));
+    if (!confirm(`Remove ${ids.length} selected stop${ids.length === 1 ? "" : "s"}?\n\n${names.join("\n")}\n\nSaved service reports are kept.`)) return;
+    if (await removeReviewedStops(ids)) exitSelect();
   };
   // Bulk-reassign every selected stop to one tech (or Unassigned) at once.
   const reassignSelectedTo = (techId) => {
@@ -14628,8 +14648,6 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   };
 
   // ── Route-dashboard state + helpers ──
-  const [selectedDate, setSelectedDate] = useState(() => SCHED_VIEW.date || todayMDY());
-  const [viewTech, setViewTech] = useState(() => SCHED_VIEW.tech ?? null); // null = dashboard; else assignee key / "__un" / "__all"
   // Remember the current view so returning to Schedule lands where you left off (see SCHED_VIEW).
   useEffect(() => { SCHED_VIEW = { date: selectedDate, tech: viewTech }; }, [selectedDate, viewTech]);
   // The day strip now reaches ~2 months back, so center it on TODAY on first load (otherwise it
@@ -15108,10 +15126,10 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
         </div>
       )}
 
-      {/* SELECT MODE — flat selectable list across all days */}
+      {/* Select only the displayed date and route. Other days cannot be removed by Select all. */}
       {selectMode && (
         <div style={{ display: "flex", flexDirection: "column", gap: 20, paddingBottom: selCount > 0 ? 90 : 0 }}>
-          {schedule.map((day, di) => (
+          {selectableDays.map((day, di) => (
             <div key={day.date}>
               <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: di === 0 ? T.primary : T.textMuted, marginBottom: 10 }}>{dayLabel(day.date)} · {day.date}</div>
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -15314,9 +15332,9 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                 </span>
               </button>
             )}
-            <button onClick={deleteSelected}
+            <button onClick={deleteSelected} disabled={deletingStops}
               style={{ flex: 1, background: "rgba(255,80,80,0.15)", color: "#ff8080", border: "none", borderRadius: 10, padding: "12px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
-              <span style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}><Icon name="trash" size={14} /> Remove {selCount} {selCount === 1 ? "Stop" : "Stops"}</span>
+              <span style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}><Icon name="trash" size={14} /> {deletingStops ? "Removing…" : `Remove ${selCount} ${selCount === 1 ? "Stop" : "Stops"}`}</span>
             </button>
           </div>
         </div>
@@ -44706,7 +44724,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
           {selectedClient && <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} initialTab={clientOpenTab} onTabChange={setClientOpenTab} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onPersistInvoice={handlePersistInvoiceMutation} onPersistInvoiceProgress={handlePersistInvoiceProgress} onResolveInvoiceReview={handleResolveInvoiceReview} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>}
         </>
       ))}
-      {page === "schedule" && <SectionErrorBoundary key={"schedule-" + schedNonce}><Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} estimates={estimatesRaw} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} seedEstimate={scheduleEstimateSeed} clearEstimateSeed={() => setScheduleEstimateSeed(null)} onScheduleEstimate={handleScheduleApprovedEstimate} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} stopDraftsReady={lstopDrafts} draftScope={authUserId} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} onValidateArrival={validateArrivalStop} enRoute={enRoute} onEnRoute={handleEnRoute} /></SectionErrorBoundary>}
+      {page === "schedule" && <SectionErrorBoundary key={"schedule-" + schedNonce}><Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} onDeleteStops={async (request) => { const saved = await deleteScheduledStops(request); adoptScheduleDisplay(saved.displaySchedule); return saved; }} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} estimates={estimatesRaw} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} seedEstimate={scheduleEstimateSeed} clearEstimateSeed={() => setScheduleEstimateSeed(null)} onScheduleEstimate={handleScheduleApprovedEstimate} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} stopDraftsReady={lstopDrafts} draftScope={authUserId} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} onValidateArrival={validateArrivalStop} enRoute={enRoute} onEnRoute={handleEnRoute} /></SectionErrorBoundary>}
       {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <SectionErrorBoundary key="inventory"><InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin || perms.seeInventoryCost} canEdit={perms.isAdmin || perms.editInventory} T={T} /></SectionErrorBoundary>}
       {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} branding={branding} T={T} budget={budget} />}
       {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetHub budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} isAdmin={perms.isAdmin} />}

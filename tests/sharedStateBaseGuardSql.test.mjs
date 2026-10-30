@@ -21,6 +21,7 @@ const migrations=await Promise.all([
   'supabase/migrations/20261026150438_invoice_refresh_and_delete_receipts.sql',
   'supabase/migrations/20261026152040_shared_patch_preflight.sql',
   'supabase/migrations/20261026153209_business_conflicts_without_transaction_retry.sql',
+  'supabase/migrations/20261030001122_schedule_delete_event_authority.sql',
 ].map(file=>readFile(new URL(`../${file}`,import.meta.url),'utf8')));
 const copy=x=>structuredClone(x);
 const initialClients=()=>[{id:'one',name:'Corrected name',phone:'555-new',plan:'Essential',monthlyRate:250,notes:'New office note',
@@ -49,8 +50,11 @@ async function setup({clients=initialClients(),schedule=initialSchedule(),depth=
   const patch=async(key,before,next,version)=>(await db.query('select * from sps_shared_state_patch_cas($1,$2,$3::jsonb,$4::jsonb,$5)',[key,version??(await state(key)).version,JSON.stringify(before),wire(next,depth),'fixture-owner'])).rows[0];
   const batch=async operations=>(await db.query('select * from sps_app_state_batch_cas($1::jsonb)',[JSON.stringify(operations)])).rows[0];
   const patchBatch=async(operations,expected)=>(await db.query('select * from sps_shared_state_patch_batch_cas($1::jsonb,$2::jsonb,$3)',[JSON.stringify(operations),JSON.stringify(expected),'fixture-owner'])).rows[0];
+  const remove=async(before,next,ids,{version,operationId='user-delete'}={})=>(await db.query('select * from sps_schedule_delete_patch_batch_cas($1::jsonb,$2::jsonb,$3::jsonb,$4,$5)',[
+    JSON.stringify([{key:'sps_schedule',expected_version:version??(await state('sps_schedule')).version,value:JSON.stringify(next)}]),
+    JSON.stringify({sps_schedule:before}),JSON.stringify(ids),'fixture-owner',operationId])).rows[0];
   const candidates=async key=>(await db.query('select * from sps_shared_write_candidates_read($1)',[key])).rows;
-  return{db,role,state,value,cas,patch,batch,patchBatch,candidates,close:()=>db.close()};
+  return{db,role,state,value,cas,patch,batch,patchBatch,remove,candidates,close:()=>db.close()};
 }
 
 sqlTest('current-version legacy client snapshots cannot revert profiles unreceipted history or any existing client omission',async()=>{
@@ -135,7 +139,7 @@ sqlTest('explicit deletion tombstones identities so an old append cannot resurre
     assert.equal((await f.patch('sps_clients',initialClients(),[initialClients()[0]])).applied,true);
     await f.role('authenticated');assert.equal((await f.cas('sps_clients',initialClients())).outcome,'requires-base-aware-save');
     assert.deepEqual(await f.value('sps_clients'),[initialClients()[0]]);
-    await f.role('service_role');assert.equal((await f.patch('sps_schedule',initialSchedule(),[])).applied,true);
+    await f.role('service_role');assert.equal((await f.remove(initialSchedule(),[],['stop-one'])).applied,true);
     await f.role('authenticated');assert.equal((await f.cas('sps_schedule',initialSchedule())).outcome,'requires-base-aware-save');assert.deepEqual(await f.value('sps_schedule'),[]);
     await f.role('service_role');
     await assert.rejects(f.patch('sps_clients',[initialClients()[0]],initialClients()),/shared_deleted_identity_reused/);
@@ -312,12 +316,77 @@ sqlTest('only named business conflicts become PT409 and real serialization failu
     const rows=(await f.db.query("select proname,prosrc from pg_proc where proname=any($1::text[])",[names])).rows;
     assert.equal(rows.length,7);for(const row of rows){assert.match(row.prosrc,/errcode='PT409'/,row.proname);assert.doesNotMatch(row.prosrc,/errcode='40001'/,row.proname);}
     await f.db.exec("create function fixture_actual_serialization_failure() returns void language plpgsql as $$ begin raise exception 'could not serialize access due to concurrent update' using errcode='40001'; end $$;");
-    await f.db.exec(migrations[migrations.length-1]);
+    await f.db.exec(await readFile(new URL('../supabase/migrations/20261026153209_business_conflicts_without_transaction_retry.sql',import.meta.url),'utf8'));
     await assert.rejects(f.db.query('select fixture_actual_serialization_failure()'),error=>error.code==='40001');
     await f.role('service_role');
     assert.equal((await f.patch('sps_clients',initialClients(),[initialClients()[0]])).applied,true);
     const before=await f.state('sps_clients');
     await assert.rejects(f.patch('sps_clients',[initialClients()[0]],initialClients()),error=>error.code==='PT409'&&error.message==='shared_deleted_identity_reused');
     assert.deepEqual(await f.state('sps_clients'),before);
+  }finally{await f.close();}
+});
+
+sqlTest('fresh-baseline service snapshots cannot convert 148 omissions into deletions',async()=>{
+  const schedule=[{date:'10/29/2026',stops:Array.from({length:150},(_,i)=>({sid:`s${i}`,clientId:'one'}))}];
+  const next=[{...schedule[0],stops:schedule[0].stops.slice(148)}];
+  const f=await setup({schedule});try{
+    const before=await f.state('sps_schedule');
+    await assert.rejects(f.patch('sps_schedule',schedule,next),/shared_schedule_delete_requires_action/);
+    assert.deepEqual(await f.state('sps_schedule'),before);
+    await f.db.exec('reset role');
+    assert.equal((await f.db.query('select count(*)::int n from sps_schedule_deletion_receipts')).rows[0].n,0);
+    assert.equal((await f.db.query('select count(*)::int n from sps_shared_identity_tombstones')).rows[0].n,0);
+  }finally{await f.close();}
+});
+
+sqlTest('explicit stop deletion archives the exact original stop and preserves newer unrelated work',async()=>{
+  const schedule=[{date:'10/29/2026',stops:[{sid:'s1',clientId:'one',notes:'Report stays recoverable'},{sid:'s2',clientId:'two'}]}];
+  const f=await setup({schedule});try{
+    const next=[{...schedule[0],stops:[schedule[0].stops[1]]}];
+    const result=await f.remove(schedule,next,['s1']);assert.equal(result.applied,true);assert.deepEqual(await f.value('sps_schedule'),next);
+    await f.db.exec('reset role');
+    const receipts=(await f.db.query('select operation_id,stop_id,actor_id,before_version,stop_snapshot from sps_schedule_deletion_receipts')).rows;
+    assert.deepEqual(receipts,[{operation_id:'user-delete',stop_id:'s1',actor_id:'fixture-owner',before_version:1,stop_snapshot:{date:'10/29/2026',stop:schedule[0].stops[0]}}]);
+    assert.equal((await f.db.query("select count(*)::int n from sps_shared_identity_tombstones where entity_id='stop:s1'")).rows[0].n,1);
+    await f.role('authenticated');await assert.rejects(f.db.query('select * from sps_schedule_deletion_receipts'),/permission denied/);
+    await assert.rejects(f.remove(next,[],['s2']),/permission denied/);
+  }finally{await f.close();}
+});
+
+sqlTest('stale delete scope, wrong IDs, and forged browser scope cannot remove scheduled work',async()=>{
+  const f=await setup();try{
+    const before=await f.state('sps_schedule');
+    await assert.rejects(f.remove(initialSchedule(),[],['different-stop']),/shared_schedule_delete_scope_invalid/);
+    assert.deepEqual(await f.state('sps_schedule'),before);
+    const changed=initialSchedule();changed[0].stops[0].notes='Tech changed it';await f.patch('sps_schedule',initialSchedule(),changed);
+    assert.equal((await f.remove(initialSchedule(),[],['stop-one'],{version:before.version})).applied,false);
+    assert.deepEqual(await f.value('sps_schedule'),changed);
+    await f.role('authenticated');await f.db.query("select set_config('sps.schedule_delete_event',$1,false)",[JSON.stringify({stop_ids:['stop-one'],actor:'fake',operation_id:'fake'})]);
+    assert.equal((await f.cas('sps_schedule',[])).outcome,'requires-base-aware-save');assert.deepEqual(await f.value('sps_schedule'),changed);
+  }finally{await f.close();}
+});
+
+sqlTest('ordinary schedule adds and moves continue to work after deletion protection',async()=>{
+  const f=await setup();try{
+    const added=initialSchedule();added[0].stops.push({sid:'new-stop',clientId:'two'});
+    assert.equal((await f.patch('sps_schedule',initialSchedule(),added)).applied,true);
+    const moved=[{...added[0],stops:[added[0].stops[1]]},{date:'10/30/2026',stops:[added[0].stops[0]]}];
+    assert.equal((await f.patch('sps_schedule',added,moved)).applied,true);assert.deepEqual(await f.value('sps_schedule'),moved);
+    await f.db.exec('reset role');assert.equal((await f.db.query('select count(*)::int n from sps_schedule_deletion_receipts')).rows[0].n,0);
+  }finally{await f.close();}
+});
+
+sqlTest('a blocked schedule omission rolls back every companion row and explicit scope cannot leak',async()=>{
+  const schedule=[{date:'10/29/2026',stops:[{sid:'s1',clientId:'one'},{sid:'s2',clientId:'two'}]}];
+  const f=await setup({schedule});try{
+    const before=await f.state('sps_schedule'),other=await f.state('sps_other');
+    await assert.rejects(f.patchBatch([{key:'sps_other',expected_version:other.version,value:{notes:'Must roll back'}},
+      {key:'sps_schedule',expected_version:before.version,value:[]}],{sps_schedule:schedule}),/shared_schedule_delete_requires_action/);
+    assert.deepEqual(await f.state('sps_other'),other);assert.deepEqual(await f.state('sps_schedule'),before);
+    const next=[{...schedule[0],stops:[schedule[0].stops[1]]}];assert.equal((await f.remove(schedule,next,['s1'])).applied,true);
+    assert.equal((await f.db.query("select coalesce(current_setting('sps.schedule_delete_event',true),'') scope")).rows[0].scope,'');
+    await assert.rejects(f.patch('sps_schedule',next,[]),/shared_schedule_delete_requires_action/);
+    await assert.rejects(f.remove(next,[],['s2']),/shared_schedule_delete_operation_reused/);
+    assert.deepEqual(await f.value('sps_schedule'),next);
   }finally{await f.close();}
 });

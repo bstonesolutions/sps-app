@@ -87,14 +87,18 @@ test("legacy service-tax totals require explicit owner confirmation before conve
 });
 
 test("estimate-linked schedule and billing records cannot be orphaned by delete actions", () => {
-  const scheduleStart = app.indexOf("const deleteSelected = () =>");
+  const scheduleStart = app.indexOf("const deleteSelected = async () =>");
   const scheduleEnd = app.indexOf("const reassignSelectedTo", scheduleStart);
   const estimateStart = app.indexOf("const deleteEstimate = (id) =>");
   const estimateEnd = app.indexOf("const linkedInvoiceForEstimate", estimateStart);
   assert.ok(scheduleStart > 0 && scheduleEnd > scheduleStart);
   assert.ok(estimateStart > 0 && estimateEnd > estimateStart);
 
-  assert.match(app.slice(scheduleStart, scheduleEnd), /selectedStops\.some\(s => s\?\.sourceEstimateId\)/);
+  assert.match(app.slice(scheduleStart, scheduleEnd), /await removeReviewedStops\(ids\)/);
+  const scheduleDeletion = fs.readFileSync(new URL("../scheduleDeletion.js", import.meta.url), "utf8");
+  assert.match(scheduleDeletion, /selected\.some\(item => item\.stop\.sourceEstimateId\)/);
+  const eventStart = app.indexOf("const removeReviewedStops = async");
+  assert.match(app.slice(eventStart, scheduleStart), /scheduleDeletionSelection\(schedule, ids\)/);
   assert.match(app.slice(estimateStart, estimateEnd), /findInvoiceForEstimate\(invoices, target\)/);
   assert.match(app.slice(estimateStart, estimateEnd), /target\.linkedScheduledStopId \|\| target\.linkedInvoiceId \|\| target\.linkedBillingReviewId \|\| linkedInvoice/);
 });
