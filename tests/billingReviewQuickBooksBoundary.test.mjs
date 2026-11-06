@@ -51,19 +51,48 @@ test("recovery posts the saved QB wire payload without rebuilding customers, ite
   assert.match(posts[0].href, /requestid=sps-/); assert.equal(calls.some(call => /customer|item|send|email/.test(call.href)), false);
 });
 
-test("QB number inventory includes all pages and void invoices and fails on incomplete pages", async () => {
-  let pages = 0;
+// A fake QuickBooks invoice collection: COUNT(*) reports `counted`, pages read `invoices`.
+function quickBooksInvoices(invoices, { counted = invoices.length } = {}) {
+  const seen = { pages: [], inFlight: 0, maxInFlight: 0 };
   globalThis.fetch = async url => {
     const href = String(url);
     if (href.includes("/qb_tokens?")) return response(tokens);
     const query = new URL(href).searchParams.get("query");
-    assert.doesNotMatch(query, /WHERE/i); pages += 1;
-    if (pages === 1) return response({ QueryResponse: { Invoice: Array.from({ length: 1000 }, (_, index) => ({ Id: String(index + 1), DocNumber: String(index + 1001), ...(index === 0 ? { TxnStatus: "Voided" } : {}) })) } });
-    assert.match(query, /STARTPOSITION 1001/);
-    return response({ QueryResponse: { Invoice: [{ Id: "1001", DocNumber: "2500" }] } });
+    assert.doesNotMatch(query, /WHERE/i);
+    if (/COUNT\(\*\)/.test(query)) return response({ QueryResponse: { totalCount: counted } });
+    const start = Number(query.match(/STARTPOSITION (\d+)/)[1]);
+    assert.match(query, /MAXRESULTS 1000$/);
+    seen.pages.push(start); seen.inFlight += 1; seen.maxInFlight = Math.max(seen.maxInFlight, seen.inFlight);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    seen.inFlight -= 1;
+    return response({ QueryResponse: { Invoice: invoices.slice(start - 1, start + 999) } });
   };
+  return seen;
+}
+const invoiceRows = count => Array.from({ length: count }, (_, index) => ({ Id: String(index + 1), DocNumber: String(index + 1001), ...(index === 0 ? { TxnStatus: "Voided" } : {}) }));
+
+test("QB number inventory includes all pages and void invoices and fails on incomplete pages", async () => {
+  const seen = quickBooksInvoices([...invoiceRows(1000), { Id: "1001", DocNumber: "2500" }]);
   const inventory = await readQuickBooksInvoiceNumberInventory();
-  assert.equal(inventory.invoiceCount, 1001); assert.ok(inventory.numbers.includes("1001")); assert.ok(inventory.numbers.includes("2500")); assert.equal(pages, 2);
+  assert.equal(inventory.invoiceCount, 1001); assert.ok(inventory.numbers.includes("1001")); assert.ok(inventory.numbers.includes("2500"));
+  assert.deepEqual(seen.pages.sort((a, b) => a - b), [1, 1001]);
   globalThis.fetch = async url => String(url).includes("/qb_tokens?") ? response(tokens) : response({ Fault: { Error: [] } });
   await assert.rejects(readQuickBooksInvoiceNumberInventory(), /incomplete invoice inventory/);
+});
+
+test("QB number inventory reads counted pages in parallel and still reaches the true end", async () => {
+  const seen = quickBooksInvoices(invoiceRows(4500));
+  const inventory = await readQuickBooksInvoiceNumberInventory();
+  assert.equal(inventory.invoiceCount, 4500); assert.ok(inventory.numbers.includes("5500"));
+  assert.deepEqual(seen.pages.sort((a, b) => a - b), [1, 1001, 2001, 3001, 4001]);
+  assert.ok(seen.maxInFlight > 1 && seen.maxInFlight <= 4, `pages in flight: ${seen.maxInFlight}`);
+
+  // Invoices created after the count fill the last counted page; keep reading until a short page.
+  const grown = quickBooksInvoices(invoiceRows(2001), { counted: 1999 });
+  const later = await readQuickBooksInvoiceNumberInventory();
+  assert.equal(later.invoiceCount, 2001); assert.ok(later.numbers.includes("3001"));
+  assert.deepEqual(grown.pages.sort((a, b) => a - b), [1, 1001, 2001]);
+
+  quickBooksInvoices([{ Id: "1", DocNumber: "1001" }, { Id: "1", DocNumber: "1002" }]);
+  await assert.rejects(readQuickBooksInvoiceNumberInventory(), /pagination could not be verified/);
 });

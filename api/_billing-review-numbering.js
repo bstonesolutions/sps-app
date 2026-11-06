@@ -37,15 +37,19 @@ export function billingReviewInvoiceNumberChoices(numbers, config = {}) {
   return { nextNumber: availableNumbers[0], availableNumbers, highestNumber, highestInvoiceNumber };
 }
 
+const PAGE_SIZE = 1000;
+const MAX_PAGES = 1000;
+// QuickBooks has no column selection, so each page carries full invoices. Fetch the
+// counted pages a few at a time instead of one after another, under its per-company
+// concurrency limit.
+const PARALLEL_PAGES = 4;
+
 // No status filter: QuickBooks retains void invoices and their DocNumbers.
 // Stop only at the end of the complete collection; a failed page is not an empty page.
 export async function readQuickBooksInvoiceNumberInventory() {
   const { access_token, realm_id } = await getValidAccessToken();
-  const numbers = new Set();
-  const ids = new Set();
-  for (let page = 0; page < 1000; page += 1) {
-    const query = `SELECT * FROM Invoice STARTPOSITION ${page * 1000 + 1} MAXRESULTS 1000`;
-    const response = await fetch(`${QB_API_BASE}/v3/company/${encodeURIComponent(realm_id)}/query?query=${encodeURIComponent(query)}&minorversion=65`, {
+  const query = async statement => {
+    const response = await fetch(`${QB_API_BASE}/v3/company/${encodeURIComponent(realm_id)}/query?query=${encodeURIComponent(statement)}&minorversion=65`, {
       headers: { Authorization: `Bearer ${access_token}`, Accept: "application/json" },
       signal: AbortSignal.timeout(20_000),
     });
@@ -54,15 +58,30 @@ export async function readQuickBooksInvoiceNumberInventory() {
     if (data?.Fault || !data?.QueryResponse || (data.QueryResponse.Invoice != null && !Array.isArray(data.QueryResponse.Invoice))) {
       throw new Error("QuickBooks returned an incomplete invoice inventory. No invoice was created.");
     }
-    const rows = data.QueryResponse.Invoice || [];
-    for (const row of rows) {
-      if (!text(row.Id) || ids.has(text(row.Id))) throw new Error("QuickBooks invoice pagination could not be verified.");
-      ids.add(text(row.Id));
-      if (text(row.DocNumber)) numbers.add(text(row.DocNumber));
-    }
-    if (rows.length < 1000) return { realmId: text(realm_id), numbers: [...numbers], invoiceCount: ids.size, checkedAt: new Date().toISOString() };
+    return data.QueryResponse;
+  };
+  const page = async index => (await query(`SELECT * FROM Invoice STARTPOSITION ${index * PAGE_SIZE + 1} MAXRESULTS ${PAGE_SIZE}`)).Invoice || [];
+  const total = Number((await query("SELECT COUNT(*) FROM Invoice")).totalCount);
+  if (!Number.isSafeInteger(total) || total < 0) throw new Error("QuickBooks returned an incomplete invoice inventory. No invoice was created.");
+  // The page after the count must come back short; one created mid-scan is read below.
+  const counted = Math.floor(total / PAGE_SIZE) + 1;
+  if (counted > MAX_PAGES) throw new Error("QuickBooks invoice inventory exceeded the verification limit.");
+  const pages = [];
+  for (let start = 0; start < counted; start += PARALLEL_PAGES) {
+    pages.push(...await Promise.all(Array.from({ length: Math.min(PARALLEL_PAGES, counted - start) }, (_, offset) => page(start + offset))));
   }
-  throw new Error("QuickBooks invoice inventory exceeded the verification limit.");
+  while (pages.at(-1).length >= PAGE_SIZE) {
+    if (pages.length >= MAX_PAGES) throw new Error("QuickBooks invoice inventory exceeded the verification limit.");
+    pages.push(await page(pages.length));
+  }
+  const numbers = new Set();
+  const ids = new Set();
+  for (const row of pages.flat()) {
+    if (!text(row.Id) || ids.has(text(row.Id))) throw new Error("QuickBooks invoice pagination could not be verified.");
+    ids.add(text(row.Id));
+    if (text(row.DocNumber)) numbers.add(text(row.DocNumber));
+  }
+  return { realmId: text(realm_id), numbers: [...numbers], invoiceCount: ids.size, checkedAt: new Date().toISOString() };
 }
 
 export function firstUnusedInvoiceNumber(numbers, config = {}) {
