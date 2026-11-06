@@ -31,6 +31,21 @@ const lineFields = BILLING_REVIEW_LINE_EDIT_FIELDS;
 const sourceFields = ["sourceStopId", "sourceStopIds", "sourceCompletionReceiptId", "sourceCompletionReceiptIds", "sourceVisitDates", "sourceClientId", "sourceEstimateId", "sourceEstimateItemId", "sourceEstimateLineId"];
 const nowISO = now => new Date(now()).toISOString();
 
+// The QuickBooks create reply also carries the whole SPS invoice ledger (invoiceRefresh) for
+// browsers. A review keeps only its own result: a ledger copy on every confirmed review made each
+// billing read and write carry megabytes, until confirmations ran past the function time limit.
+function compactQuickBooksResult(result) {
+  if (!result || typeof result !== "object" || !Object.hasOwn(result, "invoiceRefresh")) return result;
+  const { invoiceRefresh, ...kept } = result;
+  return kept;
+}
+
+function compactReview(review) {
+  const result = review?.approval?.qbResult;
+  return result && typeof result === "object" && Object.hasOwn(result, "invoiceRefresh")
+    ? { ...review, approval: { ...review.approval, qbResult: compactQuickBooksResult(result) } } : review;
+}
+
 function responseCapture() {
   return { statusCode: 200, body: null, setHeader() {}, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; }, end() { return this; } };
 }
@@ -148,6 +163,7 @@ export function createBillingReviewHandler(overrides = {}) {
   }
 
   async function commit(snapshot, changes, fenceKeys = [], actorId) {
+    if (Array.isArray(changes[BILLING_REVIEW_KEY])) changes = { ...changes, [BILLING_REVIEW_KEY]: changes[BILLING_REVIEW_KEY].map(compactReview) };
     const operations = Object.entries(changes).map(([key, value]) => ({ key, expectedVersion: snapshot[key].version || 0, value }));
     for (const key of fenceKeys) if (!Object.hasOwn(changes, key)) operations.push(snapshot[key].exists
       ? { key, expectedVersion: snapshot[key].version, checkOnly: true }
@@ -164,7 +180,7 @@ export function createBillingReviewHandler(overrides = {}) {
       const current = reviewedRecord(snapshot[BILLING_REVIEW_KEY].value, id);
       const next = updater(current, snapshot);
       const reviews = snapshot[BILLING_REVIEW_KEY].value.map(review => same(review.id, id) ? next : review);
-      if ((await commit(snapshot, { [BILLING_REVIEW_KEY]: reviews })).applied) return next;
+      if ((await commit(snapshot, { [BILLING_REVIEW_KEY]: reviews })).applied) return compactReview(next);
     }
     throw fail(409, "billing_review_contention", "Billing records changed repeatedly. Refresh and try again.");
   }
@@ -183,7 +199,7 @@ export function createBillingReviewHandler(overrides = {}) {
       if (collision && (!same(collision.id, id) || !same(collision.qbId, result.qbId))) throw new Error("QuickBooks is linked to another SPS record. The approval is preserved for reconciliation.");
       const invoice = { ...applyQuickBooksInvoiceSaveResult(review.approval.invoice, result), billingReviewId: id, billingConfirmedAt: review.approval.startedAt };
       const nextReview = { ...review, reviewState: "synced", reviewRevision: review.reviewRevision + 1, reviewUpdatedAt: nowISO(deps.now),
-        approval: { ...review.approval, state: "created", qbResult: copy(result), leaseUntil: null }, linkedInvoiceId: invoice.id };
+        approval: { ...review.approval, state: "created", qbResult: copy(compactQuickBooksResult(result)), leaseUntil: null }, linkedInvoiceId: invoice.id };
       const nextInvoices = collision ? snapshot.sps_invoices.value : [invoice, ...snapshot.sps_invoices.value];
       const changes = {
         [BILLING_REVIEW_KEY]: snapshot[BILLING_REVIEW_KEY].value.map(row => same(row.id, id) ? nextReview : row),
@@ -227,7 +243,7 @@ export function createBillingReviewHandler(overrides = {}) {
       if (captured.statusCode < 300 && result.success === true && text(result.qbId)) {
         await changeReview(review.id, current => {
           if (current.approval?.attemptId !== approval.attemptId) throw new Error("The billing approval changed.");
-          return { ...current, approval: { ...current.approval, state: "created", qbResult: copy(result), leaseUntil: null } };
+          return { ...current, approval: { ...current.approval, state: "created", qbResult: copy(compactQuickBooksResult(result)), leaseUntil: null } };
         });
         return await promote(review.id, approval.attemptId, result, actorId);
       }
@@ -258,7 +274,7 @@ export function createBillingReviewHandler(overrides = {}) {
     try {
       if (req.method === "GET") {
         const snapshot = await read([BILLING_REVIEW_KEY]);
-        return res.status(200).json({ ok: true, reviews: snapshot[BILLING_REVIEW_KEY].value.filter(row => row.recordType === "billing-review"), version: snapshot[BILLING_REVIEW_KEY].version });
+        return res.status(200).json({ ok: true, reviews: snapshot[BILLING_REVIEW_KEY].value.filter(row => row.recordType === "billing-review").map(compactReview), version: snapshot[BILLING_REVIEW_KEY].version });
       }
       const action = text(req.body?.action);
       if (!["save", "discard", "merge", "migrate", "confirm", "retry", "from-estimate", "prepare-estimate", "available-numbers"].includes(action)) throw fail(400, "billing_review_action_invalid", "Choose a billing review action.");
@@ -370,7 +386,7 @@ export function createBillingReviewHandler(overrides = {}) {
         if (review.reviewState === "approving") {
           if (!review.approval?.payload || !review.approval?.attemptId) throw fail(409, "billing_review_approval_invalid", "The saved approval could not be verified.");
           if (review.approval.qbResult?.qbId) return res.status(200).json(await promote(id, review.approval.attemptId, review.approval.qbResult, actor.id));
-          if (Date.parse(review.approval.leaseUntil || "") > deps.now()) return res.status(202).json({ ok: false, pending: true, review, code: "QB_CONFIRMATION_IN_PROGRESS", error: "This invoice is still syncing. Retry shortly to check its result." });
+          if (Date.parse(review.approval.leaseUntil || "") > deps.now()) return res.status(202).json({ ok: false, pending: true, review: compactReview(review), code: "QB_CONFIRMATION_IN_PROGRESS", error: "This invoice is still syncing. Retry shortly to check its result." });
           next = { ...review, approval: { ...review.approval, leaseUntil: new Date(deps.now() + 90_000).toISOString() } };
         } else {
           revisionMatches(review, req.body?.expectedRevision);
