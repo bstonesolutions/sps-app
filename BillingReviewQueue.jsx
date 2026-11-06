@@ -7,7 +7,7 @@ const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD
 const shortDate = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" });
 const monthDate = new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric" });
 
-function serviceDate(review) {
+export function serviceDate(review) {
   const month = text(review?.serviceMonth || review?.autoPeriod);
   if (/^\d{4}-\d{2}$/.test(month)) {
     const date = invoiceListDate(`${month}-01`);

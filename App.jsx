@@ -35,7 +35,7 @@ import { assertInvoiceDeliveryCoverage, invoiceDeliveryIdentity, invoiceDelivery
 import { deleteSelectedInvoiceDrafts, invoiceBulkDeleteEligibility, invoiceDeletionReviewMatches, partitionInvoiceBulkDeletion, unlinkUnpaidInvoiceCoverage } from "./invoiceBulkDeletion";
 import { emptyMaintenancePaymentLedger, normalizeMaintenancePaymentLedger } from "./maintenancePaymentLedger";
 import InvoiceClientPicker from "./InvoiceClientPicker";
-import BillingReviewQueue from "./BillingReviewQueue.jsx";
+import BillingReviewQueue, { serviceDate as billingReviewServiceDate } from "./BillingReviewQueue.jsx";
 import InvoiceVisitPanel from "./InvoiceVisitPanel.jsx";
 import { billingReviewSaveReceiptMatches } from "./billingReviewReceipt";
 import InvoiceDeletionReview, { InvoiceDeletionConflicts } from "./InvoiceDeletionReview.jsx";
@@ -18967,6 +18967,70 @@ function InvoiceVisitPicker({ visits, invoices, currentInvoice, clientId, onAdd,
   );
 }
 
+// Same layout as the visit picker: choose this client's other pending reviews to fold into one invoice.
+function BillingReviewMergePicker({ current, reviews, busy = false, error = "", onMerge, onClose }) {
+  const { T } = useApp();
+  const { isPhone } = useViewport();
+  const [selectedIds, setSelectedIds] = useState([]);
+  const currency = (value) => `$${(Number(value) || 0).toFixed(2)}`;
+  const selectedRows = reviews.filter(review => selectedIds.includes(review.id));
+  const selectedTotal = [current, ...selectedRows].reduce((sum, review) => sum + invoiceTotals(review).total, 0);
+  const toggle = (id) => setSelectedIds(ids => ids.includes(id) ? ids.filter(value => value !== id) : [...ids, id]);
+  return (
+    <Modal title="Merge billing reviews" onClose={busy ? () => {} : onClose} maxWidth={720}>
+      <div data-billing-review-merge-picker style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ display: "grid", gridTemplateColumns: isPhone ? "1fr" : "minmax(0, 1fr) auto", gap: 12, alignItems: "end" }}>
+          <div>
+            <div style={{ fontSize: isPhone ? 23 : 27, lineHeight: 1.05, fontWeight: 850, letterSpacing: "-0.035em", color: T.text }}>Combine work into one invoice</div>
+            <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.45, marginTop: 6 }}>The selected reviews join this one as a single review, with every charge and visit kept. Nothing goes to QuickBooks until you confirm.</div>
+          </div>
+          <div style={{ minWidth: isPhone ? 0 : 150, padding: "10px 12px", borderLeft: `3px solid ${T.primary}`, background: T.surfaceAlt, borderRadius: 10 }}>
+            <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.075em", textTransform: "uppercase", color: T.textMuted }}>Merged total</div>
+            <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12, marginTop: 3 }}>
+              <strong style={{ fontSize: 20, color: T.text }}>{selectedRows.length + 1}</strong>
+              <span style={{ fontSize: 14, fontWeight: 800, color: T.primary }}>{currency(selectedTotal)}</span>
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", borderTop: `1px solid ${T.border}` }}>
+          {reviews.map(review => {
+            const checked = selectedIds.includes(review.id);
+            return (
+              <button
+                type="button"
+                key={review.id}
+                onClick={() => !busy && toggle(review.id)}
+                disabled={busy}
+                aria-pressed={checked}
+                style={{ width: "100%", display: "grid", gridTemplateColumns: "26px minmax(0, 1fr) auto", gap: 11, alignItems: "center", padding: isPhone ? "12px 2px" : "13px 4px", border: "none", borderBottom: `1px solid ${T.border}`, background: checked ? hexA(T.primary, 0.045) : "transparent", color: T.text, fontFamily: "inherit", textAlign: "left", cursor: busy ? "default" : "pointer" }}
+              >
+                <span aria-hidden="true" style={{ width: 22, height: 22, borderRadius: 7, border: `1.5px solid ${checked ? T.primary : T.border}`, background: checked ? T.primary : T.surface, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center" }}>{checked && <Icon name="check" size={13} />}</span>
+                <span style={{ minWidth: 0 }}>
+                  <strong style={{ display: "block", fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{invoiceDescription(review) || "Billing review"}</strong>
+                  <span style={{ display: "block", marginTop: 4, fontSize: 11.5, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {billingReviewServiceDate(review)} · {(review.lineItems || []).length} line item{(review.lineItems || []).length === 1 ? "" : "s"}
+                  </span>
+                </span>
+                <strong style={{ fontSize: 14, color: T.text, whiteSpace: "nowrap" }}>{currency(invoiceTotals(review).total)}</strong>
+              </button>
+            );
+          })}
+        </div>
+
+        {error && <p role="alert" style={{ margin: 0, color: T.primary, fontSize: 12.5, lineHeight: 1.5 }}>{error}</p>}
+
+        <div style={{ position: "sticky", bottom: -26, margin: "0 -22px -26px", padding: isPhone ? "12px 16px max(18px, env(safe-area-inset-bottom))" : "12px 22px 18px", background: T.surface, borderTop: `1px solid ${T.border}`, display: "flex", gap: 9, alignItems: "center" }}>
+          <button type="button" onClick={onClose} disabled={busy} style={{ minHeight: 44, padding: "10px 16px", border: `1px solid ${T.border}`, borderRadius: 11, background: T.surface, color: T.text, fontSize: 13, fontWeight: 750, fontFamily: "inherit", cursor: busy ? "default" : "pointer" }}>Cancel</button>
+          <button type="button" data-billing-review-merge-confirm onClick={() => selectedRows.length && onMerge(selectedRows)} disabled={busy || !selectedRows.length} style={{ minHeight: 44, flex: 1, padding: "10px 16px", border: "none", borderRadius: 11, background: T.primary, color: "#fff", fontSize: 14, fontWeight: 800, fontFamily: "inherit", cursor: !busy && selectedRows.length ? "pointer" : "default", opacity: !busy && selectedRows.length ? 1 : 0.52 }}>
+            {busy ? "Merging…" : selectedRows.length ? `Merge ${selectedRows.length + 1} reviews · ${currency(selectedTotal)}` : "Select reviews to merge"}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 function InvoiceServiceMonth({ invoice, onChange, T, monthOptional = false, onBillAnyway = null }) {
   const fieldId = useId();
   if (!invoiceHasMaintenanceServiceLines(invoice)) return null;
@@ -19051,7 +19115,7 @@ function InvoiceVisitEvidence({ invoice, client, schedule = [] }) {
   </>;
 }
 
-function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCatalog, presetClientId, maintenanceLedger: providedMaintenanceLedger = null, schedule = [], onSave, onPersistProgress, onResolveReview, onClose, onDelete, billingReview = false, onSaveReview, onConfirmReview, onDiscardReview, onLoadInvoiceNumbers }) {
+function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCatalog, presetClientId, maintenanceLedger: providedMaintenanceLedger = null, schedule = [], onSave, onPersistProgress, onResolveReview, onClose, onDelete, billingReview = false, onSaveReview, onConfirmReview, onDiscardReview, onLoadInvoiceNumbers, mergeableReviews = [], onMergeReviews }) {
   const { T, perms, email } = useApp();
   const canSeeLineCost = !!(perms.isAdmin || perms.seeProfit || perms.seeInventoryCost);
   const invoiceVp = useViewport();
@@ -19102,8 +19166,15 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   const [reviewMessage, setReviewMessage] = useState("");
   const [reviewError, setReviewError] = useState(false);
   const [discardReviewPrompt, setDiscardReviewPrompt] = useState(false);
+  const [reviewMergePick, setReviewMergePick] = useState(false);
   const reviewBusyRef = useRef(false);
   const reviewLocked = billingReview && (inv.reviewState === "approving" || (!!inv.approval && inv.approval.state !== "rejected"));
+  // Other pending reviews for this client that can be folded into this one.
+  const reviewMergeCandidates = billingReview && !reviewLocked && typeof onMergeReviews === "function"
+    ? mergeableReviews.filter(review => review?.recordType === "billing-review" && review.reviewState === "pending"
+      && (!review.approval || review.approval.state === "rejected") && String(review.id) !== String(inv.id)
+      && String(review.clientId ?? "") === String(inv.clientId ?? ""))
+    : [];
   // A number choice is only an intent for confirmation. It never becomes part of
   // the saved review or changes the sequence before the server claims it.
   const reviewNumberId = useId();
@@ -19705,6 +19776,35 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     return { ok: false, error: "Invoices changed repeatedly on another device. Refresh and try again." };
   };
 
+  // Save this review's edits first, then fold the chosen reviews into it on the server.
+  // The merged review may be the other one (a maintenance or estimate review keeps its identity).
+  const performReviewMerge = async (selected) => {
+    if (reviewBusyRef.current || !selected.length) return;
+    const candidate = selectedClientSnapshot();
+    if (!candidate) return;
+    reviewBusyRef.current = true;
+    setReviewBusy("merge");
+    setReviewMessage("");
+    setReviewError(false);
+    try {
+      const receipt = await onSaveReview(candidate);
+      const saved = receipt?.review;
+      if (!saved || saved.id !== candidate.id) throw new Error("The review could not be verified in SPS.");
+      setInv(saved);
+      const result = await onMergeReviews(saved, selected);
+      if (!result?.review) throw new Error("SPS did not confirm the merge. Refresh the review list.");
+      setReviewMergePick(false);
+      if (result.review.id === saved.id) setInv(result.review);
+      setReviewMessage(`Merged ${selected.length + 1} reviews into one. Check the charges, then confirm.`);
+    } catch (error) {
+      setReviewError(true);
+      setReviewMessage(error?.message || "The reviews could not be merged. Try again.");
+    } finally {
+      reviewBusyRef.current = false;
+      setReviewBusy("");
+    }
+  };
+
   const performReviewAction = async (action) => {
     if (reviewBusyRef.current) return;
     const requestedNumber = !reviewLocked && reviewNumberMode !== "automatic" ? reviewInvoiceNumber.trim() : "";
@@ -20292,6 +20392,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         <div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
             <label style={{ ...label, marginBottom: 0 }}>Line Items</label>
+            {reviewMergeCandidates.length > 0 && <button type="button" data-billing-review-merge disabled={!!reviewBusy} onClick={() => setReviewMergePick(true)} style={{ minHeight: 38, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 10, padding: "8px 11px", color: T.text, fontWeight: 750, fontSize: 12, cursor: reviewBusy ? "default" : "pointer", fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 6, opacity: reviewBusy ? 0.6 : 1 }}><Icon name="merge" size={13} /> {reviewBusy === "merge" ? "Merging…" : `Merge reviews (${reviewMergeCandidates.length})`}</button>}
             {!billingReview && completedHistory.length > 0 && <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
               <button type="button" data-invoice-link-visits disabled={visitLinkBusy} onClick={() => { setVisitPickMode("link"); setVisitPick(true); }} style={{ minHeight: 38, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 10, padding: "8px 11px", color: T.text, fontWeight: 750, fontSize: 12, cursor: visitLinkBusy ? "default" : "pointer", fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 6, opacity: visitLinkBusy ? 0.6 : 1 }}><Icon name="link" size={13} /> {visitLinkBusy ? "Linking…" : "Link visits"}</button>
               <button data-invoice-add-visits onClick={() => { setVisitPickMode("add"); setVisitPick(true); }} style={{ minHeight: 38, background: hexA(T.primary, 0.07), border: `1px solid ${hexA(T.primary, 0.2)}`, borderRadius: 10, padding: "8px 11px", color: T.primary, fontWeight: 800, fontSize: 12, cursor: "pointer", fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="plus" size={13} /> Add completed visits</button>
@@ -20544,6 +20645,16 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           clientId={client?.id ?? inv.clientId}
           onAdd={visitPickMode === "link" ? linkVisits : importVisits}
           onClose={() => setVisitPick(false)}
+        />
+      )}
+      {reviewMergePick && reviewMergeCandidates.length > 0 && (
+        <BillingReviewMergePicker
+          current={inv}
+          reviews={reviewMergeCandidates}
+          busy={reviewBusy === "merge"}
+          error={reviewError ? reviewMessage : ""}
+          onMerge={performReviewMerge}
+          onClose={() => { setReviewMergePick(false); setReviewMessage(""); setReviewError(false); }}
         />
       )}
     </Modal>
@@ -24870,6 +24981,27 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
       throw error;
     }
   };
+  const mergeBillingReviews = async (review, others) => {
+    const recoverMerge = rows => {
+      const merged = others.map(other => rows.find(row => row.id === other.id));
+      const survivorId = merged[0]?.reviewMergedInto;
+      if (!survivorId || merged.some(row => row?.reviewState !== "discarded" || row.reviewMergedInto !== survivorId)) return null;
+      return rows.find(row => row.id === survivorId && row.reviewState === "pending") || null;
+    };
+    let survivor = null;
+    try {
+      const data = await requestBillingReview({ action: "merge", reviewId: review.id, expectedRevision: review.reviewRevision,
+        mergeReviews: others.map(other => ({ id: other.id, expectedRevision: other.reviewRevision })) });
+      survivor = data.review;
+      void loadBillingReviews().catch(() => {});
+    } catch (error) {
+      // An interrupted response may still have merged. Trust only the server's saved tombstones.
+      try { survivor = recoverMerge(await loadBillingReviews()); } catch (_) {}
+      if (!survivor) throw error;
+    }
+    if (survivor && survivor.id !== review.id) setBillingReviewEditing(survivor);
+    return { ok: true, review: survivor };
+  };
   const migrateBillingReviews = async () => {
     if (billingMigrationBusy) return;
     setBillingMigrationBusy(true);
@@ -25628,6 +25760,8 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
         onLoadInvoiceNumbers={() => requestBillingReview({ action: "available-numbers" })}
         onConfirmReview={(review, { retry, invoiceNumber } = {}) => mutateBillingReview(retry ? "retry" : "confirm", review, { invoiceNumber })}
         onDiscardReview={review => mutateBillingReview("discard", review)}
+        mergeableReviews={billingReviews}
+        onMergeReviews={mergeBillingReviews}
         onClose={() => { setBillingReviewEditing(null); void loadBillingReviews().catch(() => {}); }} />}
       {canReviewAccounting && reviewingReconciliation && (
         <InvoiceReconciliationReviewQueue
@@ -28774,6 +28908,7 @@ function Icon({ name, size = 22, filled = false }) {
     eye:      <><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></>,
     history:  <><path d="M12 8v4l3 3" /><path d="M3.05 11a9 9 0 1 0 .5-3M3 4v4h4" /></>,
     link:     <><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></>,
+    merge:    <><path d="m8 6 4-4 4 4" /><path d="M12 2v10.3a4 4 0 0 1-1.17 2.87L4 22" /><path d="m20 22-5-5" /></>,
     message:  <><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></>,
     request:  <><circle cx="12" cy="12" r="9" /><path d="M12 8v8M8 12h8" /></>,
     refresh:  <><path d="M23 4v6h-6M1 20v-6h6" /><path d="M3.5 9A9 9 0 0 1 20.5 9M20.5 15A9 9 0 0 1 3.5 15" /></>,
