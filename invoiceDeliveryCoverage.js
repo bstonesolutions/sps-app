@@ -1,6 +1,7 @@
 import { invoiceMaintenanceCoverageIssue, withMatchedMaintenanceServiceMonths } from "./maintenanceInvoiceCoverage.js";
 import { normalizeMaintenancePaymentLedger } from "./maintenancePaymentLedger.js";
 import { isMaintenanceServiceLine } from "./maintenanceServiceLine.js";
+import { maintenanceCoverageOverride } from "./maintenanceCoverageOverride.js";
 
 export function invoiceDeliveryIdentity(invoice, clientId) {
   const keys = ["id", "qbId", "qbCustomerId", "source", "autoPeriod", "serviceMonth", "sourceStopId", "sourceStopIds", "sourceCompletionReceiptId", "sourceCompletionReceiptIds", "invoiceDiscountType", "invoiceDiscount"];
@@ -19,6 +20,9 @@ export function invoiceDeliveryLine(line) {
 // Called before constructing or sending any channel. A failed preflight must
 // not send a text/portal notice while the email is held for billing review.
 export async function assertInvoiceDeliveryCoverage({ invoice, client, clients = [], invoices = [], schedule = [], loadLedger }) {
+  // The owner chose to bill this invoice without a coverage match. The send endpoint
+  // re-checks that decision on the saved invoice before anything is delivered.
+  if (maintenanceCoverageOverride(invoice)) return invoice;
   const options = { invoice, client: client || { id: "unresolved", history: [] }, clients, invoices, schedule };
   const couldBeMatchedService = (invoice?.lineItems || []).some(line => isMaintenanceServiceLine({ source: "monthly-maintenance" }, line)
     && Number(line.qty ?? 1) * Number(line.unitPrice ?? 0) > 0);

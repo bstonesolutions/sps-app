@@ -13,6 +13,7 @@ import { getValidAccessToken, QB_API_BASE, setCors } from "./qb-store.js";
 import { requireCapability } from "../_staff-auth.js";
 import { confirmedQuickBooksWriteResponse } from "../_quickbooks-invoice-write-receipt.js";
 import { quickBooksMaintenanceGuard } from "./maintenance-guard.js";
+import { maintenanceCoverageOverride } from "../../maintenanceCoverageOverride.js";
 import { invoiceServiceDescriptionIssue, formatInvoiceServiceLineDescription } from "../../invoiceServiceDescription.js";
 import { BILLING_REVIEW_CREATE_CONTEXT } from "../_billing-review-context.js";
 import { readAppStatesVersioned } from "../_app-state.js";
@@ -49,12 +50,15 @@ export default async function handler(req, res) {
     }
   }
 
+  // A retried billing review re-sends its frozen approval; its saved owner decision still applies.
+  let coverageOverridden = !!(reviewContext && maintenanceCoverageOverride(reviewContext.canonicalInvoice));
   const coverageIssue = reviewContext?.recovering ? null : await quickBooksMaintenanceGuard(invoice, {
     trustedCanonicalInvoice: reviewContext?.canonicalInvoice,
     onPreparedInvoice: prepared => { invoice = prepared; },
+    onCoverageOverride: () => { coverageOverridden = true; },
   });
   if (coverageIssue) return res.status(coverageIssue.status).json({ error: coverageIssue.message, code: coverageIssue.code, reviewRequired: true });
-  const serviceMonthIssue = invoiceServiceDescriptionIssue(invoice);
+  const serviceMonthIssue = coverageOverridden ? null : invoiceServiceDescriptionIssue(invoice);
   if (serviceMonthIssue) return res.status(422).json({ error: serviceMonthIssue.message, code: serviceMonthIssue.code, reviewRequired: true });
 
   // Tokens are read server-side from the store (never passed by the client).

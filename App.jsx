@@ -46,7 +46,8 @@ import { invoiceMaintenanceCoverageIssue, withMatchedMaintenanceServiceMonths } 
 import { deleteInvoiceAndCompactSafeDrafts, draftInvoiceCanBeRenumbered } from "./invoiceNumbering";
 import { buildQuickBooksInvoicePayload, partitionQuickBooksDraftSelection } from "./quickbooksDraftSync";
 import { quickBooksInvoiceSyncEligibility, quickBooksInvoiceUrl, syncInvoiceToQuickBooks } from "./quickbooksDirectSync";
-import { appendCompletedVisitsToInvoice, completedVisitBillableTotal, completedVisitInvoiceLink, completedVisitLineItems, completedVisitSource, invoiceCompletedVisitSources, removeInvoiceLineAndPruneCompletedVisitSources, reserveCompletedVisitInvoice } from "./invoiceVisitImport";
+import { appendCompletedVisitsToInvoice, completedVisitBillableTotal, completedVisitInvoiceLink, completedVisitLineItems, completedVisitSource, invoiceCompletedVisitSources, linkCompletedVisitsToInvoice, removeInvoiceLineAndPruneCompletedVisitSources, reserveCompletedVisitInvoice } from "./invoiceVisitImport";
+import { maintenanceCoverageOverride, newMaintenanceCoverageOverride } from "./maintenanceCoverageOverride";
 import { normalizeMaintenanceBillingPolicy } from "./maintenanceBilling";
 import { saveClientEditorChanges } from "./clientEditSave";
 import { createNewClientAttempt, saveNewClientChanges } from "./clientCreateSave";
@@ -18808,8 +18809,11 @@ function InvoiceSendStep({ invoice, client, onClose, onSent }) {
   );
 }
 
-function InvoiceVisitPicker({ visits, invoices, currentInvoice, clientId, onAdd, onClose }) {
+function InvoiceVisitPicker({ visits, invoices, currentInvoice, clientId, onAdd, onClose, mode = "add" }) {
   const { T } = useApp();
+  // "link" records visits the invoice already covers without adding charges, so a visit with
+  // no billable items can be linked; "add" builds charges from each visit.
+  const linking = mode === "link";
   const { isPhone } = useViewport();
   const [search, setSearch] = useState("");
   const [selectedKeys, setSelectedKeys] = useState([]);
@@ -18851,9 +18855,9 @@ function InvoiceVisitPicker({ visits, invoices, currentInvoice, clientId, onAdd,
   }), [availableInvoices, clientId, currentInvoice?.id, sortedVisits]);
   const query = search.trim().toLowerCase();
   const visibleRows = visitRows.filter(row => !query || row.searchable.includes(query));
-  const eligibleVisible = visibleRows.filter(row => !row.link && row.lineCount > 0);
+  const eligibleVisible = visibleRows.filter(row => !row.link && (linking || row.lineCount > 0));
   const selectedSet = new Set(selectedKeys);
-  const selectedRows = visitRows.filter(row => selectedSet.has(row.source.key) && !row.link && row.lineCount > 0);
+  const selectedRows = visitRows.filter(row => selectedSet.has(row.source.key) && !row.link && (linking || row.lineCount > 0));
   const selectedTotal = selectedRows.reduce((sum, row) => sum + row.total, 0);
   const allVisibleSelected = eligibleVisible.length > 0 && eligibleVisible.every(row => selectedSet.has(row.source.key));
 
@@ -18875,18 +18879,18 @@ function InvoiceVisitPicker({ visits, invoices, currentInvoice, clientId, onAdd,
   };
 
   return (
-    <Modal title="Add completed visits" onClose={onClose} maxWidth={720}>
+    <Modal title={linking ? "Link completed visits" : "Add completed visits"} onClose={onClose} maxWidth={720}>
       <div data-invoice-visit-picker style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <div style={{ display: "grid", gridTemplateColumns: isPhone ? "1fr" : "minmax(0, 1fr) auto", gap: 12, alignItems: "end" }}>
           <div>
-            <div style={{ fontSize: isPhone ? 23 : 27, lineHeight: 1.05, fontWeight: 850, letterSpacing: "-0.035em", color: T.text }}>Build one invoice from several visits</div>
-            <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.45, marginTop: 6 }}>Choose every completed visit this invoice should cover. Already linked visits stay protected.</div>
+            <div style={{ fontSize: isPhone ? 23 : 27, lineHeight: 1.05, fontWeight: 850, letterSpacing: "-0.035em", color: T.text }}>{linking ? "Link the visits this invoice covers" : "Build one invoice from several visits"}</div>
+            <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.45, marginTop: 6 }}>{linking ? "Linked visits show as billed on this invoice. The invoice's charges don't change." : "Choose every completed visit this invoice should cover. Already linked visits stay protected."}</div>
           </div>
           <div style={{ minWidth: isPhone ? 0 : 150, padding: "10px 12px", borderLeft: `3px solid ${T.primary}`, background: T.surfaceAlt, borderRadius: 10 }}>
             <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.075em", textTransform: "uppercase", color: T.textMuted }}>Selected</div>
             <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12, marginTop: 3 }}>
               <strong style={{ fontSize: 20, color: T.text }}>{selectedRows.length}</strong>
-              <span style={{ fontSize: 14, fontWeight: 800, color: T.primary }}>{currency(selectedTotal)}</span>
+              {!linking && <span style={{ fontSize: 14, fontWeight: 800, color: T.primary }}>{currency(selectedTotal)}</span>}
             </div>
           </div>
         </div>
@@ -18914,14 +18918,14 @@ function InvoiceVisitPicker({ visits, invoices, currentInvoice, clientId, onAdd,
 
         <div style={{ display: "flex", flexDirection: "column", borderTop: `1px solid ${T.border}` }}>
           {visibleRows.map(row => {
-            const disabled = !!row.link || row.lineCount === 0;
+            const disabled = !!row.link || (!linking && row.lineCount === 0);
             const checked = selectedSet.has(row.source.key);
             const title = row.services.join(", ") || row.visit?.type || "Completed visit";
             const linkedLabel = row.link
               ? row.link.legacy
                 ? `Possible legacy link to invoice ${row.link.invoiceNumber || row.link.invoiceId} · review before rebilling`
                 : row.link.current ? "Already on this invoice" : `Linked to invoice ${row.link.invoiceNumber || row.link.invoiceId}`
-              : row.lineCount === 0 ? "No billable items saved" : "";
+              : row.lineCount === 0 && !linking ? "No billable items saved" : "";
             return (
               <button
                 type="button"
@@ -18953,7 +18957,9 @@ function InvoiceVisitPicker({ visits, invoices, currentInvoice, clientId, onAdd,
         <div style={{ position: "sticky", bottom: -26, margin: "0 -22px -26px", padding: isPhone ? "12px 16px max(18px, env(safe-area-inset-bottom))" : "12px 22px 18px", background: T.surface, borderTop: `1px solid ${T.border}`, display: "flex", gap: 9, alignItems: "center" }}>
           <button type="button" onClick={onClose} style={{ minHeight: 44, padding: "10px 16px", border: `1px solid ${T.border}`, borderRadius: 11, background: T.surface, color: T.text, fontSize: 13, fontWeight: 750, fontFamily: "inherit", cursor: "pointer" }}>Cancel</button>
           <button type="button" onClick={addSelected} disabled={!selectedRows.length} style={{ minHeight: 44, flex: 1, padding: "10px 16px", border: "none", borderRadius: 11, background: T.primary, color: "#fff", fontSize: 14, fontWeight: 800, fontFamily: "inherit", cursor: selectedRows.length ? "pointer" : "default", opacity: selectedRows.length ? 1 : 0.52 }}>
-            {selectedRows.length ? `Add ${selectedRows.length} visit${selectedRows.length === 1 ? "" : "s"} · ${currency(selectedTotal)}` : "Select visits to add"}
+            {linking
+              ? (selectedRows.length ? `Link ${selectedRows.length} visit${selectedRows.length === 1 ? "" : "s"}` : "Select visits to link")
+              : (selectedRows.length ? `Add ${selectedRows.length} visit${selectedRows.length === 1 ? "" : "s"} · ${currency(selectedTotal)}` : "Select visits to add")}
           </button>
         </div>
       </div>
@@ -18961,10 +18967,11 @@ function InvoiceVisitPicker({ visits, invoices, currentInvoice, clientId, onAdd,
   );
 }
 
-function InvoiceServiceMonth({ invoice, onChange, T }) {
+function InvoiceServiceMonth({ invoice, onChange, T, monthOptional = false, onBillAnyway = null }) {
   const fieldId = useId();
   if (!invoiceHasMaintenanceServiceLines(invoice)) return null;
-  const issue = invoiceServiceDescriptionIssue(invoice);
+  // Billing without a coverage match makes the service month optional.
+  const issue = monthOptional ? null : invoiceServiceDescriptionIssue(invoice);
   const needsDefaultMonth = (invoice.lineItems || []).some(line => invoiceServiceDescriptionIssue({ ...invoice, serviceMonth: undefined, autoPeriod: undefined, lineItems: [line] })?.code === "maintenance-service-month-missing");
   const showPicker = !invoice.autoPeriod && needsDefaultMonth;
   const previews = [...new Set((invoice.lineItems || []).filter(line => invoiceHasMaintenanceServiceLines({ ...invoice, lineItems: [line] })).map(line => formatInvoiceServiceLineDescription(invoice, line)))];
@@ -18987,7 +18994,8 @@ function InvoiceServiceMonth({ invoice, onChange, T }) {
         const dates = [...new Set([line.serviceMonth, line.serviceDate, ...(Array.isArray(line.sourceVisitDates) ? line.sourceVisitDates : [])].filter(Boolean))];
         return <div key={index} style={{ marginTop: 8, fontSize: 12, color: T.text }}>{line.desc || line.description || line.name}{dates.length ? ` · Service: ${dates.join(", ")}` : ""}</div>;
       })}
-      <div style={{ marginTop: 8, fontSize: 11.5, lineHeight: 1.45, color: T.textMuted }}>{showPicker ? "Separate from the invoice date. Completed visits keep their service dates." : "Uses the service dates and dated line descriptions below."}</div>
+      <div style={{ marginTop: 8, fontSize: 11.5, lineHeight: 1.45, color: T.textMuted }}>{showPicker ? "Separate from the invoice date. Completed visits keep their service dates." : "Uses the service dates and dated line descriptions below."}{monthOptional ? " Optional while billing without a coverage match." : ""}</div>
+      {issue && onBillAnyway && <button type="button" data-invoice-bill-anyway onClick={onBillAnyway} style={{ minHeight: 36, marginTop: 5, padding: "4px 0", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 12, fontWeight: 750, cursor: "pointer" }}>Bill anyway</button>}
     </section>
   );
 }
@@ -19044,7 +19052,7 @@ function InvoiceVisitEvidence({ invoice, client, schedule = [] }) {
 }
 
 function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCatalog, presetClientId, maintenanceLedger: providedMaintenanceLedger = null, schedule = [], onSave, onPersistProgress, onResolveReview, onClose, onDelete, billingReview = false, onSaveReview, onConfirmReview, onDiscardReview, onLoadInvoiceNumbers }) {
-  const { T, perms } = useApp();
+  const { T, perms, email } = useApp();
   const canSeeLineCost = !!(perms.isAdmin || perms.seeProfit || perms.seeInventoryCost);
   const invoiceVp = useViewport();
   const narrowInvoice = invoiceVp.width <= 420;
@@ -19082,6 +19090,9 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   const [progressMsg, setProgressMsg] = useState("");
   const [isPersisted, setIsPersisted] = useState(!!invoice);
   const [visitPick, setVisitPick] = useState(false);
+  const [visitPickMode, setVisitPickMode] = useState("add");
+  const [visitLinkBusy, setVisitLinkBusy] = useState(false);
+  const [visitLinkMsg, setVisitLinkMsg] = useState("");
   const [sendStep, setSendStep] = useState(null); // B9-2: client-notification step after a successful save
   const [qbReviewLoading, setQbReviewLoading] = useState(false);
   const [qbReviewError, setQbReviewError] = useState("");
@@ -19291,6 +19302,11 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   const clientLockedByImportedVisits = importedVisitSources.hasSources;
   const needsCoverageCheck = !!invoiceMaintenanceCoverageIssue({ invoice: inv, client, clients, ledger: null, invoices, schedule });
   const coverageIssue = invoiceMaintenanceCoverageIssue({ invoice: inv, client, clients, ledger: coverageLedger, invoices, schedule });
+  // The owner can bill an invoice that SPS cannot match to maintenance coverage. The choice is
+  // saved on the invoice (or review) and verified there by the server before QuickBooks or email.
+  const coverageOverridden = !!maintenanceCoverageOverride(inv);
+  const canOverrideCoverage = !!perms.isAdmin;
+  const setCoverageOverride = on => set("maintenanceCoverageOverride", on ? newMaintenanceCoverageOverride(email) : null);
   const loadInvoiceCoverage = useCallback(async () => {
     setCoverageLoading(true);
     setCoverageError("");
@@ -19333,6 +19349,37 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
       });
     });
     setVisitPick(false);
+  };
+  // Link visits the invoice already covers without adding charges. A saved invoice reserves the
+  // links right away (so those visits read as billed); a new invoice reserves them when saved.
+  const linkVisits = async (selectedVisits) => {
+    clearSaveError();
+    setVisitPick(false);
+    setVisitLinkMsg("");
+    const linked = linkCompletedVisitsToInvoice(inv, selectedVisits, { clientId: client?.id ?? inv.clientId });
+    if (!linked.linkedVisitKeys.length) return;
+    const count = linked.linkedVisitKeys.length;
+    const linkFields = invoice => ({
+      sourceStopIds: invoice.sourceStopIds,
+      sourceCompletionReceiptIds: invoice.sourceCompletionReceiptIds,
+      sourceVisitClientIds: invoice.sourceVisitClientIds,
+      ...(invoice.sourceVisitClientId ? { sourceVisitClientId: invoice.sourceVisitClientId } : {}),
+    });
+    if (!isPersisted) {
+      setInv(current => ({ ...current, ...linkFields(linked.invoice) }));
+      setVisitLinkMsg(`${count} visit${count === 1 ? "" : "s"} will be linked when you save.`);
+      return;
+    }
+    setVisitLinkBusy(true);
+    try {
+      const reservation = await reserveVisitSourcesBeforeAccounting(linked.invoice);
+      if (!reservation.ok) { setVisitLinkMsg(reservation.error || "The visits could not be linked. Nothing changed."); return; }
+      progressBaselineRef.current = JSON.stringify(reservation.reservedInvoice);
+      setInv(current => ({ ...current, ...linkFields(reservation.reservedInvoice) }));
+      setVisitLinkMsg(`Linked ${count} visit${count === 1 ? "" : "s"}. Charges didn't change.`);
+    } finally {
+      setVisitLinkBusy(false);
+    }
   };
   const qbConnected = qbIsConnected();
   const editorInvoiceTotals = invoiceTotals(inv);
@@ -19763,7 +19810,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     // Persist the client link + a name snapshot on the record (Bug 1) — never rely on
     // a transient field. clientId resolves the live client; clientName is the fallback.
 
-    if (needsCoverageCheck) {
+    if (needsCoverageCheck && !coverageOverridden) {
       setQbState("sending");
       setQbMsg("");
       const ledger = await loadInvoiceCoverage();
@@ -19781,7 +19828,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
       }
     }
 
-    const serviceMonthIssue = invoiceServiceDescriptionIssue(baseInv);
+    const serviceMonthIssue = coverageOverridden ? null : invoiceServiceDescriptionIssue(baseInv);
     if (serviceMonthIssue) { setQbState("error"); setQbMsg(serviceMonthIssue.message); return; }
 
     // Claim every completed-stop source in the latest shared invoice snapshot before
@@ -19811,6 +19858,23 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           ? { sourceVisitClientId: reservedSources.sourceVisitClientIds[0] }
           : {}),
       };
+    }
+
+    // QuickBooks verifies the owner's "bill anyway" choice on the SAVED invoice, so save it
+    // in SPS first when the saved copy doesn't have it yet.
+    let savedCopy = null;
+    try { savedCopy = progressBaselineRef.current ? JSON.parse(progressBaselineRef.current) : null; } catch (_) {}
+    if (coverageOverridden && !billingReview && qbIsConnected() && (inv.lineItems || []).length && !maintenanceCoverageOverride(savedCopy)) {
+      const confirmed = typeof onPersistProgress === "function"
+        ? await onPersistProgress(baseInv, { baselineJson: progressBaselineRef.current }).catch(() => null)
+        : null;
+      if (!confirmed || String(confirmed.id || "") !== String(baseInv.id || "") || !maintenanceCoverageOverride(confirmed)) {
+        setQbState("error");
+        setQbMsg("SPS could not save your choice to bill this invoice anyway. Nothing was sent to QuickBooks. Try again.");
+        return;
+      }
+      progressBaselineRef.current = JSON.stringify(confirmed);
+      setIsPersisted(true);
     }
 
     // Not connected to QB or no line items — just save locally.
@@ -20177,11 +20241,20 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           </>}
         </div>}
 
-        {needsCoverageCheck && !String(coverageIssue?.code || "").startsWith("maintenance-service-month-") && (coverageLoading || coverageIssue || coverageError) && (
+        {coverageOverridden ? (
+          <div data-invoice-maintenance-coverage data-invoice-coverage-override role="status" style={{ borderLeft: `3px solid ${T.primary}`, background: T.surfaceAlt, borderRadius: 9, padding: "11px 13px" }}>
+            <div style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>Billing without a coverage match</div>
+            <div style={{ fontSize: 12, lineHeight: 1.45, color: T.textMuted, marginTop: 4 }}>You chose to bill this invoice anyway. {billingReview ? "Once it's confirmed, open the invoice and use Link visits to record which services it covers." : "Use Link visits to record which services it covers."}</div>
+            {canOverrideCoverage && <button type="button" onClick={() => setCoverageOverride(false)} style={{ minHeight: 36, marginTop: 5, padding: "4px 0", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 12, fontWeight: 750, cursor: "pointer" }}>Turn the coverage check back on</button>}
+          </div>
+        ) : needsCoverageCheck && !String(coverageIssue?.code || "").startsWith("maintenance-service-month-") && (coverageLoading || coverageIssue || coverageError) && (
           <div data-invoice-maintenance-coverage role="status" style={{ borderLeft: `3px solid ${T.primary}`, background: T.surfaceAlt, borderRadius: 9, padding: "11px 13px" }}>
             <div style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>{coverageLoading ? "Checking maintenance coverage…" : coverageIssue?.covered ? "This maintenance is already covered" : "Check maintenance coverage before billing"}</div>
-            {!coverageLoading && <div style={{ fontSize: 12, lineHeight: 1.45, color: T.textMuted, marginTop: 4 }}>{coverageError || coverageIssue?.message}{coverageIssue?.months?.length ? ` Month${coverageIssue.months.length === 1 ? "" : "s"} to review: ${coverageIssue.months.join(", ")}.` : ""} You can save progress while you review the service lines.</div>}
-            {!coverageLoading && <button type="button" onClick={loadInvoiceCoverage} style={{ minHeight: 36, marginTop: 5, padding: "4px 0", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 12, fontWeight: 750, cursor: "pointer" }}>Check coverage again</button>}
+            {!coverageLoading && <div style={{ fontSize: 12, lineHeight: 1.45, color: T.textMuted, marginTop: 4 }}>{coverageError || coverageIssue?.message}{coverageIssue?.months?.length ? ` Month${coverageIssue.months.length === 1 ? "" : "s"} to review: ${coverageIssue.months.join(", ")}.` : ""} You can save progress while you review the service lines.{canOverrideCoverage ? " Or bill it anyway and link the visits it covers later." : ""}</div>}
+            {!coverageLoading && <div style={{ display: "flex", gap: 18, flexWrap: "wrap", marginTop: 5 }}>
+              <button type="button" onClick={loadInvoiceCoverage} style={{ minHeight: 36, padding: "4px 0", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 12, fontWeight: 750, cursor: "pointer" }}>Check coverage again</button>
+              {canOverrideCoverage && <button type="button" data-invoice-bill-anyway onClick={() => setCoverageOverride(true)} style={{ minHeight: 36, padding: "4px 0", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 12, fontWeight: 750, cursor: "pointer" }}>Bill anyway</button>}
+            </div>}
           </div>
         )}
 
@@ -20205,7 +20278,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           <div style={{ flex: 1 }}><label style={label}>Due</label><input type="date" style={field} value={toISO(inv.dueDate)} onChange={e => set("dueDate", fromISO(e.target.value))} /></div>
         </div>
 
-        <InvoiceServiceMonth invoice={inv} onChange={(month) => set("serviceMonth", month)} T={T} />
+        <InvoiceServiceMonth invoice={inv} onChange={(month) => set("serviceMonth", month)} T={T} monthOptional={coverageOverridden} onBillAnyway={canOverrideCoverage ? () => setCoverageOverride(true) : null} />
 
         {!billingReview && <div>
           <label style={label}>Status</label>
@@ -20219,8 +20292,12 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         <div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
             <label style={{ ...label, marginBottom: 0 }}>Line Items</label>
-            {!billingReview && completedHistory.length > 0 && <button data-invoice-add-visits onClick={() => setVisitPick(true)} style={{ minHeight: 38, background: hexA(T.primary, 0.07), border: `1px solid ${hexA(T.primary, 0.2)}`, borderRadius: 10, padding: "8px 11px", color: T.primary, fontWeight: 800, fontSize: 12, cursor: "pointer", fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="plus" size={13} /> Add completed visits</button>}
+            {!billingReview && completedHistory.length > 0 && <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+              <button type="button" data-invoice-link-visits disabled={visitLinkBusy} onClick={() => { setVisitPickMode("link"); setVisitPick(true); }} style={{ minHeight: 38, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 10, padding: "8px 11px", color: T.text, fontWeight: 750, fontSize: 12, cursor: visitLinkBusy ? "default" : "pointer", fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 6, opacity: visitLinkBusy ? 0.6 : 1 }}><Icon name="link" size={13} /> {visitLinkBusy ? "Linking…" : "Link visits"}</button>
+              <button data-invoice-add-visits onClick={() => { setVisitPickMode("add"); setVisitPick(true); }} style={{ minHeight: 38, background: hexA(T.primary, 0.07), border: `1px solid ${hexA(T.primary, 0.2)}`, borderRadius: 10, padding: "8px 11px", color: T.primary, fontWeight: 800, fontSize: 12, cursor: "pointer", fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="plus" size={13} /> Add completed visits</button>
+            </div>}
           </div>
+          {visitLinkMsg && <div role="status" style={{ marginBottom: 8, fontSize: 11.5, lineHeight: 1.45, color: T.textMuted }}>{visitLinkMsg}</div>}
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {inv.lineItems.length === 0 && (
               <div style={{ textAlign: "center", padding: "18px 12px", border: `1.5px dashed ${T.border}`, borderRadius: 12, color: T.textMuted, fontSize: 13 }}>
@@ -20460,11 +20537,12 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
       )}
       {visitPick && (
         <InvoiceVisitPicker
+          mode={visitPickMode}
           visits={completedHistory}
           invoices={invoices}
           currentInvoice={inv}
           clientId={client?.id ?? inv.clientId}
-          onAdd={importVisits}
+          onAdd={visitPickMode === "link" ? linkVisits : importVisits}
           onClose={() => setVisitPick(false)}
         />
       )}

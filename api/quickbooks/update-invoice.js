@@ -35,17 +35,21 @@ export default async function handler(req, res) {
   }
 
   const initialMonthIssue = invoiceServiceDescriptionIssue(invoice);
-  if (initialMonthIssue?.code === "maintenance-service-month-conflict") {
-    return res.status(422).json({ error: initialMonthIssue.message, code: initialMonthIssue.code, reviewRequired: true });
-  }
   if (initialMonthIssue) {
     // An explicit saved month match can fill an older undated source invoice.
     // Resolve it before contacting QuickBooks; ordinary missing months still
-    // stop here, before any external accounting request.
-    const coverageIssue = await quickBooksMaintenanceGuard(invoice, { mode: "update", onPreparedInvoice: prepared => { invoice = prepared; } });
-    if (coverageIssue) return res.status(coverageIssue.status).json({ error: coverageIssue.message, code: coverageIssue.code, reviewRequired: true });
-    const unresolved = invoiceServiceDescriptionIssue(invoice);
-    if (unresolved) return res.status(422).json({ error: unresolved.message, code: unresolved.code, reviewRequired: true });
+    // stop here, before any external accounting request. The owner's saved
+    // "bill without a coverage match" decision lifts the month requirement.
+    let overridden = false;
+    const coverageIssue = await quickBooksMaintenanceGuard(invoice, { mode: "update", onPreparedInvoice: prepared => { invoice = prepared; }, onCoverageOverride: () => { overridden = true; } });
+    if (!overridden) {
+      if (initialMonthIssue.code === "maintenance-service-month-conflict") {
+        return res.status(422).json({ error: initialMonthIssue.message, code: initialMonthIssue.code, reviewRequired: true });
+      }
+      if (coverageIssue) return res.status(coverageIssue.status).json({ error: coverageIssue.message, code: coverageIssue.code, reviewRequired: true });
+      const unresolved = invoiceServiceDescriptionIssue(invoice);
+      if (unresolved) return res.status(422).json({ error: unresolved.message, code: unresolved.code, reviewRequired: true });
+    }
   }
 
   // Tokens are read server-side from the store (never passed by the client).
@@ -145,9 +149,10 @@ export default async function handler(req, res) {
       });
     }
 
-    const coverageIssue = await quickBooksMaintenanceGuard(invoice, { mode: "update", existingQuickBooksInvoice: existing, onPreparedInvoice: prepared => { invoice = prepared; } });
+    let coverageOverridden = false;
+    const coverageIssue = await quickBooksMaintenanceGuard(invoice, { mode: "update", existingQuickBooksInvoice: existing, onPreparedInvoice: prepared => { invoice = prepared; }, onCoverageOverride: () => { coverageOverridden = true; } });
     if (coverageIssue) return res.status(coverageIssue.status).json({ error: coverageIssue.message, code: coverageIssue.code, reviewRequired: true });
-    const serviceMonthIssue = invoiceServiceDescriptionIssue(invoice);
+    const serviceMonthIssue = coverageOverridden ? null : invoiceServiceDescriptionIssue(invoice);
     if (serviceMonthIssue) return res.status(422).json({ error: serviceMonthIssue.message, code: serviceMonthIssue.code, reviewRequired: true });
 
     // Step 2: build updated line items. Keep only real ids imported from

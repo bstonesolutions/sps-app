@@ -4,6 +4,7 @@ import { emptyMaintenancePaymentLedger, normalizeMaintenancePaymentLedger } from
 import { buildQuickBooksInvoicePayload } from "../../quickbooksDraftSync.js";
 import { findInvoiceDeletionReferences } from "../../invoiceDeletionGuard.js";
 import { formatInvoiceServiceLineDescription, invoiceServiceDescriptionIssue, invoiceServiceLineMonths } from "../../invoiceServiceDescription.js";
+import { maintenanceCoverageOverride } from "../../maintenanceCoverageOverride.js";
 
 const text = value => String(value == null ? "" : value).trim();
 const list = value => Array.isArray(value) ? value : [];
@@ -100,7 +101,7 @@ function possibleMaintenance(invoice) {
   return !!invoiceMaintenanceCoverageIssue({ invoice, client: { id: "inspection", history: [] }, ledger: null });
 }
 
-export async function quickBooksMaintenanceGuard(invoice, { mode = "create", existingQuickBooksInvoice = null, onPreparedInvoice, trustedCanonicalInvoice = null } = {}) {
+export async function quickBooksMaintenanceGuard(invoice, { mode = "create", existingQuickBooksInvoice = null, onPreparedInvoice, onCoverageOverride, trustedCanonicalInvoice = null } = {}) {
   const incomingLines = list(invoice?.lineItems || invoice?.items);
   // Parts and other extras are not maintenance service charges. This also keeps
   // an unrelated purchase from depending on maintenance-ledger availability.
@@ -125,6 +126,18 @@ export async function quickBooksMaintenanceGuard(invoice, { mode = "create", exi
   const byId = spsId ? invoices.filter(saved => text(saved.id) === spsId) : [];
   const byQb = qbId ? invoices.filter(saved => text(saved.qbId || saved.Id) === qbId) : [];
   const canonical = byId.length === 1 ? byId[0] : byQb.length === 1 ? byQb[0] : null;
+  // The owner chose to bill this invoice without a coverage match. Read the decision only from
+  // the saved record (never the request), for the same client, and skip the coverage and
+  // service-month holds. A second QuickBooks create for an already linked invoice is still refused.
+  const overrideRecord = [trustedCanonicalInvoice, canonical].find(record => maintenanceCoverageOverride(record)
+    && (!text(invoice.clientId) || text(invoice.clientId) === text(record.clientId ?? record.customerId)));
+  if (overrideRecord) {
+    if (mode === "create" && canonical?.qbId) {
+      return review("This maintenance invoice already has a QuickBooks link. Refresh it before syncing again.", "maintenance-invoice-already-linked");
+    }
+    onCoverageOverride?.(maintenanceCoverageOverride(overrideRecord));
+    return null;
+  }
   let candidate = guardCandidate(invoice, canonical);
   const ledger = snapshot.sps_maintenance_billing?.exists
     ? normalizeMaintenancePaymentLedger(snapshot.sps_maintenance_billing.value)

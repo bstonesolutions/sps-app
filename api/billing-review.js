@@ -16,6 +16,7 @@ import { invoiceServiceDescriptionIssue } from "../invoiceServiceDescription.js"
 import { invoiceCompletedVisitSources, reserveCompletedVisitInvoice } from "../invoiceVisitImport.js";
 import { billingReviewAccountingIssue } from "./_billing-review-claims.js";
 import { BILLING_REVIEW_EDIT_FIELDS, BILLING_REVIEW_LINE_EDIT_FIELDS } from "../billingReviewReceipt.js";
+import { maintenanceCoverageOverride, newMaintenanceCoverageOverride } from "../maintenanceCoverageOverride.js";
 
 export const config = { maxDuration: 60 };
 const KEYS = [BILLING_REVIEW_KEY, "sps_invoices", "sps_estimates", "sps_schedule", "sps_clients", "sps_completed", "sps_invoicing", "sps_maintenance_billing"];
@@ -313,6 +314,14 @@ export function createBillingReviewHandler(overrides = {}) {
         const review = await changeReview(id, current => {
           pendingOnly(current); revisionMatches(current, req.body?.expectedRevision);
           const edited = action === "save" ? sanitizeBillingReviewEdit(current, req.body.review) : current;
+          // The owner's "bill without a coverage match" choice. Only whether it is on comes from the
+          // request; who chose it and when are recorded here from the verified owner session.
+          if (action === "save" && Object.hasOwn(req.body.review, "maintenanceCoverageOverride")) {
+            if (!req.body.review.maintenanceCoverageOverride) delete edited.maintenanceCoverageOverride;
+            else if (!maintenanceCoverageOverride(current)) {
+              edited.maintenanceCoverageOverride = newMaintenanceCoverageOverride(actor.email || actor.id, deps.now());
+            }
+          }
           return { ...edited, reviewState: action === "discard" ? "discarded" : "pending", reviewRevision: current.reviewRevision + 1,
             reviewUpdatedAt: nowISO(deps.now), ...(action === "discard" ? { reviewDiscardedAt: nowISO(deps.now) } : {}) };
         });
@@ -339,9 +348,10 @@ export function createBillingReviewHandler(overrides = {}) {
           assertBillable(invoice);
           const client = confirmedSourceCheck(invoice, snapshot);
           const initialPayload = buildQuickBooksInvoicePayload(invoice, client, snapshot.sps_invoicing.value);
-          const coverage = await deps.guard(initialPayload, { trustedCanonicalInvoice: invoice });
+          let coverageOverridden = false;
+          const coverage = await deps.guard(initialPayload, { trustedCanonicalInvoice: invoice, onCoverageOverride: () => { coverageOverridden = true; } });
           if (coverage) throw fail(coverage.status || 409, coverage.code, coverage.message);
-          const monthIssue = invoiceServiceDescriptionIssue(initialPayload);
+          const monthIssue = coverageOverridden ? null : invoiceServiceDescriptionIssue(initialPayload);
           if (monthIssue) throw fail(422, monthIssue.code, monthIssue.message);
           if (!inventory) inventory = await deps.inventory();
           const claims = collectBillingReviewNumberClaims({ invoices: snapshot.sps_invoices.value, reviews: snapshot[BILLING_REVIEW_KEY].value });

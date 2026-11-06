@@ -96,7 +96,7 @@ test("a current maintenance preflight rejection still prevents QB creation and t
     pendingSpsSaveRef: { current: null },
     pendingSpsReceiptRef: { current: null },
     progressState: "idle", qbState: "idle", selectedClientSnapshot: () => draft,
-    editRevisionRef: { current: 0 }, needsCoverageCheck: true,
+    editRevisionRef: { current: 0 }, needsCoverageCheck: true, coverageOverridden: false,
     setQbState: value => { state.qbState = value; }, setQbMsg: value => { state.qbMsg = value; },
     loadInvoiceCoverage: async () => ({ version: 2, policies: {}, allocations: {} }),
     withMatchedMaintenanceServiceMonths: ({ invoice }) => invoice,

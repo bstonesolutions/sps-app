@@ -616,3 +616,27 @@ export function appendCompletedVisitsToInvoice(invoice, visits, { clientId = "" 
     addedLineCount: working.lineItems.length - existingLineItems.length,
   };
 }
+
+// Record that an invoice covers these completed visits without adding any charges, for work
+// billed or sent before its visits were linked. The links use the same source fields as imported
+// visits, so the visits read as billed everywhere and cannot be linked to a second invoice.
+export function linkCompletedVisitsToInvoice(invoice, visits, { clientId = "" } = {}) {
+  const base = invoice && typeof invoice === "object" ? invoice : {};
+  const working = { ...base };
+  const linked = [];
+  list(visits).forEach((visit) => {
+    const source = completedVisitSource(visit, { clientId });
+    if (invoiceContainsCompletedVisit(working, visit, { clientId })) return;
+    working.sourceStopIds = [...new Set([...list(working.sourceStopIds).map(text), source.sourceStopId].filter(Boolean))];
+    if (source.sourceCompletionReceiptId) {
+      working.sourceCompletionReceiptIds = [...new Set([
+        ...list(working.sourceCompletionReceiptIds).map(text),
+        source.sourceCompletionReceiptId,
+      ].filter(Boolean))];
+    }
+    working.sourceVisitClientIds = [...new Set([...list(working.sourceVisitClientIds).map(text), text(clientId)].filter(Boolean))];
+    if (working.sourceVisitClientIds.length === 1) working.sourceVisitClientId = working.sourceVisitClientIds[0];
+    linked.push(source.key);
+  });
+  return { invoice: working, linkedVisitKeys: linked };
+}
