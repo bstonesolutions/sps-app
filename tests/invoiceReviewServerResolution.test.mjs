@@ -17,8 +17,9 @@ const copy = value => structuredClone(value);
 const local = extra => ({ id: "local-1", qbId: "101", number: "2001", clientId: "client-1", clientName: "Generic Client", qbCustomerId: "10",
   total: 90, balance: 90, status: "Draft", locallyEdited: true, qbSyncStatus: "conflict", qbNeedsReview: true,
   sourceStopId: "stop-1", notes: "Keep this internal note", lineItems: [{ id: "local-line", qbLineId: "1", desc: "Service", qty: "1", unitPrice: "90", unitCost: "30", costKnown: true }], ...extra });
+// The mapper derives Overdue from the real clock, so keep DueDate far ahead to stay "Sent".
 const remote = extra => ({ Id: "101", SyncToken: "4", DocNumber: "2001", TotalAmt: 110, Balance: 25,
-  CustomerRef: { value: "10", name: "Generic Client" }, TxnDate: "2026-10-20", DueDate: "2026-11-04", EmailStatus: "EmailSent",
+  CustomerRef: { value: "10", name: "Generic Client" }, TxnDate: "2026-10-20", DueDate: "2099-12-31", EmailStatus: "EmailSent",
   Line: [{ Id: "1", DetailType: "SalesItemLineDetail", Amount: 110, Description: "Service", SalesItemLineDetail: { Qty: 1, UnitPrice: 110, ItemRef: { value: "8", name: "Services" }, TaxCodeRef: { value: "NON" } } }], ...extra });
 const response = (body, status = 200) => ({ ok: status >= 200 && status < 300, status,
   json: async () => copy(body), text: async () => JSON.stringify(body) });
