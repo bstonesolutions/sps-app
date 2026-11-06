@@ -2,6 +2,8 @@ import { estimateTaxMigrationImpact, estimateToDraftInvoice } from "./estimateIn
 import { unlinkUnpaidInvoiceCoverage } from "./invoiceBulkDeletion.js";
 import { emptyMaintenancePaymentLedger, normalizeMaintenancePaymentLedger } from "./maintenancePaymentLedger.js";
 import { invoiceCompletedVisitSources } from "./invoiceVisitImport.js";
+import { isMaintenanceServiceLine } from "./maintenanceServiceLine.js";
+import { invoiceServiceLineMonths } from "./invoiceServiceDescription.js";
 
 export const BILLING_REVIEW_KEY = "sps_billing_reviews";
 const text = value => String(value == null ? "" : value).trim();
@@ -139,4 +141,86 @@ export function prepareEstimateBillingReview({ estimate, client, invoicing = {},
   // The converter validates matching quote/tax totals; this non-accounting sentinel is discarded.
   const candidate = estimateToDraftInvoice(source, { client, number: "billing-review", issueDate: format(date), dueDate: format(due), dueDays: days, defaultTaxRate: invoicing.taxRate, paymentTerms: invoicing.terms, createdAt: date.getTime() });
   return makeBillingReview(candidate, { now });
+}
+
+const MERGE_SOURCE_KEYS = [["sourceStopId", "sourceStopIds"], ["sourceCompletionReceiptId", "sourceCompletionReceiptIds"], ["sourceVisitClientId", "sourceVisitClientIds"]];
+const mergeIssue = (status, code, message) => Object.assign(new Error(message), { status, code });
+const isMaintenanceReview = review => text(review?.source) === "monthly-maintenance";
+const wholeInvoiceDiscount = review => ["amt", "pct"].includes(text(review?.discountType)) && Number(review?.discount || 0) > 0;
+const rate = value => Number.isFinite(Number(value || 0)) ? Number(value || 0) : NaN;
+
+/** The owner combines pending reviews for one client into one invoice. Every moved line keeps
+ * its own visits and whether it is a maintenance charge; the reviews merged away become
+ * discarded tombstones pointing at the survivor, so their numbers and identities stay held.
+ * An estimate review survives (its identity is validated against the estimate), then a monthly
+ * maintenance review (completion finds it by its period), then the review the owner has open.
+ */
+export function planBillingReviewMerge({ target, others = [], now = Date.now() } = {}) {
+  const records = [target, ...list(others)];
+  if (!list(others).length) throw mergeIssue(400, "billing_review_merge_empty", "Choose at least one review to merge.");
+  if (records.length > 21) throw mergeIssue(400, "billing_review_merge_too_many", "Merge up to 20 reviews at a time.");
+  if (!records.every(isBillingReview)) throw mergeIssue(409, "billing_review_merge_invalid", "Only billing reviews can be merged.");
+  if (new Set(records.map(review => text(review.id))).size !== records.length) throw mergeIssue(400, "billing_review_merge_duplicate", "Choose each review only once.");
+  if (records.some(review => review.reviewState !== "pending" || (review.approval && review.approval.state !== "rejected") || review.approval?.writeStartedAt || review.approval?.qbResult)) {
+    throw mergeIssue(409, "billing_review_locked", "A review that is syncing with QuickBooks can't be merged. Finish or retry its sync first.");
+  }
+  if (records.some(review => text(review.clientId) !== text(target.clientId))) throw mergeIssue(409, "billing_review_merge_client", "Only reviews for the same client can be merged.");
+  const estimates = records.filter(review => text(review.sourceEstimateId));
+  if (estimates.length > 1) throw mergeIssue(409, "billing_review_merge_estimates", "Two of these reviews come from different estimates. Confirm them as separate invoices.");
+  const survivor = estimates[0] || (isMaintenanceReview(target) ? target : records.find(isMaintenanceReview)) || target;
+  const merged = records.filter(review => review !== survivor);
+  const rates = [...new Set(records.filter(review => list(review.lineItems).some(line => line?.taxable)).map(review => rate(review.taxRate)))];
+  if (rates.length > 1 || rates.some(Number.isNaN)) throw mergeIssue(422, "billing_review_merge_tax", "These reviews use different tax rates. Set the same tax rate on each before merging.");
+  if (records.some(wholeInvoiceDiscount)) throw mergeIssue(422, "billing_review_merge_discount", "A whole-invoice discount can't be carried into a merge. Remove it, merge, then add the discount to the merged invoice.");
+
+  const usedIds = new Set(list(survivor.lineItems).map(line => text(line?.id)).filter(Boolean));
+  const movedLines = merged.flatMap(review => list(review.lineItems).map((line, index) => {
+    const next = copy(line);
+    const base = text(next.id) || `line_${index + 1}`;
+    let id = base;
+    for (let suffix = 1; !id || usedIds.has(id); suffix += 1) id = `${base}_merged_${suffix}`;
+    usedIds.add(id);
+    next.id = id;
+    // A line's charge type comes from its own review. Carry it explicitly so the survivor's
+    // source (for example monthly maintenance) neither adds nor drops maintenance coverage.
+    const maintenance = isMaintenanceServiceLine(review, next);
+    if (maintenance && !isMaintenanceServiceLine(survivor, next)) next.maintenanceService = true;
+    if (!maintenance && isMaintenanceServiceLine(survivor, next)) next.billSeparately = true;
+    if (maintenance && !text(next.serviceMonth)) {
+      const months = invoiceServiceLineMonths(review, next);
+      if (months.length === 1 && !invoiceServiceLineMonths({ ...review, serviceMonth: "", autoPeriod: "" }, next).length) next.serviceMonth = months[0];
+    }
+    return next;
+  }));
+  const lineItems = [...list(survivor.lineItems).map(copy), ...movedLines];
+  if (lineItems.length > 300) throw mergeIssue(422, "billing_review_merge_too_large", "The merged invoice would have more than 300 lines. Merge fewer reviews.");
+
+  const sources = {};
+  for (const [single, plural] of MERGE_SOURCE_KEYS) {
+    const values = [...new Set(records.flatMap(review => [text(review[single]), ...list(review[plural]).map(text)]).filter(Boolean))];
+    if (values.length) sources[plural] = values;
+  }
+  const notes = [...new Set([survivor, ...merged].map(review => text(review.notes)).filter(Boolean))].join("\n\n").slice(0, 20000);
+  const taxRate = rates.length && !list(survivor.lineItems).some(line => line?.taxable)
+    ? records.find(review => list(review.lineItems).some(line => line?.taxable)).taxRate : survivor.taxRate;
+  const at = stamp(now);
+  const nextSurvivor = {
+    ...copy(survivor), ...sources, lineItems, taxRate,
+    title: text(survivor.title) || merged.map(review => text(review.title)).find(Boolean) || survivor.title,
+    ...(notes || survivor.notes != null ? { notes } : {}),
+    reviewMergedFrom: [...new Set([...list(survivor.reviewMergedFrom), ...merged.map(review => text(review.id))])],
+    reviewRevision: survivor.reviewRevision + 1, reviewUpdatedAt: at,
+  };
+  const tombstones = merged.map(review => {
+    const moved = { lineItems: copy(list(review.lineItems)) };
+    for (const keys of MERGE_SOURCE_KEYS) for (const key of keys) if (review[key] != null) moved[key] = copy(review[key]);
+    const tombstone = {
+      ...copy(review), lineItems: [], reviewState: "discarded", discardReason: "merged", reviewMergedInto: survivor.id,
+      reviewMergedAt: at, reviewDiscardedAt: at, reviewRevision: review.reviewRevision + 1, reviewUpdatedAt: at,
+      billingReviewAudit: { ...(review.billingReviewAudit || {}), mergedInto: { id: survivor.id, at, moved } },
+    };
+    for (const keys of MERGE_SOURCE_KEYS) for (const key of keys) delete tombstone[key];
+    return tombstone;
+  });
+  return { survivor: nextSurvivor, merged: tombstones, mergedIds: merged.map(review => text(review.id)) };
 }

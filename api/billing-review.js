@@ -68,6 +68,7 @@ export function sanitizeBillingReviewEdit(review, requested) {
       // Source identities are retained from canonical work, never accepted from a body.
       for (const key of sourceFields) if (original && Object.hasOwn(original, key)) next[key] = copy(original[key]);
       if (original?.maintenanceService === true) next.maintenanceService = true;
+      if (original?.billSeparately === true) next.billSeparately = true;
       return next;
     });
   }
@@ -260,7 +261,7 @@ export function createBillingReviewHandler(overrides = {}) {
         return res.status(200).json({ ok: true, reviews: snapshot[BILLING_REVIEW_KEY].value.filter(row => row.recordType === "billing-review"), version: snapshot[BILLING_REVIEW_KEY].version });
       }
       const action = text(req.body?.action);
-      if (!["save", "discard", "migrate", "confirm", "retry", "from-estimate", "prepare-estimate", "available-numbers"].includes(action)) throw fail(400, "billing_review_action_invalid", "Choose a billing review action.");
+      if (!["save", "discard", "merge", "migrate", "confirm", "retry", "from-estimate", "prepare-estimate", "available-numbers"].includes(action)) throw fail(400, "billing_review_action_invalid", "Choose a billing review action.");
       if (action === "available-numbers") {
         const snapshot = await read([BILLING_REVIEW_KEY, "sps_invoices", "sps_invoicing"]);
         const inventory = await deps.inventory();
@@ -326,6 +327,35 @@ export function createBillingReviewHandler(overrides = {}) {
             reviewUpdatedAt: nowISO(deps.now), ...(action === "discard" ? { reviewDiscardedAt: nowISO(deps.now) } : {}) };
         });
         return res.status(200).json({ ok: true, review });
+      }
+
+      if (action === "merge") {
+        const requested = list(req.body?.mergeReviews);
+        if (!requested.length || requested.some(row => !text(row?.id) || text(row.id).length > 320)) throw fail(400, "billing_review_merge_empty", "Choose the reviews to merge.");
+        for (let attempt = 0; attempt < 6; attempt += 1) {
+          const snapshot = await read([BILLING_REVIEW_KEY, "sps_estimates", "sps_schedule"]);
+          const rows = snapshot[BILLING_REVIEW_KEY].value;
+          const target = reviewedRecord(rows, id);
+          revisionMatches(target, req.body?.expectedRevision);
+          const others = requested.map(row => {
+            const review = reviewedRecord(rows, row.id);
+            revisionMatches(review, row.expectedRevision);
+            return review;
+          });
+          const plan = billingReviewDomain.planBillingReviewMerge({ target, others, now: deps.now() });
+          const replaced = new Map([plan.survivor, ...plan.merged].map(review => [text(review.id), review]));
+          const merged = new Set(plan.mergedIds);
+          // Stops and estimates waiting on a merged-away review now wait on the survivor.
+          const retarget = record => merged.has(text(record?.linkedBillingReviewId)) ? { ...record, linkedBillingReviewId: plan.survivor.id } : record;
+          const estimates = snapshot.sps_estimates.value.map(retarget);
+          const schedule = snapshot.sps_schedule.value.map(day => list(day?.stops).some(stop => retarget(stop) !== stop)
+            ? { ...day, stops: day.stops.map(retarget) } : day);
+          const changes = { [BILLING_REVIEW_KEY]: rows.map(row => replaced.get(text(row.id)) || row),
+            ...(estimates.some((row, index) => row !== snapshot.sps_estimates.value[index]) ? { sps_estimates: estimates } : {}),
+            ...(schedule.some((day, index) => day !== snapshot.sps_schedule.value[index]) ? { sps_schedule: schedule } : {}) };
+          if ((await commit(snapshot, changes, [], actor.id)).applied) return res.status(200).json({ ok: true, review: plan.survivor, merged: plan.merged });
+        }
+        throw fail(409, "billing_review_contention", "Billing records changed repeatedly. Refresh and try again.");
       }
 
       const chosenNumber = normalizeBillingReviewInvoiceNumber(req.body?.invoiceNumber);
