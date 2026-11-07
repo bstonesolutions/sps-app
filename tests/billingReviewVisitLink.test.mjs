@@ -209,3 +209,32 @@ test("a held review is released for editing only when QuickBooks proved nothing 
     }
   }
 });
+
+test("a number QuickBooks says is taken is explained plainly and skipped on the next confirm", async () => {
+  const h = harness({ reviews: [review("iv_dup")] });
+  const used = [];
+  let qbNumbers = [];
+  const handler = createBillingReviewHandler({
+    authorize: async () => ({ id: "owner", email: "owner@example.com" }),
+    read: async keys => Object.fromEntries(keys.map(name => [name, clone(h.rows[name] || { key: name, exists: false, version: 0, value: null })])),
+    cas: async (name, version, value) => { h.rows[name] = { key: name, exists: true, version: version + 1, value: clone(value) }; return { applied: true }; },
+    batch: async operations => { for (const op of operations) if (!op.checkOnly) h.rows[op.key] = { key: op.key, exists: true, version: op.expectedVersion + 1, value: clone(op.value) }; return { applied: true }; },
+    now: () => Date.parse(now), uuid: () => `attempt-${used.length}`, guard: async () => null,
+    inventory: async () => ({ realmId: "realm-1", numbers: qbNumbers, checkedAt: now }),
+    createInvoice: async (req, res) => {
+      used.push(req.body.invoice.number);
+      if (used.length === 1) return res.status(500).json({ createRejected: true,
+        error: "QuickBooks rejected the invoice: Duplicate Document Number Error — Duplicate Document Number Error : You must specify a different number. This number has already been used. DocNumber=INV-1001 is assigned to TxnType=Credit Memo with TxnId=3207" });
+      return res.status(500).json({ createRejected: true, error: "stop here" });
+    },
+  });
+  const call = async body => { const out = response(); await handler({ method: "POST", headers: {}, body }, out); return out; };
+  const first = await call({ action: "confirm", reviewId: "iv_dup", expectedRevision: 1 });
+  assert.equal(first.statusCode, 422);
+  assert.equal(first.body.error, "QuickBooks already uses number INV-1001 on a credit memo. Confirm again with Automatic and SPS will use the next free number.");
+  assert.equal(h.review("iv_dup").reviewState, "pending");
+  // The number check now reads credit memos too, so the taken number is in the inventory.
+  qbNumbers = ["INV-1001"];
+  await call({ action: "confirm", reviewId: "iv_dup", expectedRevision: h.review("iv_dup").reviewRevision });
+  assert.deepEqual(used, ["INV-1001", "INV-1002"]);
+});

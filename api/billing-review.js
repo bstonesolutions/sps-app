@@ -276,6 +276,12 @@ export function createBillingReviewHandler(overrides = {}) {
       // checked and has no invoice with this number, and then refused the retry: nothing was billed.
       const released = !!approval.writeStartedAt && result.createRejected === true && result.recoveryAbsentConfirmed === true;
       const unknown = !released && (result.createOutcomeUnknown || (context.writeStarted && !result.createRejected) || !!approval.writeStartedAt);
+      // QuickBooks' own wording names the other form; say it plainly. The next confirm checks
+      // every numbered sales form, so Automatic moves past this number.
+      if (result.createRejected === true && /Duplicate Document Number/i.test(text(result.error))) {
+        const form = text(text(result.error).match(/TxnType=([A-Za-z ]+?) with/)?.[1]).toLowerCase();
+        result.error = `QuickBooks already uses number ${approval.number}${form ? ` on a ${form}` : ""}. Confirm again with Automatic and SPS will use the next free number.`;
+      }
       const next = await changeReview(review.id, current => {
         const { writeStartedAt, ...kept } = current.approval || {};
         return { ...current,

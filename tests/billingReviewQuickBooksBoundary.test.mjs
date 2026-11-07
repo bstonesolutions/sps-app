@@ -51,17 +51,22 @@ test("recovery posts the saved QB wire payload without rebuilding customers, ite
   assert.match(posts[0].href, /requestid=sps-/); assert.equal(calls.some(call => /customer|item|send|email/.test(call.href)), false);
 });
 
-// A fake QuickBooks invoice collection: COUNT(*) reports `counted`, pages read `invoices`.
-function quickBooksInvoices(invoices, { counted = invoices.length } = {}) {
-  const seen = { pages: [], inFlight: 0, maxInFlight: 0 };
+// A fake QuickBooks company: COUNT(*) reports `counted`, invoice pages read `invoices`, and the
+// other numbered sales forms (credit memos, sales receipts, refund receipts) read `others`.
+function quickBooksInvoices(invoices, { counted = invoices.length, others = {} } = {}) {
+  const seen = { pages: [], forms: new Set(), inFlight: 0, maxInFlight: 0 };
   globalThis.fetch = async url => {
     const href = String(url);
     if (href.includes("/qb_tokens?")) return response(tokens);
     const query = new URL(href).searchParams.get("query");
     assert.doesNotMatch(query, /WHERE/i);
-    if (/COUNT\(\*\)/.test(query)) return response({ QueryResponse: { totalCount: counted } });
+    const entity = query.match(/FROM (\w+)/)[1];
+    seen.forms.add(entity);
+    const rows = entity === "Invoice" ? invoices : (others[entity] || []);
+    if (/COUNT\(\*\)/.test(query)) return response({ QueryResponse: { totalCount: entity === "Invoice" ? counted : rows.length } });
     const start = Number(query.match(/STARTPOSITION (\d+)/)[1]);
     assert.match(query, /MAXRESULTS 1000$/);
+    if (entity !== "Invoice") return response({ QueryResponse: { [entity]: rows.slice(start - 1, start + 999) } });
     seen.pages.push(start); seen.inFlight += 1; seen.maxInFlight = Math.max(seen.maxInFlight, seen.inFlight);
     await new Promise(resolve => setTimeout(resolve, 5));
     seen.inFlight -= 1;
@@ -69,6 +74,17 @@ function quickBooksInvoices(invoices, { counted = invoices.length } = {}) {
   };
   return seen;
 }
+
+test("numbers used by credit memos, sales receipts and refund receipts are never offered", async () => {
+  const { firstUnusedInvoiceNumber } = await import("../api/_billing-review-numbering.js");
+  const seen = quickBooksInvoices([{ Id: "1", DocNumber: "1633" }], { others: {
+    CreditMemo: [{ Id: "3207", DocNumber: "1634" }], SalesReceipt: [{ Id: "1", DocNumber: "1635" }], RefundReceipt: [{ Id: "9", DocNumber: "1636" }] } });
+  const inventory = await readQuickBooksInvoiceNumberInventory();
+  assert.deepEqual([...seen.forms].sort(), ["CreditMemo", "Invoice", "RefundReceipt", "SalesReceipt"]);
+  for (const number of ["1633", "1634", "1635", "1636"]) assert.ok(inventory.numbers.includes(number), number);
+  assert.equal(inventory.invoiceCount, 1);
+  assert.equal(firstUnusedInvoiceNumber(inventory.numbers, { nextNumber: 1633, numberPrefix: "" }), "1637");
+});
 const invoiceRows = count => Array.from({ length: count }, (_, index) => ({ Id: String(index + 1), DocNumber: String(index + 1001), ...(index === 0 ? { TxnStatus: "Voided" } : {}) }));
 
 test("QB number inventory includes all pages and void invoices and fails on incomplete pages", async () => {
