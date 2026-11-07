@@ -136,3 +136,21 @@ test("internal evidence is outside the shared customer document and customer inv
   const css = await readFile(new URL("../invoiceVisitPanel.css", import.meta.url), "utf8");
   assert.match(css, /@media print\s*\{\s*\.iv-visit-panel\s*\{\s*display:\s*none\s*!important/);
 });
+
+test("an editor can offer linking each client visit without the panel changing charges", () => {
+  const offered = [];
+  const html = render({
+    invoice: { id: "review-1", clientId: "client-1", lineItems: [] },
+    client: { id: "client-1", history: [visit(), visit({ sid: "stop-2", completionReceiptId: "receipt-2", date: "09/19/2026", type: "Monthly Service" })] },
+    status: "Linked the Monthly Service on 09/19/2026. Charges didn't change.",
+    renderVisitAction: (entry, linked) => { offered.push([entry.sid, linked]); return React.createElement("button", { type: "button", "data-test-link": entry.sid }, "Link to this invoice"); },
+  });
+  assert.deepEqual(offered.sort(), [["stop-1", false], ["stop-2", false]]);
+  assert.match(html, /data-test-link="stop-1"/);
+  assert.match(html, /data-test-link="stop-2"/);
+  assert.match(html, /role="status"[^>]*>Linked the Monthly Service on 09\/19\/2026\. Charges didn&#x27;t change\./);
+  assert.match(html, /Link one to record that this invoice covers it/);
+  // A read-only panel offers nothing.
+  const readOnly = render({ invoice: { id: "review-1", clientId: "client-1", lineItems: [] } });
+  assert.doesNotMatch(readOnly, /Link one to record/);
+});

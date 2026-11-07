@@ -16,7 +16,7 @@ const dateLabel = value => {
 };
 const Chevron = () => <svg className="iv-visit-chevron" viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><path d="m7 4 6 6-6 6" /></svg>;
 
-function VisitReport({ entry, linked, defaultOpen = false, renderPhotos }) {
+function VisitReport({ entry, linked, defaultOpen = false, renderPhotos, renderAction }) {
   const notes = text(entry.notes);
   const officeNotes = text(entry.officeNotes);
   const services = list(entry.services).map(nameOf).filter(Boolean);
@@ -41,6 +41,7 @@ function VisitReport({ entry, linked, defaultOpen = false, renderPhotos }) {
     </summary>
     <div className="iv-visit-report-body">
       {!linked && <p className="iv-visit-unlinked-note">Client history only • This visit is not linked to this invoice</p>}
+      {renderAction?.(entry, !!linked)}
       <div className="iv-visit-narrative">
         <section><h4>What the crew reported</h4>{notes ? <p className="iv-visit-notes">{notes}</p> : <p className="iv-visit-muted">No work notes were saved for this visit</p>}
           {services.length > 0 && <div className="iv-visit-services"><span>Services recorded</span><p>{services.join(" · ")}</p></div>}
@@ -66,21 +67,23 @@ function VisitReport({ entry, linked, defaultOpen = false, renderPhotos }) {
 }
 
 // Staff-only inspection. Never render this in InvoiceDocument, customer email, or PDF.
-// Opening a report does not import charges, alter links, or save invoice changes.
-export default function InvoiceVisitPanel({ invoice, client, schedule = [], T, renderPhotos }) {
+// Opening a report does not import charges, alter links, or save invoice changes. An editor may
+// pass renderVisitAction to offer linking a visit to the invoice; it never changes charges.
+export default function InvoiceVisitPanel({ invoice, client, schedule = [], T, renderPhotos, renderVisitAction, status = "" }) {
   const source = useMemo(() => invoiceVisitDetails({ invoice, client, schedule }), [invoice, client, schedule]);
   const [query, setQuery] = useState("");
   const [showAll, setShowAll] = useState(false);
   const candidates = source.candidates.filter(({ entry }) => [dateLabel(entry.date), entry.date, entry.type, entry.tech, entry.notes, ...list(entry.productsUsed).map(nameOf), ...list(entry.treatmentsUsed).map(nameOf), ...list(entry.partsUsed).map(nameOf), ...list(entry.productsPurchased).map(nameOf)].join(" ").toLowerCase().includes(query.toLowerCase()));
   return <section className="iv-visit-panel" aria-label="Visit details for this invoice" style={{ "--visit-accent": T.primary, "--visit-text": T.text, "--visit-muted": T.textMuted, "--visit-border": T.border, "--visit-surface": T.surface, "--visit-subtle": T.surfaceAlt }}>
     <header><div><h3>Visit details</h3><p className="iv-visit-client">{text(client?.name) || "Saved crew reports"}</p></div><span className="iv-visit-private">Internal only</span></header>
-    {source.visits.map(({ key, entry }) => <VisitReport key={key} entry={entry} linked defaultOpen={source.visits.length === 1} renderPhotos={renderPhotos} />)}
+    {status && <p className="iv-visit-link-status" role="status">{status}</p>}
+    {source.visits.map(({ key, entry }) => <VisitReport key={key} entry={entry} linked defaultOpen={source.visits.length === 1} renderPhotos={renderPhotos} renderAction={renderVisitAction} />)}
     {source.missing.length > 0 && <div className="iv-visit-missing" role="status"><strong>Linked report needs checking</strong>{source.missing.map(issue => <p key={issue.key}>{issue.message}</p>)}</div>}
     {!source.visits.length && !source.missing.length && <div className="iv-visit-empty"><strong>No visit linked</strong><p>{client ? "Browse this client’s saved visits below to check the work" : "Choose the invoice client to see their saved visits"}</p></div>}
     {source.candidates.length > 0 && <details className="iv-visit-browse"><summary><span>Browse client visits <span className="iv-visit-count">{source.candidates.length}</span></span><Chevron /></summary><div>
-      <p className="iv-visit-caption">Opening a visit here does not add it or its charges to the invoice</p>
+      <p className="iv-visit-caption">{renderVisitAction ? "Opening a visit here does not add it or its charges to the invoice. Link one to record that this invoice covers it" : "Opening a visit here does not add it or its charges to the invoice"}</p>
       <input aria-label="Search client visits" placeholder="Date or work performed" type="search" value={query} onChange={event => { setQuery(event.target.value); setShowAll(false); }} />
-      {(showAll ? candidates : candidates.slice(0, 8)).map(({ key, entry }) => <VisitReport key={key} entry={entry} renderPhotos={renderPhotos} />)}
+      {(showAll ? candidates : candidates.slice(0, 8)).map(({ key, entry }) => <VisitReport key={key} entry={entry} renderPhotos={renderPhotos} renderAction={renderVisitAction} />)}
       {!candidates.length && <p className="iv-visit-muted">No visits match your search</p>}
       {!showAll && candidates.length > 8 && <button type="button" onClick={() => setShowAll(true)}>Show all {candidates.length} visits</button>}
     </div></details>}

@@ -1,7 +1,7 @@
 import { estimateTaxMigrationImpact, estimateToDraftInvoice } from "./estimateInvoiceConversion.js";
 import { unlinkUnpaidInvoiceCoverage } from "./invoiceBulkDeletion.js";
 import { emptyMaintenancePaymentLedger, normalizeMaintenancePaymentLedger } from "./maintenancePaymentLedger.js";
-import { invoiceCompletedVisitSources } from "./invoiceVisitImport.js";
+import { completedVisitSource, invoiceCompletedVisitSources, invoiceContainsCompletedVisit, linkCompletedVisitsToInvoice } from "./invoiceVisitImport.js";
 import { isMaintenanceServiceLine } from "./maintenanceServiceLine.js";
 import { invoiceServiceLineMonths } from "./invoiceServiceDescription.js";
 
@@ -145,6 +145,50 @@ export function prepareEstimateBillingReview({ estimate, client, invoicing = {},
 
 const MERGE_SOURCE_KEYS = [["sourceStopId", "sourceStopIds"], ["sourceCompletionReceiptId", "sourceCompletionReceiptIds"], ["sourceVisitClientId", "sourceVisitClientIds"]];
 const mergeIssue = (status, code, message) => Object.assign(new Error(message), { status, code });
+const stableJSON = value => JSON.stringify(value, (_key, item) => (item && typeof item === "object" && !Array.isArray(item)
+  ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item));
+
+/** The one saved completed-visit report for this key in the client's history. Exact duplicate
+ * copies count as one report; different saved versions are never chosen between silently. */
+export function billingReviewVisitByKey(client, visitKey) {
+  const key = text(visitKey);
+  const found = new Map();
+  for (const entry of list(client?.history)) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    if (text(entry.clientId) && text(entry.clientId) !== text(client.id)) continue;
+    if (key && completedVisitSource(entry, { clientId: client.id }).key === key) found.set(stableJSON(entry), entry);
+  }
+  if (found.size === 1) return [...found.values()][0];
+  throw found.size
+    ? mergeIssue(409, "billing_review_visit_ambiguous", "This visit has more than one saved version. Check the client's visit history before linking it.")
+    : mergeIssue(409, "billing_review_visit_missing", "This visit is no longer in the client's saved history. Refresh and try again.");
+}
+
+/** The owner says a completed visit belongs to this review (or no longer does). It records only
+ * which visit the invoice covers: charges never change. Only a visit linked this way can be
+ * unlinked again; the visits a review was built from stay attached to it. */
+export function linkBillingReviewVisit({ review, visit, clientId, linked = true, actor = "", now = Date.now() } = {}) {
+  const source = completedVisitSource(visit, { clientId });
+  const handLinked = list(review.reviewLinkedVisits);
+  if (linked) {
+    if (invoiceContainsCompletedVisit(review, visit, { clientId })) return { changed: false, review };
+    const { invoice } = linkCompletedVisitsToInvoice(review, [visit], { clientId });
+    return { changed: true, review: { ...invoice, reviewLinkedVisits: [...handLinked.filter(row => text(row?.key) !== source.key),
+      { key: source.key, sourceStopId: source.sourceStopId, ...(source.sourceCompletionReceiptId ? { sourceCompletionReceiptId: source.sourceCompletionReceiptId } : {}),
+        linkedAt: stamp(now), ...(text(actor) ? { linkedBy: text(actor) } : {}) }] } };
+  }
+  const entry = handLinked.find(row => text(row?.key) === source.key);
+  if (!entry) {
+    if (!invoiceContainsCompletedVisit(review, visit, { clientId })) return { changed: false, review };
+    throw mergeIssue(409, "billing_review_visit_original", "This review was created from this visit, so it stays linked.");
+  }
+  const without = (values, value) => list(values).map(text).filter(id => id && id !== text(value));
+  const next = { ...review, sourceStopIds: without(review.sourceStopIds, entry.sourceStopId),
+    reviewLinkedVisits: handLinked.filter(row => row !== entry) };
+  if (text(entry.sourceCompletionReceiptId)) next.sourceCompletionReceiptIds = without(review.sourceCompletionReceiptIds, entry.sourceCompletionReceiptId);
+  if (!next.reviewLinkedVisits.length) delete next.reviewLinkedVisits;
+  return { changed: true, review: next };
+}
 const isMaintenanceReview = review => text(review?.source) === "monthly-maintenance";
 const wholeInvoiceDiscount = review => ["amt", "pct"].includes(text(review?.discountType)) && Number(review?.discount || 0) > 0;
 const rate = value => Number.isFinite(Number(value || 0)) ? Number(value || 0) : NaN;
@@ -200,6 +244,9 @@ export function planBillingReviewMerge({ target, others = [], now = Date.now() }
     const values = [...new Set(records.flatMap(review => [text(review[single]), ...list(review[plural]).map(text)]).filter(Boolean))];
     if (values.length) sources[plural] = values;
   }
+  // Visits the owner linked by hand stay unlinkable on the survivor.
+  const handLinked = [...new Map(records.flatMap(review => list(review.reviewLinkedVisits)).filter(row => text(row?.key)).map(row => [text(row.key), row])).values()];
+  if (handLinked.length) sources.reviewLinkedVisits = handLinked;
   const notes = [...new Set([survivor, ...merged].map(review => text(review.notes)).filter(Boolean))].join("\n\n").slice(0, 20000);
   const taxRate = rates.length && !list(survivor.lineItems).some(line => line?.taxable)
     ? records.find(review => list(review.lineItems).some(line => line?.taxable)).taxRate : survivor.taxRate;
@@ -214,12 +261,14 @@ export function planBillingReviewMerge({ target, others = [], now = Date.now() }
   const tombstones = merged.map(review => {
     const moved = { lineItems: copy(list(review.lineItems)) };
     for (const keys of MERGE_SOURCE_KEYS) for (const key of keys) if (review[key] != null) moved[key] = copy(review[key]);
+    if (review.reviewLinkedVisits != null) moved.reviewLinkedVisits = copy(review.reviewLinkedVisits);
     const tombstone = {
       ...copy(review), lineItems: [], reviewState: "discarded", discardReason: "merged", reviewMergedInto: survivor.id,
       reviewMergedAt: at, reviewDiscardedAt: at, reviewRevision: review.reviewRevision + 1, reviewUpdatedAt: at,
       billingReviewAudit: { ...(review.billingReviewAudit || {}), mergedInto: { id: survivor.id, at, moved } },
     };
     for (const keys of MERGE_SOURCE_KEYS) for (const key of keys) delete tombstone[key];
+    delete tombstone.reviewLinkedVisits;
     return tombstone;
   });
   return { survivor: nextSurvivor, merged: tombstones, mergedIds: merged.map(review => text(review.id)) };

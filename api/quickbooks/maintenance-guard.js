@@ -101,7 +101,9 @@ function possibleMaintenance(invoice) {
   return !!invoiceMaintenanceCoverageIssue({ invoice, client: { id: "inspection", history: [] }, ledger: null });
 }
 
-export async function quickBooksMaintenanceGuard(invoice, { mode = "create", existingQuickBooksInvoice = null, onPreparedInvoice, onCoverageOverride, trustedCanonicalInvoice = null } = {}) {
+// `snapshot`: rows of these same keys a trusted caller already read in this request and fenced
+// for its write (billing review confirm), so the check doesn't download them again.
+export async function quickBooksMaintenanceGuard(invoice, { mode = "create", existingQuickBooksInvoice = null, onPreparedInvoice, onCoverageOverride, trustedCanonicalInvoice = null, snapshot: providedSnapshot = null } = {}) {
   const incomingLines = list(invoice?.lineItems || invoice?.items);
   // Parts and other extras are not maintenance service charges. This also keeps
   // an unrelated purchase from depending on maintenance-ledger availability.
@@ -110,7 +112,7 @@ export async function quickBooksMaintenanceGuard(invoice, { mode = "create", exi
     && Number(line.qty ?? 1) * Number(line.unitPrice ?? line.rate ?? 0) > 0)) return null;
   let snapshot;
   try {
-    snapshot = await readAppStatesVersioned(keys);
+    snapshot = providedSnapshot && keys.every(key => providedSnapshot[key]) ? providedSnapshot : await readAppStatesVersioned(keys);
   } catch (_) {
     return review("Payment coverage could not be checked. Try again before sending this invoice to QuickBooks.", "maintenance-coverage-unavailable", 503);
   }

@@ -54,6 +54,7 @@ export default async function handler(req, res) {
   let coverageOverridden = !!(reviewContext && maintenanceCoverageOverride(reviewContext.canonicalInvoice));
   const coverageIssue = reviewContext?.recovering ? null : await quickBooksMaintenanceGuard(invoice, {
     trustedCanonicalInvoice: reviewContext?.canonicalInvoice,
+    snapshot: reviewContext?.guardSnapshot || null,
     onPreparedInvoice: prepared => { invoice = prepared; },
     onCoverageOverride: () => { coverageOverridden = true; },
   });

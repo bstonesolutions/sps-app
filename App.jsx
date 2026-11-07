@@ -19078,13 +19078,29 @@ async function requestBillingReview(payload = null) {
   return data;
 }
 
+// Link a client visit to a billing review (or take back a hand link). An interrupted response may
+// still have saved, so on failure trust only the server's copy of the review.
+async function linkBillingReviewVisit(review, visitKey, linked) {
+  try {
+    return await requestBillingReview({ action: "link-visit", reviewId: review.id, expectedRevision: review.reviewRevision, visitKey, linked });
+  } catch (error) {
+    try {
+      const latest = await requestBillingReview();
+      const canonical = (Array.isArray(latest.reviews) ? latest.reviews : []).find(row => row.id === review.id);
+      const hasLink = (Array.isArray(canonical?.reviewLinkedVisits) ? canonical.reviewLinkedVisits : []).some(row => row?.key === visitKey);
+      if (canonical && Number(canonical.reviewRevision) > Number(review.reviewRevision) && hasLink === linked) return { ok: true, review: canonical, recovered: true };
+    } catch (_) {}
+    throw error;
+  }
+}
+
 async function refreshBillingInvoiceState() {
   const result = await store.refreshChanged(["sps_invoices", "sps_estimates", "sps_schedule"], { reconcileUnchanged: true });
   if (!result?.ok) throw new Error("Billing was saved, but this device could not refresh the invoice list. Refresh before making another change.");
   return result;
 }
 
-function InvoiceVisitEvidence({ invoice, client, schedule = [] }) {
+function InvoiceVisitEvidence({ invoice, client, schedule = [], renderVisitAction, status = "" }) {
   const { T, schedule: sharedSchedule = [] } = useApp();
   const [photoView, setPhotoView] = useState(null);
   useEffect(() => {
@@ -19099,7 +19115,7 @@ function InvoiceVisitEvidence({ invoice, client, schedule = [] }) {
     return () => document.removeEventListener("keydown", closePhoto, true);
   }, [photoView]);
   return <>
-    <InvoiceVisitPanel invoice={invoice} client={client} schedule={schedule.length ? schedule : sharedSchedule} T={T} renderPhotos={photos => (
+    <InvoiceVisitPanel invoice={invoice} client={client} schedule={schedule.length ? schedule : sharedSchedule} T={T} renderVisitAction={renderVisitAction} status={status} renderPhotos={photos => (
       <div className="iv-visit-photos-grid">
         {photos.map((photo, index) => {
           const src = typeof photo === "string" ? photo : photo.src;
@@ -19115,7 +19131,7 @@ function InvoiceVisitEvidence({ invoice, client, schedule = [] }) {
   </>;
 }
 
-function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCatalog, presetClientId, maintenanceLedger: providedMaintenanceLedger = null, schedule = [], onSave, onPersistProgress, onResolveReview, onClose, onDelete, billingReview = false, onSaveReview, onConfirmReview, onDiscardReview, onLoadInvoiceNumbers, mergeableReviews = [], onMergeReviews }) {
+function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCatalog, presetClientId, maintenanceLedger: providedMaintenanceLedger = null, schedule = [], onSave, onPersistProgress, onResolveReview, onClose, onDelete, billingReview = false, onSaveReview, onConfirmReview, onDiscardReview, onLoadInvoiceNumbers, mergeableReviews = [], onMergeReviews, onLinkReviewVisit }) {
   const { T, perms, email } = useApp();
   const canSeeLineCost = !!(perms.isAdmin || perms.seeProfit || perms.seeInventoryCost);
   const invoiceVp = useViewport();
@@ -19167,6 +19183,8 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   const [reviewError, setReviewError] = useState(false);
   const [discardReviewPrompt, setDiscardReviewPrompt] = useState(false);
   const [reviewMergePick, setReviewMergePick] = useState(false);
+  const [reviewVisitBusy, setReviewVisitBusy] = useState("");
+  const [reviewVisitMsg, setReviewVisitMsg] = useState("");
   const reviewBusyRef = useRef(false);
   const reviewLocked = billingReview && (inv.reviewState === "approving" || (!!inv.approval && inv.approval.state !== "rejected"));
   // Other pending reviews for this client that can be folded into this one.
@@ -19776,6 +19794,49 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     return { ok: false, error: "Invoices changed repeatedly on another device. Refresh and try again." };
   };
 
+  // The owner marks a visit from the client's history as belonging to this review (or takes back
+  // one they linked). The server checks it the same way confirm will; charges never change.
+  const reviewVisitClientId = client?.id ?? inv.clientId;
+  const handLinkedReviewVisits = new Set((Array.isArray(inv.reviewLinkedVisits) ? inv.reviewLinkedVisits : []).map(row => String(row?.key || "")));
+  const linkReviewVisit = async (entry, linked) => {
+    if (reviewBusyRef.current || reviewLocked || typeof onLinkReviewVisit !== "function") return;
+    const visitKey = completedVisitSource(entry, { clientId: reviewVisitClientId }).key;
+    const visitLabel = [String(entry?.type || "").trim() || "visit", entry?.date ? `on ${entry.date}` : ""].filter(Boolean).join(" ");
+    reviewBusyRef.current = true;
+    setReviewVisitBusy(visitKey);
+    setReviewVisitMsg("");
+    try {
+      const result = await onLinkReviewVisit(inv, visitKey, linked);
+      const saved = result?.review;
+      if (!saved || String(saved.id) !== String(inv.id)) throw new Error("SPS did not confirm the visit link. Refresh the review list.");
+      // Take only the link and its revision; anything else changed on this screen stays as it is.
+      setInv(current => ({ ...current, sourceStopIds: saved.sourceStopIds, sourceCompletionReceiptIds: saved.sourceCompletionReceiptIds,
+        sourceVisitClientIds: saved.sourceVisitClientIds, sourceVisitClientId: saved.sourceVisitClientId, reviewLinkedVisits: saved.reviewLinkedVisits,
+        reviewRevision: saved.reviewRevision, reviewUpdatedAt: saved.reviewUpdatedAt }));
+      setReviewVisitMsg(result.changed === false
+        ? (linked ? `The ${visitLabel} is already linked.` : `The ${visitLabel} isn't linked.`)
+        : `${linked ? "Linked" : "Unlinked"} the ${visitLabel}. Charges didn't change.`);
+    } catch (error) {
+      setReviewVisitMsg(error?.message || "The visit link could not be saved. Nothing changed.");
+    } finally {
+      reviewBusyRef.current = false;
+      setReviewVisitBusy("");
+    }
+  };
+  const renderReviewVisitAction = billingReview && !reviewLocked && typeof onLinkReviewVisit === "function" ? (entry, linked) => {
+    const visitKey = completedVisitSource(entry, { clientId: reviewVisitClientId }).key;
+    // Visits the review was built from stay attached; only a hand-linked visit can be taken back.
+    if (linked && !handLinkedReviewVisits.has(visitKey)) return null;
+    const busy = !!reviewVisitBusy || !!reviewBusy;
+    const working = reviewVisitBusy === visitKey;
+    return <div>
+      <button type="button" data-review-visit-link={linked ? "unlink" : "link"} disabled={busy} onClick={() => void linkReviewVisit(entry, !linked)}
+        style={{ minHeight: 38, background: linked ? T.surface : hexA(T.primary, 0.07), border: `1px solid ${linked ? T.border : hexA(T.primary, 0.2)}`, borderRadius: 10, padding: "8px 11px", color: linked ? T.text : T.primary, fontWeight: linked ? 750 : 800, fontSize: 12, cursor: busy ? "default" : "pointer", fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 6, opacity: busy && !working ? 0.6 : 1 }}>
+        <Icon name="link" size={13} /> {working ? (linked ? "Unlinking…" : "Linking…") : linked ? "Unlink from this invoice" : "Link to this invoice"}
+      </button>
+    </div>;
+  } : undefined;
+
   // Save this review's edits first, then fold the chosen reviews into it on the server.
   // The merged review may be the other one (a maintenance or estimate review keeps its identity).
   const performReviewMerge = async (selected) => {
@@ -20277,7 +20338,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
             </div>}
           </div>
         )}
-        <InvoiceVisitEvidence key={inv.clientId || "no-client"} invoice={inv} client={client} schedule={schedule} />
+        <InvoiceVisitEvidence key={inv.clientId || "no-client"} invoice={inv} client={client} schedule={schedule} renderVisitAction={renderReviewVisitAction} status={billingReview ? reviewVisitMsg : ""} />
         <fieldset
           disabled={canCompareQuickBooksVersions || spsSavePending || progressState === "saving" || qbState === "sending" || (billingReview && (reviewLocked || !!reviewBusy))}
           style={{ display: "flex", flexDirection: "column", gap: 18, border: 0, padding: 0, margin: 0, minWidth: 0, opacity: canCompareQuickBooksVersions || reviewLocked ? 0.58 : 1 }}
@@ -20344,13 +20405,13 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         {coverageOverridden ? (
           <div data-invoice-maintenance-coverage data-invoice-coverage-override role="status" style={{ borderLeft: `3px solid ${T.primary}`, background: T.surfaceAlt, borderRadius: 9, padding: "11px 13px" }}>
             <div style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>Billing without a coverage match</div>
-            <div style={{ fontSize: 12, lineHeight: 1.45, color: T.textMuted, marginTop: 4 }}>You chose to bill this invoice anyway. {billingReview ? "Once it's confirmed, open the invoice and use Link visits to record which services it covers." : "Use Link visits to record which services it covers."}</div>
+            <div style={{ fontSize: 12, lineHeight: 1.45, color: T.textMuted, marginTop: 4 }}>You chose to bill this invoice anyway. {billingReview ? "Link the visits it covers in Visit details above." : "Use Link visits to record which services it covers."}</div>
             {canOverrideCoverage && <button type="button" onClick={() => setCoverageOverride(false)} style={{ minHeight: 36, marginTop: 5, padding: "4px 0", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 12, fontWeight: 750, cursor: "pointer" }}>Turn the coverage check back on</button>}
           </div>
         ) : needsCoverageCheck && !String(coverageIssue?.code || "").startsWith("maintenance-service-month-") && (coverageLoading || coverageIssue || coverageError) && (
           <div data-invoice-maintenance-coverage role="status" style={{ borderLeft: `3px solid ${T.primary}`, background: T.surfaceAlt, borderRadius: 9, padding: "11px 13px" }}>
             <div style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>{coverageLoading ? "Checking maintenance coverage…" : coverageIssue?.covered ? "This maintenance is already covered" : "Check maintenance coverage before billing"}</div>
-            {!coverageLoading && <div style={{ fontSize: 12, lineHeight: 1.45, color: T.textMuted, marginTop: 4 }}>{coverageError || coverageIssue?.message}{coverageIssue?.months?.length ? ` Month${coverageIssue.months.length === 1 ? "" : "s"} to review: ${coverageIssue.months.join(", ")}.` : ""} You can save progress while you review the service lines.{canOverrideCoverage ? " Or bill it anyway and link the visits it covers later." : ""}</div>}
+            {!coverageLoading && <div style={{ fontSize: 12, lineHeight: 1.45, color: T.textMuted, marginTop: 4 }}>{coverageError || coverageIssue?.message}{coverageIssue?.months?.length ? ` Month${coverageIssue.months.length === 1 ? "" : "s"} to review: ${coverageIssue.months.join(", ")}.` : ""} You can save progress while you review the service lines.{renderReviewVisitAction ? " If a visit in Visit details above belongs to this invoice, link it there." : ""}{canOverrideCoverage ? " Or bill it anyway and link the visits it covers later." : ""}</div>}
             {!coverageLoading && <div style={{ display: "flex", gap: 18, flexWrap: "wrap", marginTop: 5 }}>
               <button type="button" onClick={loadInvoiceCoverage} style={{ minHeight: 36, padding: "4px 0", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 12, fontWeight: 750, cursor: "pointer" }}>Check coverage again</button>
               {canOverrideCoverage && <button type="button" data-invoice-bill-anyway onClick={() => setCoverageOverride(true)} style={{ minHeight: 36, padding: "4px 0", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 12, fontWeight: 750, cursor: "pointer" }}>Bill anyway</button>}
@@ -22503,6 +22564,7 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
           onLoadInvoiceNumbers={() => requestBillingReview({ action: "available-numbers" })}
           onConfirmReview={(review, { retry, invoiceNumber } = {}) => mutateEstimateBillingReview(retry ? "retry" : "confirm", review, { invoiceNumber })}
           onDiscardReview={review => mutateEstimateBillingReview("discard", review)}
+          onLinkReviewVisit={linkBillingReviewVisit}
           onSave={saveConvertedInvoice}
           onPersistProgress={onPersistInvoiceProgress}
           onClose={() => setInvoiceEditor(null)}
@@ -25762,6 +25824,11 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
         onDiscardReview={review => mutateBillingReview("discard", review)}
         mergeableReviews={billingReviews}
         onMergeReviews={mergeBillingReviews}
+        onLinkReviewVisit={async (review, visitKey, linked) => {
+          const data = await linkBillingReviewVisit(review, visitKey, linked);
+          if (data.review) setBillingReviews(rows => [...rows.filter(row => row.id !== data.review.id), data.review]);
+          return data;
+        }}
         onClose={() => { setBillingReviewEditing(null); void loadBillingReviews().catch(() => {}); }} />}
       {canReviewAccounting && reviewingReconciliation && (
         <InvoiceReconciliationReviewQueue

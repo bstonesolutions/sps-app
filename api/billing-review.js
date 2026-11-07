@@ -13,7 +13,7 @@ import { buildQuickBooksInvoicePayload } from "../quickbooksDraftSync.js";
 import { applyQuickBooksInvoiceSaveResult, quickBooksInvoiceIntentSignature } from "../quickbooksInvoiceReconciliation.js";
 import { quickBooksMaintenanceGuard } from "./quickbooks/maintenance-guard.js";
 import { invoiceServiceDescriptionIssue } from "../invoiceServiceDescription.js";
-import { invoiceCompletedVisitSources, reserveCompletedVisitInvoice } from "../invoiceVisitImport.js";
+import { completedVisitSource, invoiceCompletedVisitSources, reserveCompletedVisitInvoice } from "../invoiceVisitImport.js";
 import { billingReviewAccountingIssue } from "./_billing-review-claims.js";
 import { BILLING_REVIEW_EDIT_FIELDS, BILLING_REVIEW_LINE_EDIT_FIELDS } from "../billingReviewReceipt.js";
 import { maintenanceCoverageOverride, newMaintenanceCoverageOverride } from "../maintenanceCoverageOverride.js";
@@ -44,6 +44,20 @@ function compactReview(review) {
   const result = review?.approval?.qbResult;
   return result && typeof result === "object" && Object.hasOwn(result, "invoiceRefresh")
     ? { ...review, approval: { ...review.approval, qbResult: compactQuickBooksResult(result) } } : review;
+}
+
+// The coverage guard reads these rows. Confirm hands it the copies it already read (and fences
+// in its reservation), in the shape the guard reads them, so they aren't downloaded twice more.
+const GUARD_KEYS = ["sps_clients", "sps_invoices", "sps_maintenance_billing", "sps_schedule"];
+const guardSnapshot = snapshot => Object.fromEntries(GUARD_KEYS.map(key => [key, snapshot[key].exists ? snapshot[key] : { ...snapshot[key], value: null }]));
+
+// Step durations for a confirm, reported as a Server-Timing header and one log line (no record data).
+function stepTimer() {
+  const steps = [];
+  const time = async (name, work) => { const at = Date.now(); try { return await work(); } finally { steps.push([name, Date.now() - at]); } };
+  time.header = () => steps.map(([name, ms]) => `${name};dur=${ms}`).join(", ");
+  time.steps = steps;
+  return time;
 }
 
 function responseCapture() {
@@ -200,31 +214,42 @@ export function createBillingReviewHandler(overrides = {}) {
       const invoice = { ...applyQuickBooksInvoiceSaveResult(review.approval.invoice, result), billingReviewId: id, billingConfirmedAt: review.approval.startedAt };
       const nextReview = { ...review, reviewState: "synced", reviewRevision: review.reviewRevision + 1, reviewUpdatedAt: nowISO(deps.now),
         approval: { ...review.approval, state: "created", qbResult: copy(compactQuickBooksResult(result)), leaseUntil: null }, linkedInvoiceId: invoice.id };
-      const nextInvoices = collision ? snapshot.sps_invoices.value : [invoice, ...snapshot.sps_invoices.value];
+      // Rewrite only what changes. The QuickBooks receipt normally saved this invoice already, and
+      // most reviews have no linked stop or estimate: those ledgers are fenced at the versions read
+      // here instead of being uploaded again (the schedule upload alone was a large part of the wait).
+      const estimates = snapshot.sps_estimates.value.map(estimate => promoteBacklink(estimate, review, invoice));
+      const schedule = snapshot.sps_schedule.value.map(day => {
+        const stops = list(day?.stops).map(stop => promoteBacklink(stop, review, invoice));
+        return stops.some((stop, index) => stop !== day.stops[index]) ? { ...day, stops } : day;
+      });
       const changes = {
         [BILLING_REVIEW_KEY]: snapshot[BILLING_REVIEW_KEY].value.map(row => same(row.id, id) ? nextReview : row),
-        sps_invoices: nextInvoices,
-        sps_estimates: snapshot.sps_estimates.value.map(estimate => promoteBacklink(estimate, review, invoice)),
-        sps_schedule: snapshot.sps_schedule.value.map(day => ({ ...day, stops: list(day.stops).map(stop => promoteBacklink(stop, review, invoice)) })),
+        ...(collision ? {} : { sps_invoices: [invoice, ...snapshot.sps_invoices.value] }),
+        ...(estimates.some((row, index) => row !== snapshot.sps_estimates.value[index]) ? { sps_estimates: estimates } : {}),
+        ...(schedule.some((day, index) => day !== snapshot.sps_schedule.value[index]) ? { sps_schedule: schedule } : {}),
       };
-      const committed = await commit(snapshot, changes, [], actorId);
+      const committed = await commit(snapshot, changes, ["sps_invoices", "sps_estimates", "sps_schedule"], actorId);
       if (committed.applied) {
-        const verified = await read([BILLING_REVIEW_KEY, "sps_invoices"]);
+        const wroteInvoices = Object.hasOwn(changes, "sps_invoices");
+        const verified = await read(wroteInvoices ? [BILLING_REVIEW_KEY, "sps_invoices"] : [BILLING_REVIEW_KEY]);
         const savedReview = reviewedRecord(verified[BILLING_REVIEW_KEY].value, id);
-        const savedInvoice = verified.sps_invoices.value.find(row => same(row.id, id) && same(row.qbId, result.qbId));
+        // A fenced ledger was unchanged at the version checked above, so its saved row still stands.
+        const invoices = wroteInvoices ? verified.sps_invoices : snapshot.sps_invoices;
+        const savedInvoice = invoices.value.find(row => same(row.id, id) && same(row.qbId, result.qbId));
         if (savedReview.reviewState !== "synced" || !savedInvoice) throw new Error("SPS could not verify the final QuickBooks link.");
-        return { ok: true, review: savedReview, invoice: savedInvoice, reviewsVersion: verified[BILLING_REVIEW_KEY].version, invoicesVersion: verified.sps_invoices.version };
+        return { ok: true, review: savedReview, invoice: savedInvoice, reviewsVersion: verified[BILLING_REVIEW_KEY].version, invoicesVersion: invoices.version };
       }
     }
     throw new Error("QuickBooks saved the invoice, but SPS is busy. Retry to finish the existing link.");
   }
 
-  async function runApproval(req, review, actorId) {
+  async function runApproval(req, review, actorId, { snapshot = null, time = (_name, work) => work() } = {}) {
     const approval = review.approval;
-    if (approval.qbResult?.qbId) return promote(review.id, approval.attemptId, approval.qbResult, actorId);
+    if (approval.qbResult?.qbId) return time("promote", () => promote(review.id, approval.attemptId, approval.qbResult, actorId));
     const context = {
       canonicalInvoice: approval.invoice, realmId: approval.realmId, recovering: !!approval.writeStartedAt,
       frozenQuickBooksInvoice: approval.quickBooksInvoice || null, writeStarted: false,
+      guardSnapshot: snapshot ? guardSnapshot(snapshot) : null,
       beforeInvoiceWrite: async (wire, metadata) => {
         await changeReview(review.id, current => {
           if (current.reviewState !== "approving" || current.approval?.attemptId !== approval.attemptId) throw new Error("The approval no longer owns this review.");
@@ -238,14 +263,14 @@ export function createBillingReviewHandler(overrides = {}) {
     try {
       // Node exposes headers through an inherited accessor, so spreading the request drops them.
       // Keep the caller's credentials for the QuickBooks handler's own authentication check.
-      await deps.createInvoice({ ...req, headers: req.headers, method: "POST", body: { invoice: copy(approval.payload) }, [BILLING_REVIEW_CREATE_CONTEXT]: context }, captured);
+      await time("quickbooks", () => deps.createInvoice({ ...req, headers: req.headers, method: "POST", body: { invoice: copy(approval.payload) }, [BILLING_REVIEW_CREATE_CONTEXT]: context }, captured));
       const result = captured.body || {};
       if (captured.statusCode < 300 && result.success === true && text(result.qbId)) {
-        await changeReview(review.id, current => {
+        await time("record", () => changeReview(review.id, current => {
           if (current.approval?.attemptId !== approval.attemptId) throw new Error("The billing approval changed.");
           return { ...current, approval: { ...current.approval, state: "created", qbResult: copy(compactQuickBooksResult(result)), leaseUntil: null } };
-        });
-        return await promote(review.id, approval.attemptId, result, actorId);
+        }));
+        return await time("promote", () => promote(review.id, approval.attemptId, result, actorId));
       }
       const unknown = result.createOutcomeUnknown || (context.writeStarted && !result.createRejected) || !!approval.writeStartedAt;
       const next = await changeReview(review.id, current => ({ ...current,
@@ -277,7 +302,7 @@ export function createBillingReviewHandler(overrides = {}) {
         return res.status(200).json({ ok: true, reviews: snapshot[BILLING_REVIEW_KEY].value.filter(row => row.recordType === "billing-review").map(compactReview), version: snapshot[BILLING_REVIEW_KEY].version });
       }
       const action = text(req.body?.action);
-      if (!["save", "discard", "merge", "migrate", "confirm", "retry", "from-estimate", "prepare-estimate", "available-numbers"].includes(action)) throw fail(400, "billing_review_action_invalid", "Choose a billing review action.");
+      if (!["save", "discard", "merge", "link-visit", "migrate", "confirm", "retry", "from-estimate", "prepare-estimate", "available-numbers"].includes(action)) throw fail(400, "billing_review_action_invalid", "Choose a billing review action.");
       if (action === "available-numbers") {
         const snapshot = await read([BILLING_REVIEW_KEY, "sps_invoices", "sps_invoicing"]);
         const inventory = await deps.inventory();
@@ -345,6 +370,40 @@ export function createBillingReviewHandler(overrides = {}) {
         return res.status(200).json({ ok: true, review });
       }
 
+      if (action === "link-visit") {
+        // The owner marks a completed visit from the client's history as belonging to this review.
+        // Only the visit link changes; charges stay as they are. A visit is linked only if confirm
+        // will accept it, so a link can never be what blocks the invoice later.
+        const visitKey = text(req.body?.visitKey);
+        if (!visitKey || visitKey.length > 400) throw fail(400, "billing_review_visit_invalid", "Choose a visit.");
+        const linked = req.body?.linked !== false;
+        for (let attempt = 0; attempt < 6; attempt += 1) {
+          const snapshot = await read([BILLING_REVIEW_KEY, "sps_invoices", "sps_estimates", "sps_clients", "sps_completed"]);
+          const review = reviewedRecord(snapshot[BILLING_REVIEW_KEY].value, id);
+          pendingOnly(review); revisionMatches(review, req.body?.expectedRevision);
+          const clients = snapshot.sps_clients.value.filter(client => same(client.id, review.clientId));
+          if (clients.length !== 1) throw fail(409, "billing_review_client_invalid", "Choose this review's client before linking visits.");
+          const client = clients[0];
+          const visit = billingReviewDomain.billingReviewVisitByKey(client, visitKey);
+          const plan = billingReviewDomain.linkBillingReviewVisit({ review, visit, clientId: client.id, linked, actor: actor.email || actor.id, now: deps.now() });
+          if (!plan.changed) return res.status(200).json({ ok: true, review: compactReview(review), changed: false });
+          const next = { ...plan.review, reviewRevision: review.reviewRevision + 1, reviewUpdatedAt: nowISO(deps.now) };
+          if (linked) {
+            const source = completedVisitSource(visit, { clientId: client.id });
+            const marker = (snapshot.sps_completed.value || {})[source.sourceStopId];
+            if (!marker || (source.sourceCompletionReceiptId && text(marker.receiptId) && text(marker.receiptId) !== source.sourceCompletionReceiptId)) {
+              throw fail(409, "billing_review_visit_unverified", "SPS can't match this visit to its saved completion record, so it can't be linked. Use Bill anyway for this invoice.");
+            }
+            confirmedSourceCheck(realInvoiceShape(next), snapshot);
+          }
+          const reviews = snapshot[BILLING_REVIEW_KEY].value.map(row => same(row.id, id) ? next : row);
+          // Fence the records the link was checked against; nothing but the review is rewritten.
+          const fence = linked ? ["sps_invoices", "sps_estimates", "sps_clients", "sps_completed"] : [];
+          if ((await commit(snapshot, { [BILLING_REVIEW_KEY]: reviews }, fence, actor.id)).applied) return res.status(200).json({ ok: true, review: compactReview(next), changed: true });
+        }
+        throw fail(409, "billing_review_contention", "Billing records changed repeatedly. Refresh and try again.");
+      }
+
       if (action === "merge") {
         const requested = list(req.body?.mergeReviews);
         if (!requested.length || requested.some(row => !text(row?.id) || text(row.id).length > 320)) throw fail(400, "billing_review_merge_empty", "Choose the reviews to merge.");
@@ -375,9 +434,16 @@ export function createBillingReviewHandler(overrides = {}) {
       }
 
       const chosenNumber = normalizeBillingReviewInvoiceNumber(req.body?.invoiceNumber);
+      const time = stepTimer();
+      const startedAt = Date.now();
+      const respond = (status, body) => {
+        res.setHeader("Server-Timing", time.header());
+        console.log("[billing-review]", JSON.stringify({ event: "confirm-timing", action, status, totalMs: Date.now() - startedAt, steps: Object.fromEntries(time.steps) }));
+        return res.status(status).json(body);
+      };
       let inventory = null;
       for (let attempt = 0; attempt < 6; attempt += 1) {
-        const snapshot = await read();
+        const snapshot = await time("read", () => read());
         const review = reviewedRecord(snapshot[BILLING_REVIEW_KEY].value, id);
         if (["approving", "synced"].includes(review.reviewState) && chosenNumber && chosenNumber !== review.approval?.number) throw fail(409, "billing_review_number_locked", "This approval already has an invoice number. Retry its existing sync before changing anything.");
         if (review.reviewState === "synced") return res.status(200).json(await promote(id, review.approval?.attemptId, review.approval?.qbResult, actor.id));
@@ -395,11 +461,11 @@ export function createBillingReviewHandler(overrides = {}) {
           const client = confirmedSourceCheck(invoice, snapshot);
           const initialPayload = buildQuickBooksInvoicePayload(invoice, client, snapshot.sps_invoicing.value);
           let coverageOverridden = false;
-          const coverage = await deps.guard(initialPayload, { trustedCanonicalInvoice: invoice, onCoverageOverride: () => { coverageOverridden = true; } });
+          const coverage = await time("coverage", () => deps.guard(initialPayload, { trustedCanonicalInvoice: invoice, snapshot: guardSnapshot(snapshot), onCoverageOverride: () => { coverageOverridden = true; } }));
           if (coverage) throw fail(coverage.status || 409, coverage.code, coverage.message);
           const monthIssue = coverageOverridden ? null : invoiceServiceDescriptionIssue(initialPayload);
           if (monthIssue) throw fail(422, monthIssue.code, monthIssue.message);
-          if (!inventory) inventory = await deps.inventory();
+          if (!inventory) inventory = await time("numbers", () => deps.inventory());
           const claims = collectBillingReviewNumberClaims({ invoices: snapshot.sps_invoices.value, reviews: snapshot[BILLING_REVIEW_KEY].value });
           const previousNumber = review.approval?.number;
           const otherClaims = collectBillingReviewNumberClaims({ invoices: snapshot.sps_invoices.value, reviews: snapshot[BILLING_REVIEW_KEY].value.filter(row => !same(row.id, id)) });
@@ -416,10 +482,10 @@ export function createBillingReviewHandler(overrides = {}) {
               intentSignature: quickBooksInvoiceIntentSignature(payload), startedAt: nowISO(deps.now), state: "prepared", leaseUntil: new Date(deps.now() + 90_000).toISOString(), numberInventoryCheckedAt: inventory.checkedAt } };
         }
         const reviews = snapshot[BILLING_REVIEW_KEY].value.map(row => same(row.id, id) ? next : row);
-        const reserved = await commit(snapshot, { [BILLING_REVIEW_KEY]: reviews }, KEYS.filter(key => key !== BILLING_REVIEW_KEY));
+        const reserved = await time("reserve", () => commit(snapshot, { [BILLING_REVIEW_KEY]: reviews }, KEYS.filter(key => key !== BILLING_REVIEW_KEY)));
         if (!reserved.applied) continue;
-        const result = await runApproval(req, next, actor.id);
-        return res.status(result.ok ? 200 : result.pending ? 202 : 422).json(result);
+        const result = await runApproval(req, next, actor.id, { snapshot, time });
+        return respond(result.ok ? 200 : result.pending ? 202 : 422, result);
       }
       throw fail(409, "billing_review_contention", "Billing records changed repeatedly. Refresh and try again.");
     } catch (error) {

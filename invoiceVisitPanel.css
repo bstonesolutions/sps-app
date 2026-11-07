@@ -52,6 +52,7 @@ details[open] > summary > .iv-visit-chevron { transform: rotate(90deg); }
 .iv-visit-missing strong { color: var(--visit-accent); }
 .iv-visit-missing p, .iv-visit-empty p { color: var(--visit-muted); margin-top: 6px; font-size: 13px; line-height: 1.5; }
 .iv-visit-browse { border-top: 1px solid var(--visit-border); }
+.iv-visit-panel .iv-visit-link-status { font-size: 12px; line-height: 1.5; color: var(--visit-muted); margin: -6px 0 12px; }
 .iv-visit-count { color: var(--visit-muted); font-weight: 500; margin-left: 5px; }
 .iv-visit-browse input { border: 1px solid var(--visit-border); border-radius: 8px; background: var(--visit-surface); color: var(--visit-text); padding: 11px 12px; font: inherit; font-size: 16px; width: 100%; margin: 12px 0; }
 .iv-visit-browse button { border: 0; background: transparent; color: var(--visit-accent); min-height: 44px; font: inherit; font-size: 13px; font-weight: 750; cursor: pointer; }
