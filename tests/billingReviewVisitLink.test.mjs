@@ -177,3 +177,35 @@ test("merging keeps hand-linked visits unlinkable on the survivor", () => {
   assert.equal(plan.merged[0].reviewLinkedVisits, undefined);
   assert.deepEqual(plan.merged[0].billingReviewAudit.mergedInto.moved.reviewLinkedVisits.map(row => row.key), [key(october)]);
 });
+
+test("a held review is released for editing only when QuickBooks proved nothing was created", async () => {
+  const held = (id, extra = {}) => ({ ...review(id), reviewState: "approving", reviewRevision: 2,
+    approval: { attemptId: "old", requestKey: `${id}:approval:old`, number: "INV-1002", invoice: { id }, payload: { number: "INV-1002", lineItems: [] },
+      quickBooksInvoice: { DocNumber: "INV-1002", CustomerRef: { value: "customer-1" } }, writeStartedAt: "2026-11-05T10:00:00Z", state: "unknown", leaseUntil: null, ...extra } });
+  for (const [absent, expected] of [[true, "pending"], [false, "approving"]]) {
+    const h = harness({ reviews: [held("iv_held")] });
+    const handler = createBillingReviewHandler({
+      authorize: async () => ({ id: "owner", email: "owner@example.com" }),
+      read: async keys => Object.fromEntries(keys.map(name => [name, clone(h.rows[name] || { key: name, exists: false, version: 0, value: null })])),
+      cas: async (name, version, value) => { h.rows[name] = { key: name, exists: true, version: version + 1, value: clone(value) }; return { applied: true }; },
+      batch: async operations => { for (const op of operations) if (!op.checkOnly) h.rows[op.key] = { key: op.key, exists: true, version: op.expectedVersion + 1, value: clone(op.value) }; return { applied: true }; },
+      now: () => Date.parse(now), uuid: () => "attempt-2", guard: async () => null, inventory: async () => ({ realmId: "realm-1", numbers: [], checkedAt: now }),
+      createInvoice: async (req, res) => {
+        assert.equal(req[BILLING_REVIEW_CREATE_CONTEXT].recovering, true);
+        return res.status(500).json({ error: "QuickBooks rejected the invoice: Item is inactive", createRejected: true, ...(absent ? { recoveryAbsentConfirmed: true } : {}) });
+      },
+    });
+    const out = response(); await handler({ method: "POST", headers: {}, body: { action: "retry", reviewId: "iv_held" } }, out);
+    const saved = h.review("iv_held");
+    assert.equal(saved.reviewState, expected);
+    assert.match(saved.approval.error, /Item is inactive/);
+    if (absent) {
+      assert.equal(saved.approval.state, "rejected"); assert.equal(saved.approval.writeStartedAt, undefined);
+      assert.equal(saved.approval.releasedWriteStartedAt, "2026-11-05T10:00:00Z");
+      // Released reviews can be merged, edited, and confirmed again like any pending review.
+      assert.doesNotThrow(() => planBillingReviewMerge({ target: saved, others: [review("iv_other")], now: Date.parse(now) }));
+    } else {
+      assert.equal(saved.approval.state, "unknown"); assert.equal(saved.approval.writeStartedAt, "2026-11-05T10:00:00Z");
+    }
+  }
+});

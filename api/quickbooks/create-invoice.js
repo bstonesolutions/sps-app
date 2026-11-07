@@ -19,6 +19,34 @@ import { BILLING_REVIEW_CREATE_CONTEXT } from "../_billing-review-context.js";
 import { readAppStatesVersioned } from "../_app-state.js";
 import { billingReviewAccountingIssue, reserveDirectInvoiceAccountingClaim, settleDirectInvoiceAccountingClaim } from "../_billing-review-claims.js";
 
+// QuickBooks answers first; saving the confirmed copy in SPS follows in the same request.
+// Vercel's default time limit could stop it in between, after QuickBooks had already saved.
+export const config = { maxDuration: 60 };
+
+// The invoice an earlier billing review attempt may have created, found by its reserved number.
+// The number was checked unused in QuickBooks when the review was confirmed, so exactly one
+// invoice with it for the same customer is that attempt's invoice (even if edited since).
+// "absent" proves no attempt created it; any doubt is "unavailable" and the retry proceeds as before.
+async function findRecoveredReviewInvoice(base, headers, wire) {
+  const docNumber = String(wire?.DocNumber ?? "").trim();
+  const customer = String(wire?.CustomerRef?.value ?? "").trim();
+  if (!docNumber || !customer) return { status: "unavailable" };
+  try {
+    const query = encodeURIComponent(`SELECT * FROM Invoice WHERE DocNumber = '${docNumber.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`);
+    const response = await fetch(`${base}/query?query=${query}&minorversion=65`, { headers, signal: AbortSignal.timeout(15_000) });
+    if (!response.ok) return { status: "unavailable" };
+    const data = await response.json();
+    const found = data?.QueryResponse?.Invoice;
+    if (data?.Fault || !data?.QueryResponse || (found != null && !Array.isArray(found))) return { status: "unavailable" };
+    const rows = (found || []).filter(row => String(row?.DocNumber ?? "").trim() === docNumber);
+    if (!rows.length) return { status: "absent" };
+    if (rows.length === 1 && String(rows[0].Id ?? "").trim() && String(rows[0].CustomerRef?.value ?? "").trim() === customer) return { status: "found", invoice: rows[0] };
+    return { status: "conflict", message: `QuickBooks already has ${rows.length === 1 ? "an invoice" : "more than one invoice"} numbered ${docNumber}${rows.length === 1 ? " for a different customer" : ""}. Check ${docNumber} in QuickBooks. This review stays held so nothing is billed twice.` };
+  } catch (_) {
+    return { status: "unavailable" };
+  }
+}
+
 export default async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
@@ -267,6 +295,21 @@ export default async function handler(req, res) {
     qbRequestId = quickBooksInvoiceCreateRequestId(realm_id, directClaim?.createIntent?.requestKey || requestKey);
     if (directClaim?.createIntent?.quickBooksInvoice) qbInvoice = directClaim.createIntent.quickBooksInvoice;
     if (reviewContext?.frozenQuickBooksInvoice) qbInvoice = reviewContext.frozenQuickBooksInvoice;
+    // A billing review retry whose first write may have reached QuickBooks looks the invoice up by
+    // its reserved number first. QuickBooks keeps a request id's answer only for a while, so on a
+    // late retry the same request can be refused even though the first one created the invoice.
+    let created = null;
+    let recoveryAbsentConfirmed = false;
+    if (reviewContext?.recovering) {
+      const lookup = await findRecoveredReviewInvoice(base, headers, qbInvoice);
+      if (lookup.status === "conflict") return res.status(409).json({ error: lookup.message, code: "billing_review_number_conflict", createOutcomeUnknown: true, qbRequestId });
+      if (lookup.status === "found") {
+        created = { Invoice: lookup.invoice };
+        if (reviewContext) reviewContext.writeStarted = true;
+      }
+      recoveryAbsentConfirmed = lookup.status === "absent";
+    }
+    if (!created) {
     if (reviewContext?.beforeInvoiceWrite) await reviewContext.beforeInvoiceWrite(qbInvoice, { realmId: realm_id, qbRequestId });
     // From this point forward, a thrown network/response error is ambiguous:
     // QuickBooks may have committed the invoice before the connection failed.
@@ -290,10 +333,12 @@ export default async function handler(req, res) {
       if (!knownRejected) {
         return res.status(502).json({ error: "QuickBooks did not confirm the invoice. Retry this same invoice to recover it.", createOutcomeUnknown: true, qbRequestId });
       }
-      return res.status(500).json({ error: "QuickBooks rejected the invoice: " + readableQbError(err), details: err, createRejected: true });
+      // Only a lookup made just before this request can prove no earlier attempt created it.
+      return res.status(500).json({ error: "QuickBooks rejected the invoice: " + readableQbError(err), details: err, createRejected: true, ...(recoveryAbsentConfirmed ? { recoveryAbsentConfirmed: true } : {}) });
     }
 
-    const created = await createRes.json();
+    created = await createRes.json();
+    }
     qbId = created?.Invoice?.Id;
     if (!qbId) throw new Error("QuickBooks returned no invoice ID");
     if (directClaim) {

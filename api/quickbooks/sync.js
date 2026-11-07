@@ -18,6 +18,10 @@ import { requireUser } from "../_auth.js";
 import { requireCapability } from "../_staff-auth.js";
 import { resolveInvoiceReviewOnServer, validateInvoiceReviewResolutionRequest } from "../_invoice-review-resolution.js";
 
+// Reads every QuickBooks invoice and saves the refreshed copy in SPS. It is also how an invoice
+// editor finishes a save QuickBooks already accepted, so it must not stop at Vercel's default limit.
+export const config = { maxDuration: 120 };
+
 export default async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(204).end();

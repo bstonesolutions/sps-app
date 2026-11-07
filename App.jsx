@@ -20270,7 +20270,8 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   return (
     <Modal title={billingReview ? "Billing review" : isPersisted || invoice ? `Edit ${inv.number}` : "New Invoice"} onClose={() => { if (!reviewBusyRef.current && !invoiceSaveBusyRef.current) onClose(); }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-        {billingReview && <p style={{ margin: 0, paddingLeft: 12, borderLeft: `3px solid ${T.primary}`, color: T.textMuted, fontSize: 13, lineHeight: 1.5 }}>{reviewLocked ? "This confirmation is being checked. Retry sync to finish the same invoice." : "Edit the work and charges, then confirm to create the invoice in QuickBooks. No invoice number is assigned yet."}</p>}
+        {billingReview && <p style={{ margin: 0, paddingLeft: 12, borderLeft: `3px solid ${T.primary}`, color: T.textMuted, fontSize: 13, lineHeight: 1.5 }}>{reviewLocked ? "This confirmation is being checked. Retry sync to finish the same invoice. It checks QuickBooks first, so it never creates a second one." : "Edit the work and charges, then confirm to create the invoice in QuickBooks. No invoice number is assigned yet."}</p>}
+        {billingReview && reviewLocked && !reviewMessage && String(inv.approval?.error || "").trim() && <p role="status" style={{ margin: 0, fontSize: 12.5, lineHeight: 1.5, color: T.textMuted }}><span style={{ fontWeight: 800, color: T.text }}>Last sync attempt:</span> {String(inv.approval.error).trim()}</p>}
         {!billingReview && editorNeedsReview && (
           <div style={{ background: T.surface, borderLeft: `3px solid ${T.primary}`, padding: "2px 0 2px 16px" }}>
             <div style={{ color: T.text, fontSize: 18, fontWeight: 800 }}>

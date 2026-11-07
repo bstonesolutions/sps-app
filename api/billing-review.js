@@ -272,11 +272,18 @@ export function createBillingReviewHandler(overrides = {}) {
         }));
         return await time("promote", () => promote(review.id, approval.attemptId, result, actorId));
       }
-      const unknown = result.createOutcomeUnknown || (context.writeStarted && !result.createRejected) || !!approval.writeStartedAt;
-      const next = await changeReview(review.id, current => ({ ...current,
-        reviewState: unknown ? "approving" : "pending", reviewRevision: current.reviewRevision + 1, reviewUpdatedAt: nowISO(deps.now),
-        approval: { ...current.approval, state: unknown ? "unknown" : "rejected", leaseUntil: null, error: result.error || "QuickBooks did not confirm the invoice." },
-      }));
+      // A retry of a write that may have reached QuickBooks stays held, unless QuickBooks was just
+      // checked and has no invoice with this number, and then refused the retry: nothing was billed.
+      const released = !!approval.writeStartedAt && result.createRejected === true && result.recoveryAbsentConfirmed === true;
+      const unknown = !released && (result.createOutcomeUnknown || (context.writeStarted && !result.createRejected) || !!approval.writeStartedAt);
+      const next = await changeReview(review.id, current => {
+        const { writeStartedAt, ...kept } = current.approval || {};
+        return { ...current,
+          reviewState: unknown ? "approving" : "pending", reviewRevision: current.reviewRevision + 1, reviewUpdatedAt: nowISO(deps.now),
+          approval: { ...(released ? { ...kept, releasedWriteStartedAt: writeStartedAt, releasedAt: nowISO(deps.now) } : current.approval),
+            state: unknown ? "unknown" : "rejected", leaseUntil: null, error: result.error || "QuickBooks did not confirm the invoice." },
+        };
+      });
       return { ok: false, pending: !!unknown, review: next, code: unknown ? "QB_CONFIRMATION_PENDING" : (result.code || "QB_CONFIRMATION_REJECTED"), error: result.error || "QuickBooks did not confirm the invoice.", ...(result.reconnect ? { reconnect: true } : {}) };
     } catch (error) {
       // A durable frozen intent precedes every POST. Even if saving this error

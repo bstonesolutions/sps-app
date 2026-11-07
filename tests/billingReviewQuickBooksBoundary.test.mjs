@@ -96,3 +96,56 @@ test("QB number inventory reads counted pages in parallel and still reaches the 
   quickBooksInvoices([{ Id: "1", DocNumber: "1001" }, { Id: "1", DocNumber: "1002" }]);
   await assert.rejects(readQuickBooksInvoiceNumberInventory(), /pagination could not be verified/);
 });
+
+// A late retry of a review write: QuickBooks is checked by the reserved number before re-sending.
+function recoveryHarness({ found = null, lookupFails = false, postStatus = 200 } = {}) {
+  const wire = { CustomerRef: { value: "c1" }, DocNumber: "INV-1002", TxnDate: "2026-10-05", Line: [{ Amount: 10, DetailType: "SalesItemLineDetail", SalesItemLineDetail: { ItemRef: { value: "item-original" }, Qty: 1, UnitPrice: 10 } }] };
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const href = String(url); calls.push({ href, method: options.method || "GET" });
+    if (href.endsWith("/auth/v1/user")) return response({ id: "owner", email: "owner@example.test" });
+    if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify([{ email: "owner@example.test", role: "owner" }]) }]);
+    if (href.includes("/qb_tokens?")) return response(tokens);
+    if (href.includes("/query?")) {
+      if (lookupFails) return response({ Fault: { Error: [{ Message: "down" }] } }, 503);
+      assert.match(decodeURIComponent(new URL(href).searchParams.get("query")), /^SELECT \* FROM Invoice WHERE DocNumber = 'INV-1002'$/);
+      return response({ QueryResponse: found ? { Invoice: found } : {} });
+    }
+    if (options.method === "POST" && href.includes("/invoice?")) return postStatus === 200 ? response({ Invoice: { ...wire, Id: "qb-new", TotalAmt: 10, Balance: 10 } }) : response({ Fault: { Error: [{ Message: "Invalid Reference Id", Detail: "Item is inactive" }] } }, postStatus);
+    if (href.includes("/invoice/")) { const id = href.match(/\/invoice\/([^?]+)/)[1]; return response({ Invoice: { ...wire, Id: id, TotalAmt: 10, Balance: 10 } }); }
+    throw new Error(`Unexpected request ${href}`);
+  };
+  const req = request({ spsInvoiceId: "review-1", qbCreateRequestKey: "frozen-key", number: "INV-1002", lineItems: [] });
+  let journaled = false;
+  req[BILLING_REVIEW_CREATE_CONTEXT] = { realmId: "realm", recovering: true, frozenQuickBooksInvoice: wire, beforeInvoiceWrite: async () => { journaled = true; } };
+  return { req, calls, wire, journaled: () => journaled };
+}
+
+test("a late retry adopts the invoice the first attempt created instead of sending it again", async () => {
+  const h = recoveryHarness({ found: [{ Id: "qb-first", DocNumber: "INV-1002", CustomerRef: { value: "c1" }, TotalAmt: 12, Balance: 12, Line: [] }] });
+  const out = res(); await createInvoice(h.req, out);
+  assert.equal(out.statusCode, 200, out.body?.error); assert.equal(out.body.qbId, "qb-first");
+  assert.equal(h.calls.filter(call => call.method === "POST").length, 0, "nothing is sent to QuickBooks again");
+  assert.equal(h.req[BILLING_REVIEW_CREATE_CONTEXT].writeStarted, true);
+});
+
+test("a retry QuickBooks refuses after confirming no invoice exists is reported as safe to release", async () => {
+  const h = recoveryHarness({ postStatus: 400 });
+  const out = res(); await createInvoice(h.req, out);
+  assert.equal(out.body.createRejected, true); assert.equal(out.body.recoveryAbsentConfirmed, true);
+  assert.match(out.body.error, /Item is inactive/);
+  assert.equal(h.journaled(), true);
+
+  // Without a successful lookup, a refusal proves nothing about the first attempt.
+  const unchecked = recoveryHarness({ lookupFails: true, postStatus: 400 });
+  const second = res(); await createInvoice(unchecked.req, second);
+  assert.equal(second.body.createRejected, true); assert.equal(second.body.recoveryAbsentConfirmed, undefined);
+});
+
+test("a number used by a different customer keeps the review held and sends nothing", async () => {
+  const h = recoveryHarness({ found: [{ Id: "qb-other", DocNumber: "INV-1002", CustomerRef: { value: "someone-else" } }] });
+  const out = res(); await createInvoice(h.req, out);
+  assert.equal(out.statusCode, 409); assert.equal(out.body.createOutcomeUnknown, true);
+  assert.match(out.body.error, /INV-1002/);
+  assert.equal(h.calls.filter(call => call.method === "POST").length, 0);
+});

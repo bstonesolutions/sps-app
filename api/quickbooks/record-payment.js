@@ -7,6 +7,10 @@ import { getValidAccessToken, QB_API_BASE, setCors } from "./qb-store.js";
 import { requireCapability } from "../_staff-auth.js";
 import { confirmedQuickBooksWriteResponse } from "../_quickbooks-invoice-write-receipt.js";
 
+// QuickBooks answers first; saving the confirmed copy in SPS follows in the same request.
+// Vercel's default time limit could stop it in between, after QuickBooks had already saved.
+export const config = { maxDuration: 60 };
+
 export default async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
