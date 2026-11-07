@@ -17,6 +17,7 @@ import { completedVisitSource, invoiceCompletedVisitSources, reserveCompletedVis
 import { billingReviewAccountingIssue } from "./_billing-review-claims.js";
 import { BILLING_REVIEW_EDIT_FIELDS, BILLING_REVIEW_LINE_EDIT_FIELDS } from "../billingReviewReceipt.js";
 import { maintenanceCoverageOverride, newMaintenanceCoverageOverride } from "../maintenanceCoverageOverride.js";
+import { SPS_INVOICE_METADATA_FIELDS } from "../invoiceMetadata.js";
 
 export const config = { maxDuration: 60 };
 const KEYS = [BILLING_REVIEW_KEY, "sps_invoices", "sps_estimates", "sps_schedule", "sps_clients", "sps_completed", "sps_invoicing", "sps_maintenance_billing"];
@@ -139,7 +140,9 @@ function confirmedSourceCheck(invoice, snapshot) {
     }
   }
   const actualIds = new Set(snapshot.sps_invoices.value.map(row => text(row.id)));
-  const otherReviews = snapshot[BILLING_REVIEW_KEY].value.filter(review => review.reviewState !== "discarded" && !actualIds.has(text(review.id)));
+  // A confirmed review is represented by its invoice, which may be an adopted QuickBooks import.
+  const otherReviews = snapshot[BILLING_REVIEW_KEY].value.filter(review => review.reviewState !== "discarded" && !actualIds.has(text(review.id))
+    && !(review.reviewState === "synced" && [review.linkedInvoiceId, review.claimInvoiceId].some(value => text(value) && actualIds.has(text(value)))));
   const reservation = reserveCompletedVisitInvoice(invoice, [...snapshot.sps_invoices.value, ...otherReviews], client.history || [], { clientId: client.id });
   if (!reservation.ok) throw fail(409, "billing_review_source_claimed", reservation.conflict?.message || "This completed work is already linked to another billing record.");
   if (invoice.sourceEstimateId) {
@@ -148,6 +151,47 @@ function confirmedSourceCheck(invoice, snapshot) {
     if (text(estimates[0].linkedInvoiceId) && !same(estimates[0].linkedInvoiceId, invoice.id)) throw fail(409, "billing_review_estimate_already_billed", "The source estimate already has an invoice.");
   }
   return client;
+}
+
+// QuickBooks sync imports an invoice it finds no SPS record for as `qb_<id>`. When a confirm was
+// cut off after QuickBooks created the invoice, the next sync imports that same invoice before the
+// review records it. That copy is this review's invoice, not a conflict. Like the invoice editor
+// after an interrupted save, keep the imported SPS identity (the server's accounting owner) and add
+// the review's visit links and notes to it. Charges, totals and every QuickBooks field stay as
+// imported, so the database accepts it as a details-only change.
+const ADOPTED_INVOICE_FIELDS = [...SPS_INVOICE_METADATA_FIELDS.filter(key => !["source", "createdAt"].includes(key)), "sourceVisitClientId", "sourceVisitClientIds"];
+const ADOPTED_LINE_FIELDS = ["unitCost", "costKnown", "knownUnitCost", "refId", "bundleItems", "bundleNote", "chargeType", "chargeLabel",
+  "sourceEstimateLineId", "sourceVisitLineId", "sourceStopId", "sourceStopIds", "sourceCompletionReceiptId", "sourceCompletionReceiptIds",
+  "serviceMonth", "sourceVisitDates", "maintenanceService"];
+const missing = value => value == null || value === "" || (Array.isArray(value) && !value.length);
+
+function importedCopyOf(row, review, reviews) {
+  return text(row?.id).startsWith("qb_")
+    && (!text(row.billingReviewId) || same(row.billingReviewId, review.id))
+    && (!text(row.clientId) || same(row.clientId, review.clientId))
+    && !reviews.some(other => other?.recordType === "billing-review" && !same(other.id, review.id) && other.reviewState !== "discarded"
+      && [other.linkedInvoiceId, other.claimInvoiceId].some(value => text(value) && same(value, row.id)));
+}
+
+function adoptImportedInvoice(row, built, review) {
+  const adopted = { ...row };
+  for (const key of ADOPTED_INVOICE_FIELDS) if (missing(adopted[key]) && !missing(built[key])) adopted[key] = copy(built[key]);
+  if (Array.isArray(row.lineItems)) {
+    adopted.lineItems = row.lineItems.map(line => {
+      const matches = list(built.lineItems).filter(candidate => text(line?.qbLineId) && same(candidate?.qbLineId, line.qbLineId));
+      if (matches.length !== 1) return line;
+      const next = { ...line };
+      for (const key of ADOPTED_LINE_FIELDS) if (missing(next[key]) && !missing(matches[0][key])) next[key] = copy(matches[0][key]);
+      return next;
+    });
+  }
+  return { ...adopted, billingReviewId: review.id, billingConfirmedAt: review.approval.startedAt };
+}
+
+function linkConflictMessage(byId, byQuickBooks, result) {
+  const other = byQuickBooks.find(row => !byId.includes(row)) || byId[0];
+  const number = text(other?.number || result?.invoice?.number);
+  return `QuickBooks created this invoice${number ? ` (${number})` : ""}, but SPS already has ${byQuickBooks.length > 1 ? "more than one record" : "a different record"} for it. Open ${number ? `invoice ${number}` : "the invoice list"} to check it. Nothing was billed twice.`;
 }
 
 function promoteBacklink(record, review, invoice) {
@@ -204,16 +248,29 @@ export function createBillingReviewHandler(overrides = {}) {
       const snapshot = await read([BILLING_REVIEW_KEY, "sps_invoices", "sps_estimates", "sps_schedule"]);
       const review = reviewedRecord(snapshot[BILLING_REVIEW_KEY].value, id);
       if (review.reviewState === "synced") {
-        const invoice = snapshot.sps_invoices.value.find(row => same(row.id, id) && same(row.qbId, review.approval?.qbResult?.qbId));
+        const ownId = text(review.linkedInvoiceId) || id;
+        const invoice = snapshot.sps_invoices.value.find(row => same(row.id, ownId) && same(row.qbId, review.approval?.qbResult?.qbId));
         if (!invoice) throw new Error("The confirmed QuickBooks invoice is missing in SPS.");
         return { ok: true, review, invoice, reviewsVersion: snapshot[BILLING_REVIEW_KEY].version, invoicesVersion: snapshot.sps_invoices.version };
       }
       if (review.approval?.attemptId !== attemptId) throw new Error("The billing approval changed while syncing.");
-      const collision = snapshot.sps_invoices.value.find(row => same(row.id, id) || same(row.qbId, result.qbId));
-      if (collision && (!same(collision.id, id) || !same(collision.qbId, result.qbId))) throw new Error("QuickBooks is linked to another SPS record. The approval is preserved for reconciliation.");
-      const invoice = { ...applyQuickBooksInvoiceSaveResult(review.approval.invoice, result), billingReviewId: id, billingConfirmedAt: review.approval.startedAt };
+      const built = { ...applyQuickBooksInvoiceSaveResult(review.approval.invoice, result), billingReviewId: id, billingConfirmedAt: review.approval.startedAt };
+      const byId = snapshot.sps_invoices.value.filter(row => same(row.id, id));
+      const byQuickBooks = snapshot.sps_invoices.value.filter(row => text(row.qbId) && same(row.qbId, result.qbId));
+      let invoice = built;
+      let replaced = null;
+      if (byId.length || byQuickBooks.length) {
+        // The QuickBooks receipt already saved this invoice under the review's identity.
+        if (byId.length === 1 && byQuickBooks.length === 1 && byId[0] === byQuickBooks[0]) invoice = byId[0];
+        else if (!byId.length && byQuickBooks.length === 1 && importedCopyOf(byQuickBooks[0], review, snapshot[BILLING_REVIEW_KEY].value)) {
+          replaced = byQuickBooks[0];
+          invoice = adoptImportedInvoice(replaced, built, review);
+        } else throw new Error(linkConflictMessage(byId, byQuickBooks, result));
+      }
       const nextReview = { ...review, reviewState: "synced", reviewRevision: review.reviewRevision + 1, reviewUpdatedAt: nowISO(deps.now),
-        approval: { ...review.approval, state: "created", qbResult: copy(compactQuickBooksResult(result)), leaseUntil: null }, linkedInvoiceId: invoice.id };
+        approval: { ...review.approval, state: "created", qbResult: copy(compactQuickBooksResult(result)), leaseUntil: null }, linkedInvoiceId: invoice.id,
+        // Accounting claim checks recognise the adopted invoice as this review's own.
+        ...(replaced ? { claimInvoiceId: invoice.id } : {}) };
       // Rewrite only what changes. The QuickBooks receipt normally saved this invoice already, and
       // most reviews have no linked stop or estimate: those ledgers are fenced at the versions read
       // here instead of being uploaded again (the schedule upload alone was a large part of the wait).
@@ -224,7 +281,8 @@ export function createBillingReviewHandler(overrides = {}) {
       });
       const changes = {
         [BILLING_REVIEW_KEY]: snapshot[BILLING_REVIEW_KEY].value.map(row => same(row.id, id) ? nextReview : row),
-        ...(collision ? {} : { sps_invoices: [invoice, ...snapshot.sps_invoices.value] }),
+        ...(replaced ? { sps_invoices: snapshot.sps_invoices.value.map(row => row === replaced ? invoice : row) }
+          : byId.length ? {} : { sps_invoices: [invoice, ...snapshot.sps_invoices.value] }),
         ...(estimates.some((row, index) => row !== snapshot.sps_estimates.value[index]) ? { sps_estimates: estimates } : {}),
         ...(schedule.some((day, index) => day !== snapshot.sps_schedule.value[index]) ? { sps_schedule: schedule } : {}),
       };
@@ -235,7 +293,7 @@ export function createBillingReviewHandler(overrides = {}) {
         const savedReview = reviewedRecord(verified[BILLING_REVIEW_KEY].value, id);
         // A fenced ledger was unchanged at the version checked above, so its saved row still stands.
         const invoices = wroteInvoices ? verified.sps_invoices : snapshot.sps_invoices;
-        const savedInvoice = invoices.value.find(row => same(row.id, id) && same(row.qbId, result.qbId));
+        const savedInvoice = invoices.value.find(row => same(row.id, invoice.id) && same(row.qbId, result.qbId));
         if (savedReview.reviewState !== "synced" || !savedInvoice) throw new Error("SPS could not verify the final QuickBooks link.");
         return { ok: true, review: savedReview, invoice: savedInvoice, reviewsVersion: verified[BILLING_REVIEW_KEY].version, invoicesVersion: invoices.version };
       }
